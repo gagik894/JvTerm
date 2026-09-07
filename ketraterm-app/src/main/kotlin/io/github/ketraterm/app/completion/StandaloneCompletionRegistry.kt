@@ -22,9 +22,8 @@ import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.completion.persistence.TerminalCompletionLearningCoordinator
 import io.github.ketraterm.ui.swing.host.SwingCompletionContext
 import io.github.ketraterm.ui.swing.host.SwingCompletionFeedbackRecorder
+import io.github.ketraterm.ui.swing.host.SwingCompletionResources
 import io.github.ketraterm.ui.swing.host.SwingCompletionSuggestionProvider
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedbackHandler
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionProvider
 import kotlinx.coroutines.*
 import java.nio.file.Path
 
@@ -104,7 +103,7 @@ internal class StandaloneCompletionRegistry private constructor(
         profileId: String? = null,
         shellCapabilities: TerminalShellCapabilities = TerminalShellCapabilities.PLAIN,
         workingDirectoryUriProvider: () -> String? = { null },
-    ): StandaloneCompletionResources =
+    ): SwingCompletionResources =
         synchronized(lifecycleLock) {
             check(!closed) { "standalone completion registry is closed" }
             val contextProvider = {
@@ -114,7 +113,7 @@ internal class StandaloneCompletionRegistry private constructor(
                     shellCapabilities = shellCapabilities,
                 )
             }
-            StandaloneCompletionResources(
+            SwingCompletionResources(
                 provider = SwingCompletionSuggestionProvider(engine, contextProvider),
                 feedbackHandler = feedbackRecorder.createHandler(),
             )
@@ -166,6 +165,16 @@ internal class StandaloneCompletionRegistry private constructor(
         }
     }
 
+    /** Disables learning and stops persistence without a final write. */
+    suspend fun closeWithoutFlush() {
+        synchronized(lifecycleLock) { closed = true }
+        try {
+            learning.closeWithoutFlush()
+        } finally {
+            completionScope.cancel()
+        }
+    }
+
     /** Stops accepting learning events and waits for the final dirty persistence write. */
     suspend fun closeAndFlush() {
         synchronized(lifecycleLock) {
@@ -204,14 +213,3 @@ internal class StandaloneCompletionRegistry private constructor(
         }
     }
 }
-
-/**
- * Immutable completion resources consumed by one standalone terminal pane.
- *
- * @property provider popup-facing suggestion provider.
- * @property feedbackHandler acceptance and dismissal learning handler.
- */
-internal data class StandaloneCompletionResources(
-    val provider: SwingShellSuggestionProvider,
-    val feedbackHandler: SwingShellSuggestionFeedbackHandler,
-)

@@ -18,16 +18,13 @@ package io.github.ketraterm.intellij.settings
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.options.SearchableConfigurable
-import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
-import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.TextFieldWithBrowseButton
 import com.intellij.ui.components.JBCheckBox
 import com.intellij.ui.components.JBTextField
 import com.intellij.ui.dsl.builder.AlignX
 import com.intellij.ui.dsl.builder.panel
 import io.github.ketraterm.intellij.KetraTermBundle
-import io.github.ketraterm.intellij.services.KetraTermCompletionService
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import io.github.ketraterm.workspace.TerminalProfile
@@ -81,11 +78,6 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
     private val visualBellCheckBox = JBCheckBox(KetraTermBundle.message("settings.ketraterm.visualBell"))
     private val pasteOnMiddleClickCheckBox = JBCheckBox(KetraTermBundle.message("settings.ketraterm.pasteOnMiddleClick"))
     private val overrideIdeShortcutsCheckBox = JBCheckBox(KetraTermBundle.message("settings.ketraterm.overrideIdeShortcuts"))
-    private val shellSuggestionsCheckBox = JBCheckBox(KetraTermBundle.message("settings.ketraterm.shellSuggestions"))
-    private val acceptSelectedSuggestionWithEnterCheckBox =
-        JBCheckBox(KetraTermBundle.message("settings.ketraterm.acceptSelectedSuggestionWithEnter"))
-    private val completionLearningPersistenceCheckBox =
-        JBCheckBox(KetraTermBundle.message("settings.ketraterm.completionLearningPersistence"))
     private val scrollOnOutputCheckBox = JBCheckBox(KetraTermBundle.message("settings.ketraterm.scrollOnOutput"))
 
     private val pasteSanitizationCombo = ComboBox(pasteSanitizationOptions())
@@ -198,23 +190,6 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
                         cell(overrideIdeShortcutsCheckBox)
                     }
                     row {
-                        cell(shellSuggestionsCheckBox)
-                            .comment(KetraTermBundle.message("settings.ketraterm.shellSuggestions.comment"))
-                    }
-                    row {
-                        cell(acceptSelectedSuggestionWithEnterCheckBox)
-                            .comment(KetraTermBundle.message("settings.ketraterm.acceptSelectedSuggestionWithEnter.comment"))
-                    }
-                    row {
-                        cell(completionLearningPersistenceCheckBox)
-                            .comment(KetraTermBundle.message("settings.ketraterm.completionLearningPersistence.comment"))
-                    }
-                    row(KetraTermBundle.message("settings.ketraterm.completionLearningData")) {
-                        button(KetraTermBundle.message("settings.ketraterm.resetCompletionLearning")) {
-                            confirmAndResetCompletionLearning()
-                        }
-                    }
-                    row {
                         cell(scrollOnOutputCheckBox)
                     }
                 }
@@ -264,26 +239,6 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
         panel = null
     }
 
-    private fun confirmAndResetCompletionLearning() {
-        val answer =
-            Messages.showYesNoDialog(
-                null as Project?,
-                KetraTermBundle.message("settings.ketraterm.resetCompletionLearning.confirmation"),
-                KetraTermBundle.message("settings.ketraterm.resetCompletionLearning.confirmationTitle"),
-                KetraTermBundle.message("settings.ketraterm.resetCompletionLearning.confirm"),
-                Messages.getCancelButton(),
-                Messages.getWarningIcon(),
-            )
-        if (answer != Messages.YES) return
-
-        KetraTermCompletionService.getInstance().resetLearning()
-        Messages.showInfoMessage(
-            null as Project?,
-            KetraTermBundle.message("settings.ketraterm.resetCompletionLearning.complete"),
-            KetraTermBundle.message("settings.ketraterm.resetCompletionLearning.completeTitle"),
-        )
-    }
-
     private fun applyState(state: KetraTermIntellijSettings.State) {
         val normalized = KetraTermIntellijSettingsNormalizer.normalize(state)
         themeCombo.selectedItem = themeOptions().first { it.id == normalized.themeId }
@@ -305,9 +260,6 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
         visualBellCheckBox.isSelected = normalized.visualBell
         pasteOnMiddleClickCheckBox.isSelected = normalized.pasteOnMiddleClick
         overrideIdeShortcutsCheckBox.isSelected = normalized.overrideIdeShortcuts
-        shellSuggestionsCheckBox.isSelected = normalized.shellSuggestionsEnabled
-        acceptSelectedSuggestionWithEnterCheckBox.isSelected = normalized.acceptSelectedSuggestionWithEnter
-        completionLearningPersistenceCheckBox.isSelected = normalized.completionLearningPersistenceEnabled
         scrollOnOutputCheckBox.isSelected = normalized.scrollOnOutput
         pasteSanitizationCombo.selectedItem = pasteSanitizationOptions().firstOrNull { it.id == normalized.pasteSanitization }
         clipboardLocalWriteCombo.selectedItem = visiblePermissionOption(normalized.clipboardLocalWrite, "prompt")
@@ -319,7 +271,7 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
     }
 
     private fun uiState(): KetraTermIntellijSettings.State =
-        KetraTermIntellijSettings.State(
+        settings.state.copy(
             themeId = selectedThemeId(),
             fontFamily = selectedString(fontFamilyCombo),
             fallbackFontFamily = selectedString(fallbackFontFamilyCombo),
@@ -333,9 +285,6 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
             visualBell = visualBellCheckBox.isSelected,
             pasteOnMiddleClick = pasteOnMiddleClickCheckBox.isSelected,
             overrideIdeShortcuts = overrideIdeShortcutsCheckBox.isSelected,
-            shellSuggestionsEnabled = shellSuggestionsCheckBox.isSelected,
-            acceptSelectedSuggestionWithEnter = acceptSelectedSuggestionWithEnterCheckBox.isSelected,
-            completionLearningPersistenceEnabled = completionLearningPersistenceCheckBox.isSelected,
             scrollbackLines = spinnerValue(scrollbackSpinner),
             lineHeight = spinnerDoubleValue(lineHeightSpinner).toFloat(),
             shellPath = selectedShellPath(),

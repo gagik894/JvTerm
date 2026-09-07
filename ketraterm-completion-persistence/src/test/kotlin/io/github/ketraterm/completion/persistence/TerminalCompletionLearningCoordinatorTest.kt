@@ -33,6 +33,61 @@ import kotlin.time.Duration.Companion.milliseconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class TerminalCompletionLearningCoordinatorTest {
     @Test
+    fun `non-flushing close cancels pending hydration without reading or writing`() =
+        runTest {
+            val files = RecordingSnapshotFiles()
+            val coordinator = coordinator(TerminalCompletionLearningStore(), files)
+            coordinator.recordCommandResult("git status", true, null, null, 1L)
+            coordinator.closeWithoutFlush()
+            advanceUntilIdle()
+            assertEquals(0, files.loadCount.get())
+            assertEquals(0, files.writeAttempts.get())
+        }
+
+    @Test
+    fun `non-flushing close drops dirty checkpoint and rejects subsequent feedback`() =
+        runTest {
+            val files = RecordingSnapshotFiles()
+            val learning = TerminalCompletionLearningStore()
+            val coordinator = coordinator(learning, files)
+            runCurrent()
+            coordinator.recordCommandResult("git status", true, null, null, 1L)
+            runCurrent()
+            coordinator.closeWithoutFlush()
+            val snapshot = learning.snapshot()
+            assertFailsWith<IllegalStateException> { coordinator.recordCommandResult("git branch", true, null, null, 2L) }
+            coordinator.closeWithoutFlush()
+            advanceTimeBy((CHECKPOINT_INTERVAL_MILLIS * 2).milliseconds)
+            runCurrent()
+            assertEquals(snapshot, learning.snapshot())
+            assertTrue(files.writes.isEmpty())
+        }
+
+    @Test
+    fun `non-flushing close awaits in-flight load and prevents later checkpoint`() =
+        runTest {
+            val loadStarted = CountDownLatch(1)
+            val releaseLoad = CountDownLatch(1)
+            val files =
+                RecordingSnapshotFiles(beforeLoad = {
+                    loadStarted.countDown()
+                    check(releaseLoad.await(5, TimeUnit.SECONDS))
+                })
+            val coordinator = coordinator(TerminalCompletionLearningStore(), files, ioDispatcher = Dispatchers.IO)
+            try {
+                assertTrue(loadStarted.await(5, TimeUnit.SECONDS))
+                coordinator.recordCommandResult("git status", true, null, null, 1L)
+                val closing = launch(start = CoroutineStart.UNDISPATCHED) { coordinator.closeWithoutFlush() }
+                assertFalse(closing.isCompleted)
+                releaseLoad.countDown()
+                closing.join()
+                assertTrue(files.writes.isEmpty())
+            } finally {
+                releaseLoad.countDown()
+            }
+        }
+
+    @Test
     fun `reset clears memory and persists empty state immediately when persistence is disabled`() =
         runTest {
             val files = RecordingSnapshotFiles()

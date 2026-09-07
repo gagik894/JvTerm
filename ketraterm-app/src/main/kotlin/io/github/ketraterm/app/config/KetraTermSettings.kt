@@ -166,6 +166,12 @@ internal class KetraTermSettings(
             updateConfig(config.copy(persistentSuggestionLearningEnabled = value))
         }
 
+    var smartSuggestionsEnabled: Boolean
+        get() = config.smartSuggestionsEnabled
+        set(value) {
+            updateConfig(config.copy(smartSuggestionsEnabled = value))
+        }
+
     var shellSuggestionsEnabled: Boolean
         get() = config.shellSuggestionsEnabled
         set(value) {
@@ -241,6 +247,7 @@ internal class KetraTermSettings(
             lineHeight = config.lineHeight,
             shellRequestResizeWindow = config.shellRequestResizeWindow,
             shellRequestWindowManipulation = config.shellRequestWindowManipulation,
+            smartSuggestionsEnabled = config.smartSuggestionsEnabled,
             shellSuggestionsEnabled = config.shellSuggestionsEnabled,
             acceptSelectedSuggestionWithEnter = config.acceptSelectedSuggestionWithEnter,
             scrollOnOutput = config.scrollOnOutput,

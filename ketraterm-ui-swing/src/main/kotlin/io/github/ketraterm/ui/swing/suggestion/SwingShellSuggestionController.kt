@@ -65,7 +65,7 @@ internal class SwingShellSuggestionController(
         selectedIndex: Int,
         preserveSelectedOutcome: Boolean,
     ): Boolean {
-        if (suggestions.isEmpty()) {
+        if (!host.settings.smartSuggestionsEnabled || suggestions.isEmpty()) {
             hide()
             return false
         }
@@ -110,7 +110,7 @@ internal class SwingShellSuggestionController(
     }
 
     fun handleKeyPressed(event: KeyEvent): Boolean {
-        if (!view.component.isVisible || suggestions.isEmpty()) return false
+        if (!host.settings.smartSuggestionsEnabled || !view.component.isVisible || suggestions.isEmpty()) return false
         val action = host.suggestionKeymap.actionFor(event) ?: return false
         val enterAcceptanceDisabled =
             action == SwingShellSuggestionAction.ACCEPT_SELECTED &&
@@ -204,7 +204,7 @@ internal class SwingShellSuggestionController(
     }
 
     private fun acceptSelected(): Boolean {
-        if (selectedIndex !in suggestions.indices) return false
+        if (!host.settings.smartSuggestionsEnabled || selectedIndex !in suggestions.indices) return false
         val suggestion = suggestions[selectedIndex]
         val index = selectedIndex
         val acceptedRequest = request

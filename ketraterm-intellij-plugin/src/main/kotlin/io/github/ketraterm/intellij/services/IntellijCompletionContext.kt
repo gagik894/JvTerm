@@ -20,8 +20,6 @@ import io.github.ketraterm.completion.api.TerminalShellCapabilities
 import io.github.ketraterm.completion.host.TerminalBoundedDirectoryScanner
 import io.github.ketraterm.completion.host.TerminalDirectoryScanner
 import io.github.ketraterm.ui.swing.host.SwingCompletionContext
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedbackHandler
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionProvider
 
 /**
  * Host context used to create one testable IntelliJ completion provider.
@@ -52,14 +50,3 @@ internal data class IntellijCompletionContext(
             shellCapabilities = shellCapabilities,
         )
 }
-
-/**
- * Immutable completion resources consumed by one IntelliJ terminal pane.
- *
- * @property provider popup-facing suggestion provider.
- * @property feedbackHandler acceptance and dismissal learning handler.
- */
-internal data class IntellijCompletionResources(
-    val provider: SwingShellSuggestionProvider,
-    val feedbackHandler: SwingShellSuggestionFeedbackHandler,
-)

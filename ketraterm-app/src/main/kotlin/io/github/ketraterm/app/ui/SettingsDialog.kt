@@ -39,7 +39,6 @@ internal class SettingsDialog(
     parent: JFrame,
     private val settings: KetraTermSettings,
     private val profileRegistry: TerminalProfileRegistry,
-    private val onResetCompletionLearning: () -> Unit,
     private val onApply: () -> Unit,
 ) : JDialog(parent, "Terminal Settings", true) {
     private val cardLayout = CardLayout()
@@ -190,16 +189,6 @@ internal class SettingsDialog(
     private val shellRequestResizeWindowCheckbox = JCheckBox("Allow window resize from shell", settings.shellRequestResizeWindow)
     private val shellRequestWindowManipulationCheckbox =
         JCheckBox("Allow window manipulation from shell", settings.shellRequestWindowManipulation)
-    private val shellSuggestionsCheckbox =
-        JCheckBox("Show shell suggestions automatically", settings.shellSuggestionsEnabled)
-    private val acceptSelectedSuggestionWithEnterCheckbox =
-        JCheckBox("Accept selected suggestion with Enter", settings.acceptSelectedSuggestionWithEnter)
-    private val persistentSuggestionLearningCheckbox =
-        JCheckBox("Persist suggestion learning", settings.persistentSuggestionLearningEnabled)
-    private val resetCompletionLearningButton =
-        JButton("Reset completion learning...").apply {
-            addActionListener { confirmAndResetCompletionLearning() }
-        }
     private val scrollOnOutputCheckbox = JCheckBox("Scroll on output", settings.scrollOnOutput)
     private val cursorBlinkSpinner =
         createSpinner(settings.cursorBlinkMillis, TerminalConfig.CURSOR_BLINK_MIN, TerminalConfig.CURSOR_BLINK_MAX, 50, 70)
@@ -295,9 +284,6 @@ internal class SettingsDialog(
         registerChangeListener(pasteSanitizationCombo, updateApplyState)
         registerChangeListener(shellRequestResizeWindowCheckbox, updateApplyState)
         registerChangeListener(shellRequestWindowManipulationCheckbox, updateApplyState)
-        registerChangeListener(shellSuggestionsCheckbox, updateApplyState)
-        registerChangeListener(acceptSelectedSuggestionWithEnterCheckbox, updateApplyState)
-        registerChangeListener(persistentSuggestionLearningCheckbox, updateApplyState)
         registerChangeListener(scrollOnOutputCheckbox, updateApplyState)
         registerChangeListener(cursorBlinkSpinner, updateApplyState)
         registerChangeListener(cursorShapeCombo, updateApplyState)
@@ -425,17 +411,6 @@ internal class SettingsDialog(
         )
         panel.add(appSection)
 
-        panel.add(SectionHeader("Shell Suggestions"))
-        val historySection = createSectionPanel()
-        addCheckboxRow(
-            historySection,
-            0,
-            persistentSuggestionLearningCheckbox,
-            "Persist a bounded, sanitized completion-learning snapshot across app restarts. Terminal output is never stored.",
-        )
-        addFormRow(historySection, 2, "Learning data:", resetCompletionLearningButton)
-        panel.add(historySection)
-
         return panel
     }
 
@@ -519,18 +494,6 @@ internal class SettingsDialog(
             0,
             treatAmbiguousCheckbox,
             "Render East Asian ambiguous characters (e.g. smart quotes, emojis) with double cell width.",
-        )
-        addCheckboxRow(
-            keyboardSection,
-            2,
-            shellSuggestionsCheckbox,
-            "Show suggestions while typing. Ctrl+Space requests them manually when this is disabled.",
-        )
-        addCheckboxRow(
-            keyboardSection,
-            4,
-            acceptSelectedSuggestionWithEnterCheckbox,
-            "Insert the highlighted suggestion with Enter. With no selection, Enter runs the command normally.",
         )
         panel.add(keyboardSection)
 
@@ -739,26 +702,6 @@ internal class SettingsDialog(
             this@SettingsDialog.rootPane.defaultButton = okButton
         }
 
-    private fun confirmAndResetCompletionLearning() {
-        val answer =
-            JOptionPane.showConfirmDialog(
-                this,
-                "This deletes learned commands and suggestion ranking signals. This action cannot be undone.",
-                "Reset Completion Learning?",
-                JOptionPane.YES_NO_OPTION,
-                JOptionPane.WARNING_MESSAGE,
-            )
-        if (answer != JOptionPane.YES_OPTION) return
-
-        onResetCompletionLearning()
-        JOptionPane.showMessageDialog(
-            this,
-            "Completion learning has been reset.",
-            "Completion Learning Reset",
-            JOptionPane.INFORMATION_MESSAGE,
-        )
-    }
-
     private fun resetToDefaults() {
         val defaultProfile =
             availableProfiles.firstOrNull { profile ->
@@ -792,10 +735,6 @@ internal class SettingsDialog(
             }
         shellRequestResizeWindowCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_REQUEST_RESIZE_WINDOW
         shellRequestWindowManipulationCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_REQUEST_WINDOW_MANIPULATION
-        shellSuggestionsCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_SUGGESTIONS_ENABLED
-        acceptSelectedSuggestionWithEnterCheckbox.isSelected =
-            TerminalConfig.DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER
-        persistentSuggestionLearningCheckbox.isSelected = TerminalConfig.DEFAULT_PERSISTENT_SUGGESTION_LEARNING_ENABLED
         scrollOnOutputCheckbox.isSelected = TerminalConfig.DEFAULT_SCROLL_ON_OUTPUT
         cursorBlinkSpinner.value = TerminalConfig.DEFAULT_CURSOR_BLINK_MILLIS
         cursorShapeCombo.selectedItem = TerminalConfig.DEFAULT_CURSOR_SHAPE
@@ -867,9 +806,6 @@ internal class SettingsDialog(
             lineHeight = lineHeightSpinner.value as? Double ?: TerminalConfig.DEFAULT_LINE_HEIGHT.toDouble(),
             shellRequestResizeWindow = shellRequestResizeWindowCheckbox.isSelected,
             shellRequestWindowManipulation = shellRequestWindowManipulationCheckbox.isSelected,
-            shellSuggestionsEnabled = shellSuggestionsCheckbox.isSelected,
-            acceptSelectedSuggestionWithEnter = acceptSelectedSuggestionWithEnterCheckbox.isSelected,
-            persistentSuggestionLearningEnabled = persistentSuggestionLearningCheckbox.isSelected,
             clipboardLocalWrite =
                 TerminalClipboardPermission.valueOf(
                     (clipboardLocalWriteCombo.selectedItem as String).uppercase(Locale.ROOT),

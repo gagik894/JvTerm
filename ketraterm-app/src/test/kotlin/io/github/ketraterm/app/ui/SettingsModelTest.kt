@@ -44,6 +44,20 @@ class SettingsModelTest {
     }
 
     @Test
+    fun `unrelated settings changes preserve hidden suggestion preferences`() {
+        settings.smartSuggestionsEnabled = true
+        settings.shellSuggestionsEnabled = false
+        settings.acceptSelectedSuggestionWithEnter = false
+        settings.persistentSuggestionLearningEnabled = true
+        model.applyChanges(model.getSettingsState().copy(fontSize = 24)) {}
+        assertTrue(settings.smartSuggestionsEnabled)
+        assertFalse(settings.shellSuggestionsEnabled)
+        assertFalse(settings.acceptSelectedSuggestionWithEnter)
+        assertTrue(settings.persistentSuggestionLearningEnabled)
+        assertTrue(settings.current().smartSuggestionsEnabled)
+    }
+
+    @Test
     fun testInitialStateMatchesSettings() {
         val state = model.getSettingsState()
         assertEquals(settings.theme.name, state.theme)
@@ -54,9 +68,6 @@ class SettingsModelTest {
         assertEquals(settings.pasteSanitizationPolicy, state.pasteSanitizationPolicy)
         assertEquals(settings.shellRequestResizeWindow, state.shellRequestResizeWindow)
         assertEquals(settings.shellRequestWindowManipulation, state.shellRequestWindowManipulation)
-        assertEquals(settings.shellSuggestionsEnabled, state.shellSuggestionsEnabled)
-        assertEquals(settings.acceptSelectedSuggestionWithEnter, state.acceptSelectedSuggestionWithEnter)
-        assertEquals(settings.persistentSuggestionLearningEnabled, state.persistentSuggestionLearningEnabled)
         assertEquals(settings.scrollOnOutput, state.scrollOnOutput)
         assertFalse(model.hasChanges(state))
     }
@@ -94,9 +105,6 @@ class SettingsModelTest {
                 pasteSanitizationPolicy = io.github.ketraterm.input.policy.PasteSanitizationPolicy.STRIP_C0_EXCEPT_TAB_CR_LF,
                 shellRequestResizeWindow = true,
                 shellRequestWindowManipulation = true,
-                shellSuggestionsEnabled = false,
-                acceptSelectedSuggestionWithEnter = false,
-                persistentSuggestionLearningEnabled = true,
                 clipboardLocalWrite = TerminalClipboardPermission.ALLOW,
                 clipboardRemoteWrite = TerminalClipboardPermission.ALLOWLIST,
                 clipboardRead = TerminalClipboardPermission.PROMPT,
@@ -120,9 +128,6 @@ class SettingsModelTest {
         assertEquals(io.github.ketraterm.input.policy.PasteSanitizationPolicy.STRIP_C0_EXCEPT_TAB_CR_LF, settings.pasteSanitizationPolicy)
         assertTrue(settings.shellRequestResizeWindow)
         assertTrue(settings.shellRequestWindowManipulation)
-        assertFalse(settings.shellSuggestionsEnabled)
-        assertFalse(settings.acceptSelectedSuggestionWithEnter)
-        assertTrue(settings.persistentSuggestionLearningEnabled)
         assertEquals(TerminalClipboardPermission.ALLOW, settings.clipboardLocalWrite)
         assertEquals(TerminalClipboardPermission.ALLOWLIST, settings.clipboardRemoteWrite)
         assertEquals(TerminalClipboardPermission.PROMPT, settings.clipboardRead)

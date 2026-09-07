@@ -50,9 +50,6 @@ internal class SettingsModel(
             lineHeight = settings.lineHeight.toDouble(),
             shellRequestResizeWindow = settings.shellRequestResizeWindow,
             shellRequestWindowManipulation = settings.shellRequestWindowManipulation,
-            shellSuggestionsEnabled = settings.shellSuggestionsEnabled,
-            acceptSelectedSuggestionWithEnter = settings.acceptSelectedSuggestionWithEnter,
-            persistentSuggestionLearningEnabled = settings.persistentSuggestionLearningEnabled,
             clipboardLocalWrite = settings.clipboardLocalWrite,
             clipboardRemoteWrite = settings.clipboardRemoteWrite,
             clipboardRead = settings.clipboardRead,
@@ -87,9 +84,6 @@ internal class SettingsModel(
         settings.lineHeight = uiState.lineHeight.toFloat()
         settings.shellRequestResizeWindow = uiState.shellRequestResizeWindow
         settings.shellRequestWindowManipulation = uiState.shellRequestWindowManipulation
-        settings.shellSuggestionsEnabled = uiState.shellSuggestionsEnabled
-        settings.acceptSelectedSuggestionWithEnter = uiState.acceptSelectedSuggestionWithEnter
-        settings.persistentSuggestionLearningEnabled = uiState.persistentSuggestionLearningEnabled
 
         settings.fontFamily = uiState.fontFamily
         settings.fontSize = uiState.fontSize
@@ -134,9 +128,6 @@ internal data class SettingsState(
     val lineHeight: Double,
     val shellRequestResizeWindow: Boolean,
     val shellRequestWindowManipulation: Boolean,
-    val shellSuggestionsEnabled: Boolean,
-    val acceptSelectedSuggestionWithEnter: Boolean,
-    val persistentSuggestionLearningEnabled: Boolean,
     val clipboardLocalWrite: TerminalClipboardPermission,
     val clipboardRemoteWrite: TerminalClipboardPermission,
     val clipboardRead: TerminalClipboardPermission,

@@ -203,6 +203,7 @@ class TerminalWorkspaceConfigManager(
                 shellRequestResizeWindow = shellRequestResizeWindow,
                 shellRequestWindowManipulation = shellRequestWindowManipulation,
                 desktopNotificationsEnabled = desktopNotificationsEnabled,
+                smartSuggestionsEnabled = behavior["smart_suggestions_enabled"]?.toBooleanStrictOrNull() ?: default.smartSuggestionsEnabled,
                 shellSuggestionsEnabled = shellSuggestionsEnabled,
                 acceptSelectedSuggestionWithEnter = acceptSelectedSuggestionWithEnter,
                 persistentSuggestionLearningEnabled = persistentSuggestionLearningEnabled,
@@ -305,6 +306,7 @@ class TerminalWorkspaceConfigManager(
         # Whether to enable desktop notifications when the terminal receives OSC 9 or OSC 777 sequences
         desktop_notifications_enabled = ${config.desktopNotificationsEnabled}
         # Whether host-provided shell suggestions may appear in the terminal UI
+        smart_suggestions_enabled = ${config.smartSuggestionsEnabled}
         shell_suggestions_enabled = ${config.shellSuggestionsEnabled}
         # Whether Enter accepts an already-selected suggestion; with no selection Enter reaches the shell
         accept_selected_suggestion_with_enter = ${config.acceptSelectedSuggestionWithEnter}

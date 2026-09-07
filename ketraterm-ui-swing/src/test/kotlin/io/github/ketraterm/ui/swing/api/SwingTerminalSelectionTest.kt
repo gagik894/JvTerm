@@ -302,7 +302,7 @@ class SwingTerminalSelectionTest {
         val component =
             SwingTerminal(
                 settingsProvider = {
-                    SwingSettings(padding = Insets(0, 0, 0, 0))
+                    SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0))
                 },
                 hostServices =
                     SwingHostServices(

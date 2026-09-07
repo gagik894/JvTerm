@@ -23,6 +23,7 @@ import io.github.ketraterm.completion.persistence.TerminalCompletionLearningCoor
 import io.github.ketraterm.session.TerminalShellIntegrationCommandLifecycle
 import io.github.ketraterm.session.TerminalShellIntegrationCommandMetadata
 import io.github.ketraterm.ui.swing.host.SwingCompletionFeedbackRecorder
+import io.github.ketraterm.ui.swing.host.SwingCompletionResources
 import io.github.ketraterm.ui.swing.host.SwingCompletionSuggestionProvider
 import kotlinx.coroutines.CoroutineScope
 import java.nio.file.Path
@@ -80,7 +81,7 @@ internal class IntellijCompletionRegistry(
      * @return provider and feedback resources for the pane.
      * @throws IllegalStateException if this registry is closed.
      */
-    fun createResources(context: IntellijCompletionContext): IntellijCompletionResources {
+    fun createResources(context: IntellijCompletionContext): SwingCompletionResources {
         synchronized(lock) {
             check(!closed) { "IntelliJ completion registry is closed" }
             val fileSystemProvider = TerminalLocalFileSystemProvider(scanner = context.directoryScanner)
@@ -100,7 +101,7 @@ internal class IntellijCompletionRegistry(
                     commandSpecs = commandSpecs,
                     learningStore = learningStore,
                 )
-            return IntellijCompletionResources(
+            return SwingCompletionResources(
                 provider = SwingCompletionSuggestionProvider(engine, context::swingContext),
                 feedbackHandler = feedbackRecorder.createHandler(),
             )
@@ -148,6 +149,12 @@ internal class IntellijCompletionRegistry(
         synchronized(lock) {
             if (!closed) learning.resetLearning()
         }
+    }
+
+    /** Disables learning and stops persistence without a final write. */
+    suspend fun closeWithoutFlush() {
+        synchronized(lock) { closed = true }
+        learning.closeWithoutFlush()
     }
 
     /** Stops accepting learning events and waits for the final dirty persistence write. */

@@ -25,6 +25,24 @@ class SwingShellSuggestionControllerTest {
     private val source = JPanel()
 
     @Test
+    fun `master off rejects keyboard and pointer acceptance of an existing popup`() =
+        onEdt {
+            val host = RecordingSuggestionHost()
+            lateinit var view: RecordingSuggestionView
+            val controller =
+                SwingShellSuggestionController(host, viewFactory = { listener ->
+                    RecordingSuggestionView(listener).also { view = it }
+                })
+            controller.show(request(), suggestions(2), selectedIndex = 0)
+            host.settings = host.settings.copy(smartSuggestionsEnabled = false)
+            assertFalse(controller.handleKeyPressed(keyPressed(KeyEvent.VK_TAB)))
+            view.listener.onSuggestionClicked(0)
+            assertTrue(host.acceptedSuggestions.isEmpty())
+            assertTrue(host.feedbackKinds.isEmpty())
+            assertFalse(controller.show(request(), suggestions(2), selectedIndex = 0))
+        }
+
+    @Test
     fun `show publishes visible state with explicit selection and anchor`() =
         onEdt {
             val host = RecordingSuggestionHost()
@@ -80,7 +98,7 @@ class SwingShellSuggestionControllerTest {
     @Test
     fun `explicit display is independent of automatic suggestion setting`() =
         onEdt {
-            val host = RecordingSuggestionHost(settings = SwingSettings(shellSuggestionsEnabled = false))
+            val host = RecordingSuggestionHost(settings = SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false))
             val controller = SwingShellSuggestionController(host)
 
             val shown = controller.show(request(), suggestions(2), selectedIndex = 0)
@@ -324,7 +342,7 @@ class SwingShellSuggestionControllerTest {
         onEdt {
             val host =
                 RecordingSuggestionHost(
-                    settings = SwingSettings(acceptSelectedSuggestionWithEnter = false),
+                    settings = SwingSettings(smartSuggestionsEnabled = true, acceptSelectedSuggestionWithEnter = false),
                 )
             val controller = SwingShellSuggestionController(host)
             val items = suggestions(2)
@@ -598,7 +616,7 @@ class SwingShellSuggestionControllerTest {
         )
 
     private class RecordingSuggestionHost(
-        override var settings: SwingSettings = SwingSettings(),
+        override var settings: SwingSettings = SwingSettings(smartSuggestionsEnabled = true),
         override val suggestionKeymap: SwingShellSuggestionKeymap = SwingShellSuggestionKeymap.STANDARD,
         private val failAcceptance: Boolean = false,
     ) : SwingShellSuggestionHost {

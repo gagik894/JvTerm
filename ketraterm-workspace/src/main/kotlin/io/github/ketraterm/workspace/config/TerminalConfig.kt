@@ -71,8 +71,9 @@ private fun defaultFontFamily(): String {
  * @property lineHeight font metric line-height multiplier.
  * @property shellRequestResizeWindow whether shell application window/grid resize requests are honored.
  * @property desktopNotificationsEnabled whether desktop notifications are enabled.
+ * @property smartSuggestionsEnabled whether completion, learning, and completion persistence are available.
  * @property shellSuggestionsEnabled whether host-provided shell suggestions may
- * appear automatically. Explicit user requests remain available when disabled.
+ * appear automatically. Explicit requests require only [smartSuggestionsEnabled].
  * @property acceptSelectedSuggestionWithEnter whether Enter accepts an
  * already-selected shell suggestion while leaving unselected Enter presses to
  * the shell.
@@ -106,6 +107,7 @@ data class TerminalConfig(
     val shellRequestResizeWindow: Boolean = DEFAULT_SHELL_REQUEST_RESIZE_WINDOW,
     val shellRequestWindowManipulation: Boolean = DEFAULT_SHELL_REQUEST_WINDOW_MANIPULATION,
     val desktopNotificationsEnabled: Boolean = DEFAULT_DESKTOP_NOTIFICATIONS_ENABLED,
+    val smartSuggestionsEnabled: Boolean = DEFAULT_SMART_SUGGESTIONS_ENABLED,
     val shellSuggestionsEnabled: Boolean = DEFAULT_SHELL_SUGGESTIONS_ENABLED,
     val acceptSelectedSuggestionWithEnter: Boolean = DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER,
     val persistentSuggestionLearningEnabled: Boolean = DEFAULT_PERSISTENT_SUGGESTION_LEARNING_ENABLED,
@@ -175,6 +177,7 @@ data class TerminalConfig(
         const val DEFAULT_SHELL_REQUEST_RESIZE_WINDOW: Boolean = false
         const val DEFAULT_SHELL_REQUEST_WINDOW_MANIPULATION: Boolean = false
         const val DEFAULT_DESKTOP_NOTIFICATIONS_ENABLED: Boolean = true
+        const val DEFAULT_SMART_SUGGESTIONS_ENABLED: Boolean = false
         const val DEFAULT_SHELL_SUGGESTIONS_ENABLED: Boolean = true
         const val DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER: Boolean = true
         const val DEFAULT_PERSISTENT_SUGGESTION_LEARNING_ENABLED: Boolean = false

@@ -18,9 +18,19 @@ package io.github.ketraterm.app.ui
 import io.github.ketraterm.ui.swing.host.SwingTerminalHostAction
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class TerminalPaneShortcutControllerTest {
+    @Test
+    fun `disabled completion action leaves input unclaimed`() {
+        val target = RecordingActionTarget(enabled = false)
+        assertFalse(TerminalPaneActionRegistry.isEnabled(SwingTerminalHostAction.REQUEST_SUGGESTIONS, target))
+        assertFalse(TerminalPaneActionRegistry.perform(SwingTerminalHostAction.REQUEST_SUGGESTIONS, target))
+        assertEquals(0, target.requestSuggestionsCount)
+        assertTrue(TerminalPaneActionRegistry.perform(SwingTerminalHostAction.OPEN_SEARCH, target))
+    }
+
     @Test
     fun openSearchActionOpensHostSearchChrome() {
         val target = RecordingActionTarget()
@@ -43,7 +53,9 @@ class TerminalPaneShortcutControllerTest {
         assertEquals(1, target.requestSuggestionsCount)
     }
 
-    private class RecordingActionTarget : TerminalPaneActionTarget {
+    private class RecordingActionTarget(
+        val enabled: Boolean = true,
+    ) : TerminalPaneActionTarget {
         var openSearchCount: Int = 0
             private set
         var copyCount: Int = 0
@@ -56,6 +68,8 @@ class TerminalPaneShortcutControllerTest {
             private set
         var requestSuggestionsCount: Int = 0
             private set
+
+        override fun suggestionsEnabled(): Boolean = enabled
 
         override fun hasSelection(): Boolean = false
 

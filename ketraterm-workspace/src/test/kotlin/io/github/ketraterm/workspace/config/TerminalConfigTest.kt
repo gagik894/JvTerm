@@ -25,6 +25,24 @@ import kotlin.test.*
 
 class TerminalConfigTest {
     @Test
+    fun `missing master flag stays off even when legacy preferences are on`() {
+        val directory = Files.createTempDirectory("ketraterm-suggestions-default")
+        val path = directory.resolve("config.toml")
+        try {
+            Files.writeString(path, "[behavior]\nshell_suggestions_enabled = true\npersistent_suggestion_learning_enabled = true\n")
+            val manager = TerminalWorkspaceConfigManager(path)
+            val config = manager.load()
+            assertFalse(config.smartSuggestionsEnabled)
+            manager.save(config.copy(smartSuggestionsEnabled = true))
+            assertTrue(manager.load().smartSuggestionsEnabled)
+            assertTrue(Files.readString(path).contains("smart_suggestions_enabled = true"))
+        } finally {
+            Files.deleteIfExists(path)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
     fun `test TomlParser parses sections keys and values correctly`() {
         val toml =
             """
@@ -128,6 +146,7 @@ class TerminalConfigTest {
         assertEquals(PasteSanitizationPolicy.RAW, config.pasteSanitizationPolicy)
         assertFalse(config.shellRequestResizeWindow)
         assertFalse(config.shellRequestWindowManipulation)
+        assertFalse(config.smartSuggestionsEnabled)
         assertTrue(config.shellSuggestionsEnabled)
         assertTrue(config.acceptSelectedSuggestionWithEnter)
         assertFalse(config.persistentSuggestionLearningEnabled)
@@ -152,6 +171,7 @@ class TerminalConfigTest {
         val customConfig =
             TerminalConfig(
                 theme = "nord",
+                smartSuggestionsEnabled = true,
                 treatAmbiguousAsWide = true,
                 fontFamily = "JetBrains Mono",
                 fontSize = 18,

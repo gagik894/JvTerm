@@ -215,6 +215,16 @@ class TerminalCompletionLearningCoordinator
             }?.let { throw it }
         }
 
+        /** Stops learning and awaits the worker without loading or saving pending state. */
+        suspend fun closeWithoutFlush() {
+            synchronized(stateLock) {
+                acceptingEvents = false
+                closeRequested = true
+                persistenceEnabled = false
+            }
+            worker.cancelAndJoin()
+        }
+
         private suspend fun runWorker() {
             try {
                 while (true) {

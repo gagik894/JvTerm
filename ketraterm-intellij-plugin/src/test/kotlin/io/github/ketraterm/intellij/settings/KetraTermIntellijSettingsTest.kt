@@ -31,6 +31,20 @@ import java.awt.Insets
  */
 class KetraTermIntellijSettingsTest {
     @Test
+    fun `smart suggestions default off and map independently from automatic popup`() {
+        val defaults = KetraTermIntellijSettings.State(themeId = "nord")
+        assertFalse(defaults.smartSuggestionsEnabled)
+        assertTrue(defaults.shellSuggestionsEnabled)
+        val mapped =
+            KetraTermIntellijSettingsMapper.toSwingSettings(
+                defaults.copy(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false),
+            )
+        assertTrue(mapped.smartSuggestionsEnabled)
+        assertFalse(mapped.shellSuggestionsEnabled)
+        assertFalse(KetraTermIntellijSettingsMapper.toSwingSettings(defaults).smartSuggestionsEnabled)
+    }
+
+    @Test
     fun `default theme id follows IntelliJ`() {
         val state = KetraTermIntellijSettings.State()
 

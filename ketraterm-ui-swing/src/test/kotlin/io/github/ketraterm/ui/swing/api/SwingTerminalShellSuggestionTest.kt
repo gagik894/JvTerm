@@ -44,6 +44,79 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class SwingTerminalShellSuggestionTest {
     @Test
+    fun `master off rejects supplied automatic and explicit suggestions`() {
+        val connector = RecordingConnector()
+        val session = activeSuggestionSession(connector)
+        connector.feedFromHost("\u001B]133;A\u0007PS> \u001B]133;B\u0007git s".utf8())
+        SwingUtilities.invokeAndWait {
+            val component =
+                SwingTerminal(
+                    hostServices =
+                        SwingHostServices(
+                            shellSuggestionProvider = SwingShellSuggestionProvider { error("Disabled provider was invoked") },
+                            shellSuggestionViewFactory = SwingShellSuggestionViewFactory { error("Disabled view was constructed") },
+                            shellSuggestionHandler = SwingShellSuggestionHandler { error("Disabled suggestion was accepted") },
+                        ),
+                )
+            try {
+                component.bind(session)
+                component.requestShellSuggestions("git s", 5, 5, 0)
+                component.requestActiveShellSuggestions()
+                component.showShellSuggestions(request(), suggestions())
+                assertFalse(component.currentShellSuggestionState().visible)
+                assertFalse(component.isAutomaticShellSuggestionEligible())
+            } finally {
+                component.dispose()
+            }
+        }
+        session.close()
+    }
+
+    @Test
+    fun `master off cancels explicit request while automatic popup was already off`() {
+        val connector = RecordingConnector()
+        val session = activeSuggestionSession(connector)
+        connector.feedFromHost("\u001B]133;A\u0007PS> \u001B]133;B\u0007git s".utf8())
+        var settings = SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false)
+        val started = CompletableDeferred<Unit>()
+        val cancelled = CompletableDeferred<Unit>()
+        val component =
+            SwingTerminal(
+                settingsProvider = { settings },
+                hostServices =
+                    SwingHostServices(
+                        shellSuggestionProvider =
+                            SwingShellSuggestionProvider {
+                                flow {
+                                    started.complete(Unit)
+                                    try {
+                                        awaitCancellation()
+                                    } finally {
+                                        cancelled.complete(Unit)
+                                    }
+                                }
+                            },
+                    ),
+            )
+        try {
+            SwingUtilities.invokeAndWait {
+                component.bind(session)
+                component.requestActiveShellSuggestions()
+            }
+            runBlocking { withTimeout(2_000.milliseconds) { started.await() } }
+            SwingUtilities.invokeAndWait {
+                settings = settings.copy(smartSuggestionsEnabled = false)
+                component.reloadSettings()
+                assertFalse(component.currentShellSuggestionState().visible)
+            }
+            runBlocking { withTimeout(2_000.milliseconds) { cancelled.await() } }
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
     fun `suggestion popup fits around the prompt in short terminals`() {
         SwingUtilities.invokeAndWait {
             val view =
@@ -54,7 +127,7 @@ class SwingTerminalShellSuggestionTest {
                 }
             val terminal =
                 SwingTerminal(
-                    settingsProvider = { SwingSettings(padding = Insets(5, 4, 7, 6)) },
+                    settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(5, 4, 7, 6)) },
                     hostServices = SwingHostServices(shellSuggestionViewFactory = SwingShellSuggestionViewFactory { view }),
                 )
             try {
@@ -85,7 +158,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -132,7 +205,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -170,7 +243,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -206,7 +279,7 @@ class SwingTerminalShellSuggestionTest {
 
     @Test
     fun `shell input hides popup before invalidation listeners run`() {
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
         val visibleDuringInvalidation = ArrayList<Boolean>()
         val listener =
             SwingShellSuggestionInvalidationListener {
@@ -226,7 +299,7 @@ class SwingTerminalShellSuggestionTest {
     @Test
     fun `clear screen hides popup before command bytes are submitted`() {
         val session = activeSuggestionSession(RecordingConnector())
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
         val visibleDuringInvalidation = ArrayList<Boolean>()
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 4)
@@ -251,7 +324,7 @@ class SwingTerminalShellSuggestionTest {
         val requests = ArrayList<SwingShellSuggestionRequest>()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionHandler =
@@ -287,7 +360,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -355,7 +428,7 @@ class SwingTerminalShellSuggestionTest {
         val session = activeSuggestionSession(connector)
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { flowOf(suggestions("git s")) },
@@ -395,7 +468,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { emissions.receiveAsFlow() },
@@ -447,7 +520,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { emissions.receiveAsFlow() },
@@ -500,7 +573,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -547,7 +620,7 @@ class SwingTerminalShellSuggestionTest {
         connector.feedFromHost("\u001B]133;A\u0007PS> \u001B]133;B\u0007git s\u001B]133;C\u0007".utf8())
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -573,7 +646,7 @@ class SwingTerminalShellSuggestionTest {
     fun `disabled automatic suggestions setting ignores automatic provider requests`() {
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(shellSuggestionsEnabled = false) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { flowOf(suggestions(it.commandText)) },
@@ -596,7 +669,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(shellSuggestionsEnabled = false) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -625,7 +698,7 @@ class SwingTerminalShellSuggestionTest {
 
     @Test
     fun `disabling automatic suggestions cancels a suspended provider before publishing eligibility`() {
-        var currentSettings = SwingSettings(shellSuggestionsEnabled = true)
+        var currentSettings = SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = true)
         val providerStarted = CompletableDeferred<Unit>()
         val providerCancelled = CompletableDeferred<Unit>()
         val eligibilityDuringCallback = ArrayList<Boolean>()
@@ -657,7 +730,7 @@ class SwingTerminalShellSuggestionTest {
         }
         runBlocking { providerStarted.await() }
 
-        currentSettings = SwingSettings(shellSuggestionsEnabled = false)
+        currentSettings = SwingSettings(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false)
         SwingUtilities.invokeAndWait { component.reloadSettings() }
         runBlocking { providerCancelled.await() }
 
@@ -676,7 +749,7 @@ class SwingTerminalShellSuggestionTest {
         connector.feedFromHost((1..8).joinToString("") { "line$it\r\n" }.utf8())
         runBlocking { withTimeout(1_000.milliseconds) { session.renderGeneration.first { it >= 0L } } }
         val visibleDuringCallback = ArrayList<Boolean>()
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(30, 4)
@@ -700,7 +773,7 @@ class SwingTerminalShellSuggestionTest {
 
     @Test
     fun `shown shell suggestion state exposes selected item`() {
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
         val request = request(anchorColumn = 2, anchorRow = 1)
         val suggestions = suggestions(request.commandText)
 

@@ -81,8 +81,7 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
      *
      * @return `true` when completion learning may cross IDE restarts.
      */
-    fun completionLearningPersistenceEnabled(): Boolean =
-        KetraTermIntellijSettingsNormalizer.normalize(state).completionLearningPersistenceEnabled
+    fun completionLearningPersistenceEnabled(): Boolean = state.smartSuggestionsEnabled && state.completionLearningPersistenceEnabled
 
     /**
      * Replaces persisted IDE terminal settings with a normalized state.
@@ -206,9 +205,9 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
      * @property startDirectory initial working directory; blank means project root.
      * @property environmentVariables newline-separated `NAME=VALUE` environment entries.
      * @property defaultTabName user-visible name for newly opened tabs.
+     * @property smartSuggestionsEnabled master switch for completion resources and requests.
      * @property shellSuggestionsEnabled whether host-provided shell suggestions
-     * may appear automatically. Explicit user requests remain available when
-     * disabled.
+     * may appear automatically. Explicit requests require only [smartSuggestionsEnabled].
      * @property acceptSelectedSuggestionWithEnter whether Enter accepts an
      * already-selected terminal suggestion and otherwise reaches the shell.
      * @property completionLearningPersistenceEnabled whether sanitized learned
@@ -234,6 +233,7 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
         @JvmField val startDirectory: String = "",
         @JvmField val environmentVariables: String = "",
         @JvmField val defaultTabName: String = "Local",
+        @JvmField val smartSuggestionsEnabled: Boolean = TerminalConfig.DEFAULT_SMART_SUGGESTIONS_ENABLED,
         @JvmField val shellSuggestionsEnabled: Boolean = TerminalConfig.DEFAULT_SHELL_SUGGESTIONS_ENABLED,
         @JvmField val acceptSelectedSuggestionWithEnter: Boolean = TerminalConfig.DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER,
         @JvmField val completionLearningPersistenceEnabled: Boolean = false,
@@ -454,6 +454,7 @@ internal object KetraTermIntellijSettingsMapper {
             lineHeight = normalized.lineHeight,
             shellRequestResizeWindow = false,
             shellRequestWindowManipulation = false,
+            smartSuggestionsEnabled = normalized.smartSuggestionsEnabled,
             shellSuggestionsEnabled = normalized.shellSuggestionsEnabled,
             acceptSelectedSuggestionWithEnter = normalized.acceptSelectedSuggestionWithEnter,
             scrollOnOutput = normalized.scrollOnOutput,

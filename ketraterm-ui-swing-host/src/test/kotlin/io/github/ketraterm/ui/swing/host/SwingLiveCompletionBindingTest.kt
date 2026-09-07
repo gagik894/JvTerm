@@ -31,6 +31,25 @@ import kotlin.time.Duration.Companion.milliseconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class SwingLiveCompletionBindingTest {
     @Test
+    fun `detach cancels debounce and removes observers without hiding an explicit popup`() =
+        onEdtTest {
+            val revisions = MutableStateFlow(-1L)
+            val target = RecordingTarget()
+            val binding = binding(backgroundScope, revisions)
+            binding.attach(target)
+            binding.scheduleRefresh()
+            runCurrent()
+            binding.detach()
+            revisions.value = 2L
+            advanceTimeBy(100.milliseconds)
+            runCurrent()
+            assertEquals(0, target.hideCount)
+            assertEquals(1, target.removeFocusListenerCount)
+            assertTrue(target.requests.isEmpty())
+            binding.close()
+        }
+
+    @Test
     fun `shell edit revisions debounce the latest shell snapshot`() =
         onEdtTest {
             val revisions = MutableStateFlow(-1L)
@@ -389,7 +408,7 @@ class SwingLiveCompletionBindingTest {
                     target.gainFocus()
                 }
                 revisions.value = 0
-                withTimeout(5000) { requested.await() }
+                withTimeout(5000.milliseconds) { requested.await() }
                 withContext(Dispatchers.Swing) {
                     assertEquals(listOf(snapshot("git s")), target.requests)
                     val hides = target.hideCount

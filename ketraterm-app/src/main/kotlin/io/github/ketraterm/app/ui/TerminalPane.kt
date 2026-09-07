@@ -15,19 +15,18 @@
  */
 package io.github.ketraterm.app.ui
 
-import io.github.ketraterm.app.completion.StandaloneCompletionResources
 import io.github.ketraterm.app.config.KetraTermSettings
 import io.github.ketraterm.ui.swing.api.SwingHostServices
 import io.github.ketraterm.ui.swing.api.SwingTerminal
 import io.github.ketraterm.ui.swing.api.SwingTerminalContextMenuHandler
 import io.github.ketraterm.ui.swing.api.SwingTerminalContextMenuRequest
-import io.github.ketraterm.ui.swing.host.SwingLiveCompletionBinding
+import io.github.ketraterm.ui.swing.host.SwingCompletionBinding
+import io.github.ketraterm.ui.swing.host.SwingCompletionResources
 import io.github.ketraterm.ui.swing.host.SwingTerminalOverlayPane
 import io.github.ketraterm.ui.swing.host.SwingTerminalSearchBar
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionHandler
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionKeymap
 import io.github.ketraterm.workspace.TerminalWorkspaceTab
-import kotlinx.coroutines.CoroutineScope
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.JPanel
 
@@ -42,7 +41,8 @@ internal class TerminalPane private constructor(
     val terminal: SwingTerminal,
     val component: JPanel,
     private val settings: KetraTermSettings,
-    private val liveCompletion: SwingLiveCompletionBinding,
+    private var completionResources: SwingCompletionResources?,
+    private val completionBinding: SwingCompletionBinding,
     private val searchBar: SwingTerminalSearchBar,
 ) : TerminalPaneActionTarget {
     private val closed = AtomicBoolean()
@@ -57,12 +57,16 @@ internal class TerminalPane private constructor(
         component.background = terminal.background
         searchBar.refreshColors()
         tab.session.setHostPolicy(settings.createHostPolicy(tab.profile.command))
-        if (settings.shellSuggestionsEnabled) {
-            liveCompletion.scheduleRefresh()
-        } else {
-            liveCompletion.cancelAndHide()
-        }
+        completionBinding.update(completionResources.takeIf { settings.smartSuggestionsEnabled }, settings.shellSuggestionsEnabled)
     }
+
+    fun setCompletionResources(resources: SwingCompletionResources?) {
+        if (closed.get()) return
+        completionResources = resources
+        completionBinding.update(resources.takeIf { settings.smartSuggestionsEnabled }, settings.shellSuggestionsEnabled)
+    }
+
+    override fun suggestionsEnabled(): Boolean = settings.smartSuggestionsEnabled && completionBinding.isEnabled
 
     override fun hasSelection(): Boolean = terminal.currentSelection() != null
 
@@ -75,7 +79,7 @@ internal class TerminalPane private constructor(
     override fun clearScreen(): Boolean = terminal.clearScreen()
 
     override fun requestShellSuggestions() {
-        terminal.requestActiveShellSuggestions()
+        if (suggestionsEnabled()) terminal.requestActiveShellSuggestions()
     }
 
     override fun openSearch() {
@@ -107,7 +111,8 @@ internal class TerminalPane private constructor(
         val shortcut = shortcutController
         shortcutController = null
         var failure: Throwable? = null
-        failure = captureCleanupFailure(failure, liveCompletion::close)
+        failure = captureCleanupFailure(failure, completionBinding::close)
+        completionResources = null
         failure = captureCleanupFailure(failure, searchBar::close)
         failure = captureCleanupFailure(failure) { shortcut?.dispose() }
         failure = captureCleanupFailure(failure, terminal::dispose)
@@ -118,34 +123,24 @@ internal class TerminalPane private constructor(
         fun create(
             tab: TerminalWorkspaceTab,
             settings: KetraTermSettings,
-            completionScope: CoroutineScope,
-            completionResources: StandaloneCompletionResources,
+            completionResources: SwingCompletionResources?,
             onContextMenu: (TerminalPane, SwingTerminalContextMenuRequest) -> Unit,
         ): TerminalPane {
             val shortcutControllerRef = arrayOfNulls<TerminalPaneShortcutController>(1)
             val paneRef = arrayOfNulls<TerminalPane>(1)
-            var ownedLiveCompletion: SwingLiveCompletionBinding? = null
+            val completionBinding = SwingCompletionBinding(tab.session) { tab.currentWorkingDirectoryUri }
             var ownedTerminal: SwingTerminal? = null
             var ownedSearchBar: SwingTerminalSearchBar? = null
             var ownedPane: TerminalPane? = null
             return try {
-                val liveCompletion =
-                    SwingLiveCompletionBinding(
-                        session = tab.session,
-                        coroutineScope = completionScope,
-                        suggestionsEnabled = { settings.shellSuggestionsEnabled },
-                        rankingContextKey = { tab.currentWorkingDirectoryUri },
-                        feedbackHandler = completionResources.feedbackHandler,
-                    )
-                ownedLiveCompletion = liveCompletion
                 val terminal =
                     SwingTerminal(
                         settingsProvider = { settings.current() },
                         hostServices =
                             SwingHostServices(
-                                shellSuggestionProvider = completionResources.provider,
+                                shellSuggestionProvider = completionBinding.provider,
                                 shellSuggestionHandler = SwingShellSuggestionHandler.createDefault(tab.session),
-                                shellSuggestionFeedbackHandler = liveCompletion.suggestionFeedbackHandler,
+                                shellSuggestionFeedbackHandler = completionBinding.feedbackHandler,
                                 shellSuggestionKeymap = SwingShellSuggestionKeymap.STANDARD,
                                 hostKeyHandler = { event -> shortcutControllerRef[0]?.handleKeyPressed(event) == true },
                                 contextMenuHandler =
@@ -169,7 +164,8 @@ internal class TerminalPane private constructor(
                         terminal = terminal,
                         component = component,
                         settings = settings,
-                        liveCompletion = liveCompletion,
+                        completionResources = completionResources,
+                        completionBinding = completionBinding,
                         searchBar = searchBar,
                     )
                 ownedPane = pane
@@ -177,7 +173,8 @@ internal class TerminalPane private constructor(
                 shortcutControllerRef[0] = pane.shortcutController
                 paneRef[0] = pane
                 tab.session.requestRender(scrollbackOffset = 0)
-                liveCompletion.attach(terminal)
+                completionBinding.attach(terminal)
+                pane.setCompletionResources(completionResources)
                 pane
             } catch (failure: Throwable) {
                 var cleanupFailure: Throwable? = failure
@@ -185,7 +182,7 @@ internal class TerminalPane private constructor(
                 if (pane != null) {
                     cleanupFailure = captureCleanupFailure(cleanupFailure, pane::close)
                 } else {
-                    cleanupFailure = captureCleanupFailure(cleanupFailure) { ownedLiveCompletion?.close() }
+                    cleanupFailure = captureCleanupFailure(cleanupFailure, completionBinding::close)
                     cleanupFailure = captureCleanupFailure(cleanupFailure) { ownedSearchBar?.close() }
                     cleanupFailure = captureCleanupFailure(cleanupFailure) { ownedTerminal?.dispose() }
                 }

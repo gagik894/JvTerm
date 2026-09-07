@@ -219,10 +219,19 @@ class SwingLiveCompletionBinding
         override fun close() {
             check(SwingUtilities.isEventDispatchThread()) { "live completion must be closed on the EDT" }
             if (closed) return
+            cancelAndHideInternal()
+            detach()
+        }
+
+        /** Stops automatic observation without dismissing an explicit completion request. */
+        fun detach() {
+            check(SwingUtilities.isEventDispatchThread()) { "live completion must be closed on the EDT" }
+            if (closed) return
             closed = true
             observationJob?.cancel()
             observationJob = null
-            cancelAndHideInternal()
+            refreshes.value = null
+            lastRequest = null
             target?.removeFocusListener(focusListener)
             target?.removeInvalidationListener(invalidationListener)
             target?.removeEligibilityListener(eligibilityListener)

@@ -28,6 +28,27 @@ import kotlin.time.Duration.Companion.milliseconds
 
 class StandaloneCompletionRegistryPersistenceTest {
     @Test
+    fun `disable preserves disk state and replacement runtime loads only saved learning`(
+        @TempDir directory: Path,
+    ) = runBlocking {
+        val path = directory.resolve(TerminalCompletionLearningCoordinator.currentFileName())
+        val seed = registry(TerminalCompletionLearningStore(), path, persistenceEnabled = true)
+        seed.recordFinishedCommand("git status", true, null, null, 1L)
+        seed.closeAndFlush()
+        val saved = Files.readAllBytes(path)
+        repeat(3) {
+            val learning = TerminalCompletionLearningStore()
+            val current = registry(learning, path, persistenceEnabled = true)
+            current.recordFinishedCommand("npm test", true, null, null, 2L)
+            current.closeWithoutFlush()
+            current.recordFinishedCommand("late command", true, null, null, 3L)
+            assertFalse(learning.snapshot().replayCommands.any { it.commandLine == "late command" })
+            assertContentEquals(saved, Files.readAllBytes(path))
+        }
+        assertEquals(listOf("git status"), persistedSnapshot(path).replayCommands.map { it.commandLine })
+    }
+
+    @Test
     fun `shutdown persists the final learned command`(
         @TempDir directory: Path,
     ) = runBlocking {

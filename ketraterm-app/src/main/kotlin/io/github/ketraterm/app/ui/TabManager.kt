@@ -23,8 +23,7 @@ import io.github.ketraterm.host.TerminalClipboardWriteEvent
 import io.github.ketraterm.session.TerminalShellIntegrationCommandLifecycle
 import io.github.ketraterm.ui.swing.api.SwingTerminalContextMenuRequest
 import io.github.ketraterm.workspace.*
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.*
 import java.awt.*
 import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
@@ -60,18 +59,11 @@ internal class TabManager(
     private val workspace = TerminalWorkspace(StandaloneWorkspaceListener())
     private val tabRoots = HashMap<String, SplitNode>()
     private val tabContainers = HashMap<String, JPanel>()
-    private val completionRegistry =
-        StandaloneCompletionRegistry.create(
-            persistencePath = settings.commandCompletionStatsPath,
-            persistenceEnabled = settings.persistentSuggestionLearningEnabled,
-            onPersistenceLoadFailure = { failure ->
-                LOGGER.log(
-                    Level.WARNING,
-                    "Completion learning persistence was disabled because existing data could not be loaded",
-                    failure,
-                )
-            },
-        )
+
+    @Volatile private var completionRegistry: StandaloneCompletionRegistry? = null
+    private val completionLifecycle = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var completionShutdown: Job? = null
     private val shutdownStarted = AtomicBoolean()
     val selectedPane: TerminalPane?
         get() = tabBar.selectedId()?.let { getActivePane(it) }
@@ -316,6 +308,10 @@ internal class TabManager(
     }
 
     private fun startCompletionLearningShutdown() {
+        if (completionRegistry == null && completionShutdown == null) {
+            completionLifecycle.cancel()
+            return
+        }
         Thread
             .ofPlatform()
             .name("ketraterm-completion-shutdown")
@@ -330,13 +326,19 @@ internal class TabManager(
     }
 
     private fun closeCompletionLearningWithinBudget() {
+        val registry = completionRegistry
+        completionRegistry = null
         val completed =
             runBlocking {
                 withTimeoutOrNull(COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS.milliseconds) {
-                    completionRegistry.closeAndFlush()
+                    completionShutdown?.join()
+                    if (registry != null) {
+                        if (settings.smartSuggestionsEnabled) registry.closeAndFlush() else registry.closeWithoutFlush()
+                    }
                     true
                 } ?: false
             }
+        completionLifecycle.cancel()
         if (!completed) {
             LOGGER.warning(
                 "Completion learning persistence exceeded its " +
@@ -358,7 +360,7 @@ internal class TabManager(
             palette = snapshot.palette,
             treatAmbiguousAsWide = snapshot.treatAmbiguousAsWide,
         )
-        reconcileCommandPersistenceStores()
+        reconcileCompletion()
         tabBar.repaint()
     }
 
@@ -449,18 +451,16 @@ internal class TabManager(
 
     private fun createTerminalPane(workspaceTab: TerminalWorkspaceTab): TerminalPane =
         try {
-            val workingDirectoryUriProvider = { workspaceTab.currentWorkingDirectoryUri }
-            val shellCapabilities = workspaceTab.profile.kind.completionShellCapabilities()
+            val registry = ensureCompletionRegistry()
             val completionResources =
-                completionRegistry.createResources(
+                registry?.createResources(
                     profileId = workspaceTab.profile.id,
-                    workingDirectoryUriProvider = workingDirectoryUriProvider,
-                    shellCapabilities = shellCapabilities,
+                    workingDirectoryUriProvider = { workspaceTab.currentWorkingDirectoryUri },
+                    shellCapabilities = workspaceTab.profile.kind.completionShellCapabilities(),
                 )
             TerminalPane.create(
                 tab = workspaceTab,
                 settings = settings,
-                completionScope = completionRegistry.completionScope,
                 completionResources = completionResources,
             ) { pane, request ->
                 showPaneContextMenu(pane, request)
@@ -821,10 +821,11 @@ internal class TabManager(
             event: io.github.ketraterm.protocol.ShellIntegrationEvent,
         ) {
             if (event.marker != io.github.ketraterm.protocol.ShellIntegrationMarker.COMMAND_FINISHED) return
+            if (!settings.smartSuggestionsEnabled) return
             val state = tab.session.shellIntegrationState
             val metadata = state.commandMetadata(state.latestCommandRecordId()) ?: return
             metadata.commandText?.let { command ->
-                completionRegistry.recordFinishedCommand(
+                completionRegistry?.recordFinishedCommand(
                     commandLine = command,
                     successful = metadata.lifecycle == TerminalShellIntegrationCommandLifecycle.SUCCEEDED,
                     profileId = tab.profile.id,
@@ -1026,12 +1027,50 @@ internal class TabManager(
         }
     }
 
-    private fun reconcileCommandPersistenceStores() {
-        completionRegistry.setPersistenceEnabled(settings.persistentSuggestionLearningEnabled)
+    private fun ensureCompletionRegistry(): StandaloneCompletionRegistry? {
+        if (!settings.smartSuggestionsEnabled || shutdownStarted.get() || completionShutdown != null) return null
+        return completionRegistry ?: StandaloneCompletionRegistry
+            .create(
+                persistencePath = settings.commandCompletionStatsPath,
+                persistenceEnabled = settings.persistentSuggestionLearningEnabled,
+                onPersistenceLoadFailure = { LOGGER.log(Level.WARNING, "Completion learning could not be loaded", it) },
+            ).also { completionRegistry = it }
     }
 
-    fun resetCompletionLearning() {
-        completionRegistry.resetLearning()
+    private fun reconcileCompletion() {
+        if (!settings.smartSuggestionsEnabled) {
+            panes.forEach { it.setCompletionResources(null) }
+            val retiring = completionRegistry ?: return
+            completionRegistry = null
+            completionShutdown =
+                completionLifecycle.launch(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        retiring.closeWithoutFlush()
+                    } finally {
+                        SwingUtilities.invokeLater {
+                            completionShutdown = null
+                            if (!shutdownStarted.get()) reconcileCompletion()
+                        }
+                    }
+                }
+            return
+        }
+        if (panes.isEmpty()) return
+        val previous = completionRegistry
+        val registry = ensureCompletionRegistry() ?: return
+        registry.setPersistenceEnabled(settings.persistentSuggestionLearningEnabled)
+        if (previous === registry) return
+        panes.forEach { pane ->
+            pane.setCompletionResources(
+                registry.createResources(
+                    profileId = pane.tab.profile.id,
+                    workingDirectoryUriProvider = { pane.tab.currentWorkingDirectoryUri },
+                    shellCapabilities =
+                        pane.tab.profile.kind
+                            .completionShellCapabilities(),
+                ),
+            )
+        }
     }
 
     private companion object {

@@ -23,17 +23,15 @@ import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.ui.components.JBScrollBar
-import io.github.ketraterm.intellij.services.IntellijCompletionResources
 import io.github.ketraterm.intellij.services.KetraTermCompletionService
 import io.github.ketraterm.intellij.settings.KetraTermIntellijSettings
 import io.github.ketraterm.ui.swing.api.*
-import io.github.ketraterm.ui.swing.host.SwingLiveCompletionBinding
+import io.github.ketraterm.ui.swing.host.SwingCompletionBinding
 import io.github.ketraterm.ui.swing.host.SwingTerminalHostAction
 import io.github.ketraterm.ui.swing.host.SwingTerminalOverlayPane
 import io.github.ketraterm.ui.swing.host.SwingTerminalSearchBar
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionHandler
 import io.github.ketraterm.workspace.TerminalWorkspaceTab
-import kotlinx.coroutines.CoroutineScope
 import java.awt.Adjustable
 import java.awt.BorderLayout
 import javax.swing.JPanel
@@ -51,8 +49,12 @@ internal class KetraTermTerminalPane private constructor(
     val component: JPanel,
     private val searchBar: SwingTerminalSearchBar,
     private val hostActions: KetraTermTerminalPaneHostActions,
-    private val liveCompletion: SwingLiveCompletionBinding,
+    private val project: Project,
+    private val completionBinding: SwingCompletionBinding,
 ) {
+    private var closed = false
+    private var completionService: KetraTermCompletionService? = null
+    private val completionChanged: () -> Unit = { reconcileCompletion() }
     private var shortcutController: KetraTermTerminalShortcutController? = null
 
     /**
@@ -70,6 +72,7 @@ internal class KetraTermTerminalPane private constructor(
         component.background = terminal.background
         searchBar.refreshColors()
         tab.session.setHostPolicy(KetraTermIntellijSettings.getInstance().createHostPolicy(tab.profile.command))
+        reconcileCompletion()
     }
 
     /**
@@ -77,6 +80,24 @@ internal class KetraTermTerminalPane private constructor(
      */
     fun openSearch() {
         searchBar.open()
+    }
+
+    private fun reconcileCompletion() {
+        if (closed) return
+        val settings = KetraTermIntellijSettings.current()
+        if (!settings.smartSuggestionsEnabled) {
+            completionBinding.update(null, false)
+            completionService?.releaseResources(tab)
+            completionService?.removeResourceListener(completionChanged)
+            completionService = null
+            return
+        }
+        val service =
+            completionService ?: KetraTermCompletionService.getInstance().also {
+                completionService = it
+                it.addResourceListener(completionChanged)
+            }
+        completionBinding.update(service.resourcesFor(project, tab), settings.shellSuggestionsEnabled)
     }
 
     /**
@@ -92,7 +113,9 @@ internal class KetraTermTerminalPane private constructor(
         when (action) {
             SwingTerminalHostAction.COPY_SELECTION -> terminal.currentSelection() != null
             SwingTerminalHostAction.OPEN_SEARCH -> fromContextMenu || KetraTermIntellijSettings.getInstance().overrideIdeShortcuts()
-            SwingTerminalHostAction.REQUEST_SUGGESTIONS,
+            SwingTerminalHostAction.REQUEST_SUGGESTIONS ->
+                KetraTermIntellijSettings.current().smartSuggestionsEnabled &&
+                    completionBinding.isEnabled
             SwingTerminalHostAction.SELECT_ALL,
             SwingTerminalHostAction.CLEAR_SCREEN,
             SwingTerminalHostAction.PASTE_CLIPBOARD,
@@ -114,8 +137,12 @@ internal class KetraTermTerminalPane private constructor(
             SwingTerminalHostAction.SELECT_ALL -> terminal.selectAll()
             SwingTerminalHostAction.CLEAR_SCREEN -> terminal.clearScreen()
             SwingTerminalHostAction.REQUEST_SUGGESTIONS -> {
-                terminal.requestActiveShellSuggestions()
-                true
+                if (isTerminalActionEnabled(action)) {
+                    terminal.requestActiveShellSuggestions()
+                    true
+                } else {
+                    false
+                }
             }
             SwingTerminalHostAction.OPEN_SEARCH -> {
                 openSearch()
@@ -223,7 +250,12 @@ internal class KetraTermTerminalPane private constructor(
      * Unbinds the pane from its session before the containing IDE tab is disposed.
      */
     fun close() {
-        liveCompletion.close()
+        if (closed) return
+        closed = true
+        completionService?.releaseResources(tab)
+        completionService?.removeResourceListener(completionChanged)
+        completionService = null
+        completionBinding.close()
         searchBar.close()
         shortcutController?.dispose()
         shortcutController = null
@@ -240,32 +272,13 @@ internal class KetraTermTerminalPane private constructor(
         fun create(
             project: Project,
             tab: TerminalWorkspaceTab,
-            completionScope: CoroutineScope,
             hostActions: KetraTermTerminalPaneHostActions = KetraTermTerminalPaneHostActions.NONE,
         ): KetraTermTerminalPane {
-            val completionResources = KetraTermCompletionService.getInstance().createResources(project, tab)
-            return createBound(project, tab, hostActions, completionResources, completionScope)
-        }
-
-        private fun createBound(
-            project: Project,
-            tab: TerminalWorkspaceTab,
-            hostActions: KetraTermTerminalPaneHostActions,
-            completionResources: IntellijCompletionResources,
-            completionScope: CoroutineScope,
-        ): KetraTermTerminalPane {
+            val completionBinding = SwingCompletionBinding(tab.session) { tab.currentWorkingDirectoryUri }
             val scrollbar = JBScrollBar(Adjustable.VERTICAL)
             val scrollbarAdapter = SwingScrollbarAdapter(scrollbar)
             val shortcutControllerRef = arrayOfNulls<KetraTermTerminalShortcutController>(1)
             val paneRef = arrayOfNulls<KetraTermTerminalPane>(1)
-            val liveCompletion =
-                SwingLiveCompletionBinding(
-                    session = tab.session,
-                    coroutineScope = completionScope,
-                    suggestionsEnabled = { KetraTermIntellijSettings.current().shellSuggestionsEnabled },
-                    rankingContextKey = { tab.currentWorkingDirectoryUri },
-                    feedbackHandler = completionResources.feedbackHandler,
-                )
             val terminal =
                 SwingTerminal(
                     settingsProvider = { KetraTermIntellijSettings.current() },
@@ -275,9 +288,9 @@ internal class KetraTermTerminalPane private constructor(
                             hyperlinkDetector = IntellijTerminalHyperlinkDetector(project),
                             viewportListener = scrollbarAdapter,
                             scrollbarOverlayEnabled = false,
-                            shellSuggestionProvider = completionResources.provider,
+                            shellSuggestionProvider = completionBinding.provider,
                             shellSuggestionHandler = SwingShellSuggestionHandler.createDefault(tab.session),
-                            shellSuggestionFeedbackHandler = liveCompletion.suggestionFeedbackHandler,
+                            shellSuggestionFeedbackHandler = completionBinding.feedbackHandler,
                             shellSuggestionKeymap = KetraTermShellSuggestionKeymap,
                             shellSuggestionViewFactory = IntellijCompletionListViewFactory,
                             uiDispatcher =
@@ -313,12 +326,14 @@ internal class KetraTermTerminalPane private constructor(
                 component = component,
                 searchBar = searchBar,
                 hostActions = hostActions,
-                liveCompletion = liveCompletion,
+                project = project,
+                completionBinding = completionBinding,
             ).also { pane ->
                 pane.shortcutController = KetraTermTerminalShortcutController(pane)
                 shortcutControllerRef[0] = pane.shortcutController
                 paneRef[0] = pane
-                liveCompletion.attach(terminal)
+                completionBinding.attach(terminal)
+                pane.reconcileCompletion()
             }
         }
     }

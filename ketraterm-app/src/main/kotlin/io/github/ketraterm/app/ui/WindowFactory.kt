@@ -189,7 +189,6 @@ internal class WindowFactory(
                         parent = frame,
                         settings = settings,
                         profileRegistry = profileRegistry,
-                        onResetCompletionLearning = tabManager::resetCompletionLearning,
                         onApply = tabManager::reloadAllPanes,
                     ).isVisible = true
                 }
