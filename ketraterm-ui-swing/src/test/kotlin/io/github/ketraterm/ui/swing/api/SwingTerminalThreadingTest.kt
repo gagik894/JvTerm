@@ -22,6 +22,7 @@ import io.github.ketraterm.input.event.TerminalKeyEvent
 import io.github.ketraterm.input.event.TerminalMouseEvent
 import io.github.ketraterm.input.event.TerminalPasteEvent
 import io.github.ketraterm.parser.api.TerminalOutputParser
+import io.github.ketraterm.render.api.TerminalRenderCursorShape
 import io.github.ketraterm.render.api.TerminalRenderFrameConsumer
 import io.github.ketraterm.render.api.TerminalRenderFrameReader
 import io.github.ketraterm.render.cache.TerminalRenderPublisher
@@ -29,6 +30,7 @@ import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.ui.swing.settings.SwingSettings
+import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.Dimension
@@ -370,6 +372,89 @@ class SwingTerminalThreadingTest {
 
         assertEquals(1, connector.resizeCount.get())
         session.close()
+    }
+
+    @Test
+    fun `unrelated and unchanged settings preserve application palette and cursor`() {
+        val session = testSession()
+        var settings = SwingSettings()
+        val component = SwingTerminal(settingsProvider = { settings })
+        try {
+            edtCall {
+                component.bind(session)
+                session.terminal.setCursorShape(TerminalRenderCursorShape.BAR)
+                session.terminal.setPaletteColor(1, 0xFF123456.toInt())
+
+                component.reloadSettings()
+                settings = settings.copy(visualBellEnabled = !settings.visualBellEnabled)
+                component.reloadSettings()
+
+                (session.terminal as TerminalRenderFrameReader).readRenderFrame { frame ->
+                    assertEquals(TerminalRenderCursorShape.BAR, frame.cursor.shape)
+                    assertEquals(0xFF123456.toInt(), frame.palette.indexedColor(1))
+                }
+            }
+        } finally {
+            edtCall { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
+    fun `changed theme and cursor preferences replace application overrides`() {
+        val session = testSession()
+        var settings = SwingSettings()
+        val component = SwingTerminal(settingsProvider = { settings })
+        try {
+            edtCall {
+                component.bind(session)
+                session.terminal.setCursorShape(TerminalRenderCursorShape.BAR)
+                session.terminal.setPaletteColor(1, 0xFF123456.toInt())
+                settings = settings.copy(palette = TerminalTheme.NORD.createPalette(), cursorShape = TerminalRenderCursorShape.UNDERLINE)
+
+                component.reloadSettings()
+
+                (session.terminal as TerminalRenderFrameReader).readRenderFrame { frame ->
+                    assertEquals(settings.cursorShape, frame.cursor.shape)
+                    assertEquals(settings.palette, frame.palette)
+                }
+            }
+        } finally {
+            edtCall { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
+    fun `font size changes resize the grid but paint preferences do not`() {
+        val connector = RecordingConnector()
+        val session = testSession(connector)
+        var settings = SwingSettings(font = Font(Font.MONOSPACED, Font.PLAIN, 14))
+        val component = SwingTerminal(settingsProvider = { settings })
+        try {
+            edtCall {
+                component.size = Dimension(320, 160)
+                component.bind(session)
+            }
+            drainEdt()
+            connector.reset()
+            edtCall {
+                val originalGrid = component.visibleGridSize()
+                settings = settings.copy(selectionBackground = 0xFF123456.toInt())
+                component.reloadSettings()
+                assertEquals(originalGrid, component.visibleGridSize())
+                assertEquals(0, connector.resizeCount.get())
+
+                settings = settings.copy(font = settings.font.deriveFont(28f))
+                component.reloadSettings()
+                assertTrue(component.visibleGridSize().width < originalGrid.width)
+                assertTrue(component.visibleGridSize().height < originalGrid.height)
+                assertEquals(1, connector.resizeCount.get())
+            }
+        } finally {
+            edtCall { component.dispose() }
+            session.close()
+        }
     }
 
     private fun testSession(connector: TerminalConnector = NoOpConnector): TerminalSession {

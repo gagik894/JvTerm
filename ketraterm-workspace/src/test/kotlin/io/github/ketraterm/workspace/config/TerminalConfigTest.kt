@@ -18,12 +18,75 @@ package io.github.ketraterm.workspace.config
 import io.github.ketraterm.host.TerminalClipboardPermission
 import io.github.ketraterm.host.TerminalTitlePermission
 import io.github.ketraterm.input.policy.PasteSanitizationPolicy
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.*
 import kotlin.test.*
 
 class TerminalConfigTest {
+    @Test
+    fun `atomic save replaces complete file and removes staging file`() {
+        val directory = Files.createTempDirectory("ketraterm-config-atomic")
+        val destination = directory.resolve("config.toml")
+        try {
+            val manager = TerminalWorkspaceConfigManager(destination)
+            manager.save(TerminalConfig())
+            val updated = TerminalConfig(fontSize = 28, columns = 160, smartSuggestionsEnabled = true)
+            manager.save(updated)
+            assertEquals(updated, manager.load())
+            Files.list(directory).use { assertEquals(listOf(destination), it.toList()) }
+        } finally {
+            Files.deleteIfExists(destination)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun `failed replacement propagates failure and preserves destination`() {
+        val directory = Files.createTempDirectory("ketraterm-config-failure")
+        val destination = Files.createDirectory(directory.resolve("config.toml"))
+        val existing = Files.writeString(destination.resolve("existing"), "preserve me")
+        try {
+            assertFailsWith<IOException> {
+                TerminalWorkspaceConfigManager(destination).save(TerminalConfig())
+            }
+            assertEquals("preserve me", Files.readString(existing))
+            Files.list(directory).use { assertEquals(listOf(destination), it.toList()) }
+        } finally {
+            Files.deleteIfExists(existing)
+            Files.deleteIfExists(destination)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun `unreadable config is left untouched when falling back to defaults`() {
+        val directory = Files.createTempDirectory("ketraterm-config-unreadable")
+        val existing = Files.writeString(directory.resolve("existing"), "preserve me")
+        try {
+            assertEquals(TerminalConfig(), TerminalWorkspaceConfigManager(directory).load())
+            assertEquals("preserve me", Files.readString(existing))
+            assertFalse(Files.exists(directory.resolveSibling("${directory.fileName}.broken")))
+        } finally {
+            Files.deleteIfExists(existing)
+            Files.deleteIfExists(directory)
+        }
+    }
+
+    @Test
+    fun `unwritable missing config uses defaults at startup but explicit save fails`() {
+        val blockedParent = Files.createTempFile("ketraterm-config-parent", ".file")
+        try {
+            val manager = TerminalWorkspaceConfigManager(blockedParent.resolve("config.toml"))
+            assertEquals(TerminalConfig(), manager.load())
+            assertFailsWith<IOException> { manager.save(TerminalConfig(fontSize = 24)) }
+            assertTrue(Files.isRegularFile(blockedParent))
+        } finally {
+            Files.deleteIfExists(blockedParent)
+        }
+    }
+
     @Test
     fun `missing master flag stays off even when legacy preferences are on`() {
         val directory = Files.createTempDirectory("ketraterm-suggestions-default")

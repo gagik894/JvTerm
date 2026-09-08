@@ -57,16 +57,19 @@ internal class TerminalPane private constructor(
         component.background = terminal.background
         searchBar.refreshColors()
         tab.session.setHostPolicy(settings.createHostPolicy(tab.profile.command))
-        completionBinding.update(completionResources.takeIf { settings.smartSuggestionsEnabled }, settings.shellSuggestionsEnabled)
+        completionBinding.update(
+            completionResources.takeIf { settings.config.smartSuggestionsEnabled },
+            settings.config.shellSuggestionsEnabled,
+        )
     }
 
     fun setCompletionResources(resources: SwingCompletionResources?) {
         if (closed.get()) return
         completionResources = resources
-        completionBinding.update(resources.takeIf { settings.smartSuggestionsEnabled }, settings.shellSuggestionsEnabled)
+        completionBinding.update(resources.takeIf { settings.config.smartSuggestionsEnabled }, settings.config.shellSuggestionsEnabled)
     }
 
-    override fun suggestionsEnabled(): Boolean = settings.smartSuggestionsEnabled && completionBinding.isEnabled
+    override fun suggestionsEnabled(): Boolean = settings.config.smartSuggestionsEnabled && completionBinding.isEnabled
 
     override fun hasSelection(): Boolean = terminal.currentSelection() != null
 

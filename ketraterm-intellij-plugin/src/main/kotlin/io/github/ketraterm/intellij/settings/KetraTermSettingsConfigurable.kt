@@ -42,7 +42,11 @@ private const val KETRATERM_SETTINGS_CONFIGURABLE_ID = "io.github.ketraterm.term
  * The page intentionally exposes only settings the plugin host can honor.
  * Standalone window-manipulation policy remains outside the IntelliJ UI.
  */
-class KetraTermSettingsConfigurable : SearchableConfigurable {
+class KetraTermSettingsConfigurable internal constructor(
+    shellProfiles: List<TerminalProfile>,
+) : SearchableConfigurable {
+    constructor() : this(TerminalProfileRegistry().availableProfiles())
+
     private val settings: KetraTermIntellijSettings
         get() = KetraTermIntellijSettings.getInstance()
 
@@ -50,7 +54,7 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
     private val fontFamilyCombo = ComboBox(fontFamilyOptions()).apply { isEditable = false }
     private val fallbackFontFamilyCombo = ComboBox(fontFamilyOptions()).apply { isEditable = false }
     private val fontSizeSpinner =
-        integerSpinner(KetraTermIntellijSettings.DEFAULT_FONT_SIZE, TerminalConfig.FONT_SIZE_MIN, TerminalConfig.FONT_SIZE_MAX)
+        spinner(KetraTermIntellijSettings.DEFAULT_FONT_SIZE, TerminalConfig.FONT_SIZE_MIN, TerminalConfig.FONT_SIZE_MAX)
     private val columnsSpinner = spinner(TerminalConfig.DEFAULT_COLUMNS, TerminalConfig.COLUMNS_MIN, TerminalConfig.COLUMNS_MAX)
     private val rowsSpinner = spinner(TerminalConfig.DEFAULT_ROWS, TerminalConfig.ROWS_MIN, TerminalConfig.ROWS_MAX)
     private val scrollbackSpinner =
@@ -58,13 +62,18 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
     private val cursorBlinkSpinner =
         spinner(TerminalConfig.DEFAULT_CURSOR_BLINK_MILLIS, TerminalConfig.CURSOR_BLINK_MIN, TerminalConfig.CURSOR_BLINK_MAX)
     private val lineHeightSpinner =
-        decimalSpinner(
-            TerminalConfig.DEFAULT_LINE_HEIGHT.toDouble(),
-            TerminalConfig.LINE_HEIGHT_MIN.toDouble(),
-            TerminalConfig.LINE_HEIGHT_MAX.toDouble(),
-        )
+        JSpinner(
+            SpinnerNumberModel(
+                TerminalConfig.DEFAULT_LINE_HEIGHT.toDouble(),
+                TerminalConfig.LINE_HEIGHT_MIN.toDouble(),
+                TerminalConfig.LINE_HEIGHT_MAX.toDouble(),
+                0.1,
+            ),
+        ).apply {
+            editor = JSpinner.NumberEditor(this, "0.0")
+        }
     private val shellPathCombo =
-        ComboBox<Any>(shellPathOptions()).apply {
+        ComboBox<Any>(shellProfiles.map(::ShellPathOption).toTypedArray()).apply {
             isEditable = true
             renderer = ShellPathOptionRenderer()
             prototypeDisplayValue = "Windows PowerShell"
@@ -223,9 +232,7 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
         return created
     }
 
-    override fun isModified(): Boolean =
-        KetraTermIntellijSettingsNormalizer.normalize(uiState()) !=
-            KetraTermIntellijSettingsNormalizer.normalize(settings.state)
+    override fun isModified(): Boolean = KetraTermIntellijSettingsNormalizer.normalize(uiState()) != settings.state
 
     override fun apply() {
         settings.replaceState(uiState())
@@ -240,34 +247,33 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
     }
 
     private fun applyState(state: KetraTermIntellijSettings.State) {
-        val normalized = KetraTermIntellijSettingsNormalizer.normalize(state)
-        themeCombo.selectedItem = themeOptions().first { it.id == normalized.themeId }
-        fontFamilyCombo.selectedItem = normalized.fontFamily
-        fallbackFontFamilyCombo.selectedItem = normalized.fallbackFontFamily
-        fontSizeSpinner.value = normalized.fontSize
-        columnsSpinner.value = normalized.columns
-        rowsSpinner.value = normalized.rows
-        scrollbackSpinner.value = normalized.scrollbackLines
-        cursorBlinkSpinner.value = normalized.cursorBlinkMillis
-        lineHeightSpinner.value = normalized.lineHeight.toDouble()
-        shellPathCombo.selectedItem = shellPathOptionFor(normalized.shellPath) ?: normalized.shellPath
-        startDirectoryField.text = normalized.startDirectory
-        environmentVariablesField.text = normalized.environmentVariables
-        defaultTabNameField.text = normalized.defaultTabName
-        cursorShapeCombo.selectedItem = cursorShapeOptions().first { it.id == normalized.cursorShape }
-        ambiguousWidthCheckBox.isSelected = normalized.treatAmbiguousAsWide
-        systemFallbackFontsCheckBox.isSelected = normalized.useSystemFallbackFonts
-        visualBellCheckBox.isSelected = normalized.visualBell
-        pasteOnMiddleClickCheckBox.isSelected = normalized.pasteOnMiddleClick
-        overrideIdeShortcutsCheckBox.isSelected = normalized.overrideIdeShortcuts
-        scrollOnOutputCheckBox.isSelected = normalized.scrollOnOutput
-        pasteSanitizationCombo.selectedItem = pasteSanitizationOptions().firstOrNull { it.id == normalized.pasteSanitization }
-        clipboardLocalWriteCombo.selectedItem = visiblePermissionOption(normalized.clipboardLocalWrite, "prompt")
-        clipboardRemoteWriteCombo.selectedItem = visiblePermissionOption(normalized.clipboardRemoteWrite, "deny")
-        clipboardReadCombo.selectedItem = visiblePermissionOption(normalized.clipboardRead, "deny")
-        clipboardMaxDecodedBytesSpinner.value = normalized.clipboardMaxDecodedBytes
-        titleLocalPermissionCheckBox.isSelected = normalized.titleLocalPermission == "allow"
-        titleRemotePermissionCheckBox.isSelected = normalized.titleRemotePermission == "allow"
+        themeCombo.selectedItem = themeOptions().first { it.id == state.themeId }
+        fontFamilyCombo.selectConfiguredFont(state.fontFamily)
+        fallbackFontFamilyCombo.selectConfiguredFont(state.fallbackFontFamily)
+        fontSizeSpinner.value = state.fontSize
+        columnsSpinner.value = state.columns
+        rowsSpinner.value = state.rows
+        scrollbackSpinner.value = state.scrollbackLines
+        cursorBlinkSpinner.value = state.cursorBlinkMillis
+        lineHeightSpinner.value = state.lineHeight.toDouble()
+        shellPathCombo.selectedItem = shellPathOptionFor(state.shellPath) ?: state.shellPath
+        startDirectoryField.text = state.startDirectory
+        environmentVariablesField.text = state.environmentVariables
+        defaultTabNameField.text = state.defaultTabName
+        cursorShapeCombo.selectedItem = cursorShapeOptions().first { it.id == state.cursorShape }
+        ambiguousWidthCheckBox.isSelected = state.treatAmbiguousAsWide
+        systemFallbackFontsCheckBox.isSelected = state.useSystemFallbackFonts
+        visualBellCheckBox.isSelected = state.visualBell
+        pasteOnMiddleClickCheckBox.isSelected = state.pasteOnMiddleClick
+        overrideIdeShortcutsCheckBox.isSelected = state.overrideIdeShortcuts
+        scrollOnOutputCheckBox.isSelected = state.scrollOnOutput
+        pasteSanitizationCombo.selectedItem = pasteSanitizationOptions().firstOrNull { it.id == state.pasteSanitization }
+        clipboardLocalWriteCombo.selectPermission(state.clipboardLocalWrite)
+        clipboardRemoteWriteCombo.selectPermission(state.clipboardRemoteWrite)
+        clipboardReadCombo.selectPermission(state.clipboardRead)
+        clipboardMaxDecodedBytesSpinner.value = state.clipboardMaxDecodedBytes
+        titleLocalPermissionCheckBox.isSelected = state.titleLocalPermission == "allow"
+        titleRemotePermissionCheckBox.isSelected = state.titleRemotePermission == "allow"
     }
 
     private fun uiState(): KetraTermIntellijSettings.State =
@@ -311,15 +317,21 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
             ?.trim()
             .orEmpty()
 
-    private fun selectedShellPath(): String =
-        when (val selected = shellPathCombo.selectedItem) {
-            is ShellPathOption -> selected.profile.command.first()
-            else ->
-                shellPathCombo.editor.item
-                    ?.toString()
-                    ?.trim()
-                    .orEmpty()
-        }
+    private fun shellPathOptionFor(shellPath: String): ShellPathOption? =
+        (0 until shellPathCombo.itemCount)
+            .asSequence()
+            .map { shellPathCombo.getItemAt(it) }
+            .filterIsInstance<ShellPathOption>()
+            .firstOrNull { it.profile.command.first() == shellPath }
+
+    private fun selectedShellPath(): String {
+        val selected = shellPathCombo.selectedItem
+        if (selected is ShellPathOption) return selected.profile.command.first()
+        return shellPathCombo.editor.item
+            ?.toString()
+            ?.trim()
+            .orEmpty()
+    }
 
     private fun spinnerValue(spinner: JSpinner): Int = (spinner.value as Number).toInt()
 
@@ -329,24 +341,9 @@ class KetraTermSettingsConfigurable : SearchableConfigurable {
         value: Int,
         minimum: Int,
         maximum: Int,
-    ): JSpinner = integerSpinner(value, minimum, maximum)
-
-    private fun integerSpinner(
-        value: Int,
-        minimum: Int,
-        maximum: Int,
     ): JSpinner =
         JSpinner(SpinnerNumberModel(value, minimum, maximum, 1)).apply {
             editor = JSpinner.NumberEditor(this, "#")
-        }
-
-    private fun decimalSpinner(
-        value: Double,
-        minimum: Double,
-        maximum: Double,
-    ): JSpinner =
-        JSpinner(SpinnerNumberModel(value, minimum, maximum, 0.1)).apply {
-            editor = JSpinner.NumberEditor(this, "0.0")
         }
 }
 
@@ -403,26 +400,9 @@ private fun fontFamilyOptions(): Array<String> =
             addAll(SwingSettings.getMonospaceFontFamilies())
         }.toTypedArray()
 
-private fun shellPathOptions(): Array<Any> =
-    TerminalProfileRegistry()
-        .availableProfiles()
-        .map(::ShellPathOption)
-        .toTypedArray()
-
-private fun shellPathOptionFor(shellPath: String): ShellPathOption? =
-    shellPathOptions()
-        .asSequence()
-        .filterIsInstance<ShellPathOption>()
-        .firstOrNull { option ->
-            option.profile.command
-                .first()
-                .shellPathMatches(shellPath)
-        }
-
-private fun String.shellPathMatches(shellPath: String): Boolean {
-    if (equals(shellPath, ignoreCase = true)) return true
-    val executableName = substringAfterLast('\\').substringAfterLast('/')
-    return executableName.equals(shellPath, ignoreCase = true)
+private fun ComboBox<String>.selectConfiguredFont(family: String) {
+    if ((0 until itemCount).none { getItemAt(it) == family }) addItem(family)
+    selectedItem = family
 }
 
 private fun themeOptions(): Array<ThemeOption> =
@@ -434,7 +414,7 @@ private fun themeOptions(): Array<ThemeOption> =
         *TerminalTheme.entries
             .map { theme ->
                 ThemeOption(
-                    theme.name.lowercase(Locale.ROOT).replace('_', '-'),
+                    theme.id,
                     theme.name
                         .lowercase(Locale.ROOT)
                         .split('_')
@@ -467,10 +447,14 @@ private fun permissionOptions(): Array<PermissionOption> =
         PermissionOption("deny", KetraTermBundle.message("settings.ketraterm.permission.deny")),
     )
 
-private fun visiblePermissionOption(
-    id: String,
-    fallback: String,
-): PermissionOption = permissionOptions().firstOrNull { it.id == id } ?: permissionOptions().first { it.id == fallback }
+private fun ComboBox<PermissionOption>.selectPermission(id: String) {
+    val options = permissionOptions().toMutableList()
+    if (id == "allowlist") {
+        options += PermissionOption(id, KetraTermBundle.message("settings.ketraterm.permission.allowlist.configured"))
+    }
+    model = DefaultComboBoxModel(options.toTypedArray())
+    selectedItem = options.first { it.id == id }
+}
 
 private data class PasteSanitizationOption(
     val id: String,

@@ -19,6 +19,8 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.editor.colors.EditorColorsListener
+import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindow
@@ -71,6 +73,14 @@ class KetraTermProjectTerminalService(
 
     init {
         KetraTermIntellijSettings.getInstance().addChangeListener(settingsChangedListener)
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            EditorColorsManager.TOPIC,
+            EditorColorsListener {
+                if (KetraTermIntellijSettings.getInstance().state.themeId == KetraTermIntellijSettings.DEFAULT_THEME_ID) {
+                    reloadOpenTerminalSettings()
+                }
+            },
+        )
     }
 
     /**

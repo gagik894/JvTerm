@@ -393,6 +393,14 @@ enum class TerminalTheme {
     EVERFOREST,
     ;
 
+    /** Stable identifier used by host configuration files. */
+    val id: String get() = name.lowercase(Locale.ROOT).replace('_', '-')
+
+    companion object {
+        /** Resolves a persisted identifier or a legacy enum name, ignoring case. */
+        fun fromId(id: String): TerminalTheme? = entries.firstOrNull { it.id.equals(id.replace('_', '-'), ignoreCase = true) }
+    }
+
     /**
      * Creates the [TerminalColorPalette] for this theme.
      *

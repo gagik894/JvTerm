@@ -65,7 +65,7 @@ internal class KetraTermTerminalPane private constructor(
     }
 
     /**
-     * Rebuilds the terminal component from the latest IntelliJ settings.
+     * Applies the latest IntelliJ settings to this terminal pane.
      */
     fun reloadSettings() {
         terminal.reloadSettings()
@@ -84,7 +84,7 @@ internal class KetraTermTerminalPane private constructor(
 
     private fun reconcileCompletion() {
         if (closed) return
-        val settings = KetraTermIntellijSettings.current()
+        val settings = KetraTermIntellijSettings.getInstance().state
         if (!settings.smartSuggestionsEnabled) {
             completionBinding.update(null, false)
             completionService?.releaseResources(tab)
@@ -114,7 +114,7 @@ internal class KetraTermTerminalPane private constructor(
             SwingTerminalHostAction.COPY_SELECTION -> terminal.currentSelection() != null
             SwingTerminalHostAction.OPEN_SEARCH -> fromContextMenu || KetraTermIntellijSettings.getInstance().overrideIdeShortcuts()
             SwingTerminalHostAction.REQUEST_SUGGESTIONS ->
-                KetraTermIntellijSettings.current().smartSuggestionsEnabled &&
+                KetraTermIntellijSettings.getInstance().state.smartSuggestionsEnabled &&
                     completionBinding.isEnabled
             SwingTerminalHostAction.SELECT_ALL,
             SwingTerminalHostAction.CLEAR_SCREEN,

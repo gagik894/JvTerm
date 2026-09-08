@@ -24,219 +24,42 @@ import io.github.ketraterm.workspace.config.TerminalWorkspaceConfigManager
 import java.awt.Font
 import java.nio.file.Path
 import java.util.*
+import java.util.concurrent.CopyOnWriteArrayList
+import javax.swing.SwingUtilities
 
 /**
  * Standalone application settings model integrated with TOML configuration.
  *
  * It acts as the bridge between host-neutral persisted [TerminalConfig] and
- * host-specific Swing settings. Changes to configuration parameters are immediately
- * saved to disk.
+ * host-specific Swing settings. Each update saves one complete immutable snapshot
+ * before publishing it to consumers on the Swing EDT.
  */
 internal class KetraTermSettings(
     private val configManager: TerminalWorkspaceConfigManager = TerminalWorkspaceConfigManager.getDefault(),
+    private val saveConfig: (TerminalConfig) -> Unit = configManager::save,
 ) {
-    private var config: TerminalConfig = configManager.load()
+    @Volatile
+    var config: TerminalConfig = configManager.load()
+        private set
 
-    var theme: TerminalTheme
-        get() =
-            TerminalTheme.entries.firstOrNull {
-                it.name.lowercase(Locale.ROOT).replace('_', '-') == config.theme
-            } ?: TerminalTheme.ONE_DARK
-        set(value) {
-            updateConfig(config.copy(theme = value.name.lowercase(Locale.ROOT).replace('_', '-')))
-        }
+    private val changeListeners = CopyOnWriteArrayList<() -> Unit>()
+    private val updateLock = Any()
 
-    var treatAmbiguousAsWide: Boolean
-        get() = config.treatAmbiguousAsWide
-        set(value) {
-            updateConfig(config.copy(treatAmbiguousAsWide = value))
-        }
-
-    var columns: Int
-        get() = config.columns
-        set(value) {
-            updateConfig(config.copy(columns = value))
-        }
-
-    var rows: Int
-        get() = config.rows
-        set(value) {
-            updateConfig(config.copy(rows = value))
-        }
-
-    var fontFamily: String
-        get() = config.fontFamily
-        set(value) {
-            updateConfig(config.copy(fontFamily = value))
-        }
-
-    var fontSize: Int
-        get() = config.fontSize
-        set(value) {
-            updateConfig(config.copy(fontSize = value))
-        }
-
-    var useSystemFallbackFonts: Boolean
-        get() = config.useSystemFallbackFonts
-        set(value) {
-            updateConfig(config.copy(useSystemFallbackFonts = value))
-        }
-
-    var cursorBlinkMillis: Int
-        get() = config.cursorBlinkMillis
-        set(value) {
-            updateConfig(config.copy(cursorBlinkMillis = value))
-        }
-
-    var cursorShape: String
-        get() = config.cursorShape
-        set(value) {
-            updateConfig(config.copy(cursorShape = value))
-        }
-
-    var shellPath: String
-        get() = config.shellPath
-        set(value) {
-            updateConfig(config.copy(shellPath = value))
-        }
-
-    var startDirectory: String
-        get() = config.startDirectory
-        set(value) {
-            updateConfig(config.copy(startDirectory = value))
-        }
-
-    var audibleBell: Boolean
-        get() = config.audibleBell
-        set(value) {
-            updateConfig(config.copy(audibleBell = value))
-        }
-
-    var visualBell: Boolean
-        get() = config.visualBell
-        set(value) {
-            updateConfig(config.copy(visualBell = value))
-        }
-
-    var pasteOnMiddleClick: Boolean
-        get() = config.pasteOnMiddleClick
-        set(value) {
-            updateConfig(config.copy(pasteOnMiddleClick = value))
-        }
-
-    var pasteSanitizationPolicy: io.github.ketraterm.input.policy.PasteSanitizationPolicy
-        get() = config.pasteSanitizationPolicy
-        set(value) {
-            updateConfig(config.copy(pasteSanitizationPolicy = value))
-        }
-
-    var scrollbackLines: Int
-        get() = config.scrollbackLines
-        set(value) {
-            updateConfig(config.copy(scrollbackLines = value))
-        }
-
-    var lineHeight: Float
-        get() = config.lineHeight
-        set(value) {
-            updateConfig(config.copy(lineHeight = value))
-        }
-
-    var shellRequestResizeWindow: Boolean
-        get() = config.shellRequestResizeWindow
-        set(value) {
-            updateConfig(config.copy(shellRequestResizeWindow = value))
-        }
-
-    var shellRequestWindowManipulation: Boolean
-        get() = config.shellRequestWindowManipulation
-        set(value) {
-            updateConfig(config.copy(shellRequestWindowManipulation = value))
-        }
-
-    var desktopNotificationsEnabled: Boolean
-        get() = config.desktopNotificationsEnabled
-        set(value) {
-            updateConfig(config.copy(desktopNotificationsEnabled = value))
-        }
-
-    var persistentSuggestionLearningEnabled: Boolean
-        get() = config.persistentSuggestionLearningEnabled
-        set(value) {
-            updateConfig(config.copy(persistentSuggestionLearningEnabled = value))
-        }
-
-    var smartSuggestionsEnabled: Boolean
-        get() = config.smartSuggestionsEnabled
-        set(value) {
-            updateConfig(config.copy(smartSuggestionsEnabled = value))
-        }
-
-    var shellSuggestionsEnabled: Boolean
-        get() = config.shellSuggestionsEnabled
-        set(value) {
-            updateConfig(config.copy(shellSuggestionsEnabled = value))
-        }
-
-    var acceptSelectedSuggestionWithEnter: Boolean
-        get() = config.acceptSelectedSuggestionWithEnter
-        set(value) {
-            updateConfig(config.copy(acceptSelectedSuggestionWithEnter = value))
-        }
-
-    var scrollOnOutput: Boolean
-        get() = config.scrollOnOutput
-        set(value) {
-            updateConfig(config.copy(scrollOnOutput = value))
-        }
-
-    var clipboardLocalWrite: TerminalClipboardPermission
-        get() = config.clipboardLocalWrite
-        set(value) {
-            updateConfig(config.copy(clipboardLocalWrite = value))
-        }
-
-    var clipboardRemoteWrite: TerminalClipboardPermission
-        get() = config.clipboardRemoteWrite
-        set(value) {
-            updateConfig(config.copy(clipboardRemoteWrite = value))
-        }
-
-    var clipboardRead: TerminalClipboardPermission
-        get() = config.clipboardRead
-        set(value) {
-            updateConfig(config.copy(clipboardRead = value))
-        }
-
-    var clipboardMaxDecodedBytes: Int
-        get() = config.clipboardMaxDecodedBytes
-        set(value) {
-            updateConfig(config.copy(clipboardMaxDecodedBytes = value))
-        }
-
-    var titleLocalPermission: TerminalTitlePermission
-        get() = config.titleLocalPermission
-        set(value) {
-            updateConfig(config.copy(titleLocalPermission = value))
-        }
-
-    var titleRemotePermission: TerminalTitlePermission
-        get() = config.titleRemotePermission
-        set(value) {
-            updateConfig(config.copy(titleRemotePermission = value))
-        }
+    val theme: TerminalTheme
+        get() = TerminalTheme.fromId(config.theme) ?: TerminalTheme.ONE_DARK
 
     /** Path for the compact persisted command-completion stats index. */
     val commandCompletionStatsPath: Path
         get() = configManager.configPath.resolveSibling(TerminalCompletionLearningCoordinator.currentFileName())
 
     fun current(): SwingSettings {
+        val config = config
         val resolvedFamily = SwingSettings.resolveFontFamily(config.fontFamily)
         return SwingSettings(
             font = Font(resolvedFamily, Font.PLAIN, config.fontSize),
             columns = config.columns,
             rows = config.rows,
-            palette = theme.createPalette(),
+            palette = (TerminalTheme.fromId(config.theme) ?: TerminalTheme.ONE_DARK).createPalette(),
             treatAmbiguousAsWide = config.treatAmbiguousAsWide,
             cursorBlinkMillis = config.cursorBlinkMillis,
             useSystemFallbackFonts = config.useSystemFallbackFonts,
@@ -255,6 +78,7 @@ internal class KetraTermSettings(
     }
 
     fun createHostPolicy(command: List<String>): HostPolicy {
+        val config = config
         val isRemote = command.firstOrNull()?.let(::isSshExecutable) == true
         val clipboardOrigin = if (isRemote) TerminalClipboardOrigin.REMOTE else TerminalClipboardOrigin.LOCAL
         val titleOrigin = if (isRemote) TerminalTitleOrigin.REMOTE else TerminalTitleOrigin.LOCAL
@@ -301,8 +125,42 @@ internal class KetraTermSettings(
         return executable == "ssh" || executable == "ssh.exe"
     }
 
-    private fun updateConfig(newConfig: TerminalConfig) {
-        config = newConfig
-        configManager.save(newConfig)
+    /** Registers a consumer notified on the EDT after a successfully persisted update. */
+    fun addChangeListener(listener: () -> Unit) {
+        changeListeners += listener
+    }
+
+    fun removeChangeListener(listener: () -> Unit) {
+        changeListeners -= listener
+    }
+
+    /**
+     * Saves and publishes one validated snapshot. Call off the EDT because saving blocks.
+     * A failed save leaves the active snapshot unchanged. Equal updates do no work.
+     */
+    fun update(newConfig: TerminalConfig) {
+        check(!SwingUtilities.isEventDispatchThread()) { "Settings must be saved off the EDT" }
+        synchronized(updateLock) {
+            if (config == newConfig) return
+            saveConfig(newConfig)
+            SwingUtilities.invokeAndWait {
+                config = newConfig
+                var notificationFailure: Exception? = null
+                for (listener in changeListeners) {
+                    try {
+                        listener()
+                    } catch (failure: Exception) {
+                        val previous = notificationFailure
+                        if (previous == null) {
+                            notificationFailure = failure
+                        } else {
+                            previous.addSuppressed(failure)
+                        }
+                    }
+                }
+                // Persistence already succeeded. Report consumer failures separately from saving.
+                notificationFailure?.let { failure -> SwingUtilities.invokeLater { throw failure } }
+            }
+        }
     }
 }

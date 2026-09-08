@@ -643,7 +643,7 @@ class SwingTerminal
         }
 
         /**
-         * Rebuilds settings, metrics, preferred size, and repaint state.
+         * Applies changed settings, rebuilding geometry only when its inputs change.
          *
          * This method may be called from any thread; component state is updated
          * asynchronously on the EDT.
@@ -1099,29 +1099,46 @@ class SwingTerminal
 
         private fun reloadSettingsOnEdt() {
             if (disposed) return
-            settings = settingsProvider.currentSettings()
-            font = settings.font
-            background = Color(settings.palette.defaultBackground, true)
-            foreground = Color(settings.palette.defaultForeground, true)
-            isOpaque = true
-            metrics = buildMetrics(settings)
-            preferredSize = preferredGridSize(settings.columns, settings.rows)
-            configureCursorTimerOnEdt()
-            configureVisualBellOnEdt()
-            session?.let {
-                updateMinimizedStateFromAncestor()
-                applySettingsToSession(it, settings)
+            val previous = settings
+            val next = settingsProvider.currentSettings()
+            if (next == previous) return
+
+            val nextMetrics =
+                if (next.font != previous.font || next.lineHeight != previous.lineHeight) buildMetrics(next) else metrics
+            val geometryChanged =
+                nextMetrics != metrics ||
+                    next.padding != previous.padding ||
+                    next.alternateScreenPadding != previous.alternateScreenPadding ||
+                    next.shellIntegrationDecorationGutterWidth != previous.shellIntegrationDecorationGutterWidth
+            if (geometryChanged) rowScroller.finish()
+            settings = next
+            metrics = nextMetrics
+            if (next.font != previous.font) font = next.font
+            if (next.palette != previous.palette) {
+                background = Color(next.palette.defaultBackground, true)
+                foreground = Color(next.palette.defaultForeground, true)
             }
-            selectionController.clearSelection()
-            searchController.updateViewportHighlights()
-            hyperlinkController.clearHyperlinkHover()
-            hyperlinkDiscoveryController.reset()
-            resizeSessionToVisibleGridOnEdt()
-            session?.let {
-                requestRenderFromSession(it)
+            if (next.cursorBlinkMillis != previous.cursorBlinkMillis) configureCursorTimerOnEdt()
+            if (next.visualBellEnabled != previous.visualBellEnabled ||
+                next.visualBellColor != previous.visualBellColor ||
+                next.visualBellDurationMillis != previous.visualBellDurationMillis ||
+                next.visualBellEdgeThicknessPixels != previous.visualBellEdgeThicknessPixels
+            ) {
+                configureVisualBellOnEdt()
             }
-            publishViewportState(renderCache.historySize)
-            revalidate()
+            session?.let { applySettingsToSession(it, next, previous) }
+            if (geometryChanged) {
+                if (resizeSessionToVisibleGridOnEdt()) selectionController.clearSelection()
+                searchController.updateViewportHighlights()
+                hyperlinkController.clearHyperlinkHover()
+                hyperlinkDiscoveryController.reset()
+                session?.let { requestRenderFromSession(it) }
+            }
+            if (geometryChanged || next.columns != previous.columns || next.rows != previous.rows) {
+                preferredSize = preferredGridSize(next.columns, next.rows)
+                revalidate()
+            }
+            updateAutomaticSuggestionEligibilityOnEdt()
             repaint()
         }
 
@@ -1390,11 +1407,16 @@ class SwingTerminal
         private fun applySettingsToSession(
             session: TerminalSession,
             settings: SwingSettings,
+            previous: SwingSettings? = null,
         ) {
-            session.setTreatAmbiguousAsWide(settings.treatAmbiguousAsWide)
-            session.setThemePalette(settings.palette)
-            session.setCursorShape(settings.cursorShape)
-            session.setPasteSanitizationPolicy(settings.pasteSanitizationPolicy)
+            if (settings.treatAmbiguousAsWide != previous?.treatAmbiguousAsWide) {
+                session.setTreatAmbiguousAsWide(settings.treatAmbiguousAsWide)
+            }
+            if (settings.palette != previous?.palette) session.setThemePalette(settings.palette)
+            if (settings.cursorShape != previous?.cursorShape) session.setCursorShape(settings.cursorShape)
+            if (settings.pasteSanitizationPolicy != previous?.pasteSanitizationPolicy) {
+                session.setPasteSanitizationPolicy(settings.pasteSanitizationPolicy)
+            }
         }
 
         private fun handleScrollbarOverlayPressed(event: MouseEvent): Boolean {

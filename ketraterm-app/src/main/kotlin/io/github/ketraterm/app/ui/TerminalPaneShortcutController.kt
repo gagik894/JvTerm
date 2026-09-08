@@ -45,7 +45,7 @@ internal class TerminalPaneShortcutController(
             override fun mousePressed(event: MouseEvent) {
                 if (event.isConsumed) return
                 if (!SwingUtilities.isMiddleMouseButton(event)) return
-                if (!settings.pasteOnMiddleClick) return
+                if (!settings.config.pasteOnMiddleClick) return
                 if (!pane.terminal.pasteClipboardText()) return
                 event.consume()
             }

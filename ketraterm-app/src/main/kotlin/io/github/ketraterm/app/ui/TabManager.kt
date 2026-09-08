@@ -65,6 +65,10 @@ internal class TabManager(
 
     @Volatile private var completionShutdown: Job? = null
     private val shutdownStarted = AtomicBoolean()
+    private var appliedTheme = settings.theme
+    private val settingsListener: () -> Unit = {
+        if (!shutdownStarted.get()) reloadAllPanes()
+    }
     val selectedPane: TerminalPane?
         get() = tabBar.selectedId()?.let { getActivePane(it) }
 
@@ -156,8 +160,10 @@ internal class TabManager(
         val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
         try {
             focusManager.addKeyEventDispatcher(keyEventDispatcher)
+            settings.addChangeListener(settingsListener)
         } catch (failure: Throwable) {
             var cleanupFailure: Throwable? = failure
+            cleanupFailure = captureCleanupFailure(cleanupFailure) { settings.removeChangeListener(settingsListener) }
             cleanupFailure = captureCleanupFailure(cleanupFailure) { focusManager.removeKeyEventDispatcher(keyEventDispatcher) }
             cleanupFailure = captureCleanupFailure(cleanupFailure, ::closeCompletionLearningWithinBudget)
             throw requireNotNull(cleanupFailure)
@@ -291,6 +297,7 @@ internal class TabManager(
     /** Closes every open tab and starts bounded completion persistence without blocking the Swing EDT. */
     fun closeAllTabsWithoutConfirmation() {
         if (!shutdownStarted.compareAndSet(false, true)) return
+        settings.removeChangeListener(settingsListener)
         var failure: Throwable? = null
         failure =
             captureCleanupFailure(failure) {
@@ -333,7 +340,7 @@ internal class TabManager(
                 withTimeoutOrNull(COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS.milliseconds) {
                     completionShutdown?.join()
                     if (registry != null) {
-                        if (settings.smartSuggestionsEnabled) registry.closeAndFlush() else registry.closeWithoutFlush()
+                        if (settings.config.smartSuggestionsEnabled) registry.closeAndFlush() else registry.closeWithoutFlush()
                     }
                     true
                 } ?: false
@@ -347,21 +354,19 @@ internal class TabManager(
         }
     }
 
-    /** Propagates a settings reload to all live panes and the workspace. */
-    fun reloadAllPanes() {
-        val snapshot = settings.current()
-        Chrome.applyPalette(snapshot.palette)
-        frame.rootPane.putClientProperty("JRootPane.titleBarBackground", Chrome.topBarBackground)
-        frame.rootPane.putClientProperty("JRootPane.titleBarForeground", Chrome.textPrimary)
-        SwingUtilities.updateComponentTreeUI(frame)
+    private fun reloadAllPanes() {
+        val theme = settings.theme
+        if (theme != appliedTheme) {
+            appliedTheme = theme
+            Chrome.applyPalette(theme.createPalette())
+            frame.rootPane.putClientProperty("JRootPane.titleBarBackground", Chrome.topBarBackground)
+            frame.rootPane.putClientProperty("JRootPane.titleBarForeground", Chrome.textPrimary)
+            SwingUtilities.updateComponentTreeUI(frame)
+            tabContentPanel.background = Chrome.terminalBackground
+            tabBar.repaint()
+        }
         panes.forEach { it.reloadSettings() }
-        tabContentPanel.background = Chrome.terminalBackground
-        workspace.applySettings(
-            palette = snapshot.palette,
-            treatAmbiguousAsWide = snapshot.treatAmbiguousAsWide,
-        )
         reconcileCompletion()
-        tabBar.repaint()
     }
 
     /**
@@ -821,7 +826,7 @@ internal class TabManager(
             event: io.github.ketraterm.protocol.ShellIntegrationEvent,
         ) {
             if (event.marker != io.github.ketraterm.protocol.ShellIntegrationMarker.COMMAND_FINISHED) return
-            if (!settings.smartSuggestionsEnabled) return
+            if (!settings.config.smartSuggestionsEnabled) return
             val state = tab.session.shellIntegrationState
             val metadata = state.commandMetadata(state.latestCommandRecordId()) ?: return
             metadata.commandText?.let { command ->
@@ -836,12 +841,12 @@ internal class TabManager(
         }
 
         override fun bell(tab: TerminalWorkspaceTab) {
-            if (settings.visualBell) {
+            if (settings.config.visualBell) {
                 SwingUtilities.invokeLater {
                     panes.firstOrNull { it.tab == tab }?.terminal?.showVisualBell()
                 }
             }
-            if (settings.audibleBell) {
+            if (settings.config.audibleBell) {
                 SwingUtilities.invokeLater {
                     frame.toolkit.beep()
                 }
@@ -906,7 +911,7 @@ internal class TabManager(
             body: String,
             level: io.github.ketraterm.protocol.NotificationLevel,
         ) {
-            if (settings.desktopNotificationsEnabled) {
+            if (settings.config.desktopNotificationsEnabled) {
                 DesktopNotificationManager.showNotification(title, body, level)
             }
         }
@@ -947,7 +952,7 @@ internal class TabManager(
             rows: Int,
             columns: Int,
         ) {
-            if (settings.shellRequestResizeWindow) {
+            if (settings.config.shellRequestResizeWindow) {
                 // Resize the session synchronously so that subsequent query reports (e.g. vttest CSI 18 t)
                 // return the updated size immediately.
                 tab.session.resize(columns, rows)
@@ -972,7 +977,7 @@ internal class TabManager(
             x: Int,
             y: Int,
         ) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.setLocation(x, y)
                 }
@@ -980,7 +985,7 @@ internal class TabManager(
         }
 
         override fun minimizeWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.state = Frame.ICONIFIED
                 }
@@ -988,7 +993,7 @@ internal class TabManager(
         }
 
         override fun deminimizeWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.state = Frame.NORMAL
                 }
@@ -996,7 +1001,7 @@ internal class TabManager(
         }
 
         override fun raiseWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.toFront()
                 }
@@ -1004,7 +1009,7 @@ internal class TabManager(
         }
 
         override fun lowerWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.toBack()
                 }
@@ -1015,7 +1020,7 @@ internal class TabManager(
             tab: TerminalWorkspaceTab,
             maximize: Boolean,
         ) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     if (maximize) {
                         frame.extendedState = Frame.MAXIMIZED_BOTH
@@ -1028,17 +1033,17 @@ internal class TabManager(
     }
 
     private fun ensureCompletionRegistry(): StandaloneCompletionRegistry? {
-        if (!settings.smartSuggestionsEnabled || shutdownStarted.get() || completionShutdown != null) return null
+        if (!settings.config.smartSuggestionsEnabled || shutdownStarted.get() || completionShutdown != null) return null
         return completionRegistry ?: StandaloneCompletionRegistry
             .create(
                 persistencePath = settings.commandCompletionStatsPath,
-                persistenceEnabled = settings.persistentSuggestionLearningEnabled,
+                persistenceEnabled = settings.config.persistentSuggestionLearningEnabled,
                 onPersistenceLoadFailure = { LOGGER.log(Level.WARNING, "Completion learning could not be loaded", it) },
             ).also { completionRegistry = it }
     }
 
     private fun reconcileCompletion() {
-        if (!settings.smartSuggestionsEnabled) {
+        if (!settings.config.smartSuggestionsEnabled) {
             panes.forEach { it.setCompletionResources(null) }
             val retiring = completionRegistry ?: return
             completionRegistry = null
@@ -1058,7 +1063,7 @@ internal class TabManager(
         if (panes.isEmpty()) return
         val previous = completionRegistry
         val registry = ensureCompletionRegistry() ?: return
-        registry.setPersistenceEnabled(settings.persistentSuggestionLearningEnabled)
+        registry.setPersistenceEnabled(settings.config.persistentSuggestionLearningEnabled)
         if (previous === registry) return
         panes.forEach { pane ->
             pane.setCompletionResources(
