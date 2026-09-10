@@ -1150,12 +1150,18 @@ class SwingTerminal
          * Returns the current visible cell selection, or `null` when nothing is
          * selected.
          *
-         * This method may be called from any thread. Off-EDT callers receive a
-         * snapshot from the EDT.
+         * This method may be called from any thread. Off-EDT callers wait for the
+         * EDT to read the binding, selection, and viewport together. EDT callers
+         * read directly.
          *
          * @return current selection, or `null`.
          */
         fun currentSelection(): CellSelection? {
+            if (!SwingUtilities.isEventDispatchThread()) {
+                var selection: CellSelection? = null
+                SwingUtilities.invokeAndWait { selection = currentSelection() }
+                return selection
+            }
             if (session == null) return null
             return selectionController.getViewportSelection(renderCache)
         }
