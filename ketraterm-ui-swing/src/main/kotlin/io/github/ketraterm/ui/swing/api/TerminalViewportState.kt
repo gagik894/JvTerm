@@ -37,7 +37,7 @@ package io.github.ketraterm.ui.swing.api
  * live bottom.
  * @property viewportHeightPixels visual viewport height in pixels.
  * @property contentHeightPixels visual content height for the current render
- * cache in pixels.
+ * cache in pixels, or zero before the bound session publishes its first frame.
  * @property cellHeightPixels fixed terminal row height in pixels.
  */
 data class TerminalViewportState(

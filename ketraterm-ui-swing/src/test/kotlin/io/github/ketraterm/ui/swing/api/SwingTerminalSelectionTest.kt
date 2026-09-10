@@ -36,10 +36,14 @@ import io.github.ketraterm.ui.swing.settings.TerminalClipboardHandler
 import io.github.ketraterm.ui.swing.settings.TerminalHyperlinkHandler
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestion
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.CsvSource
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
@@ -48,6 +52,132 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
 
 class SwingTerminalSelectionTest {
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `replacement stays empty and noninteractive until its first published frame`(unbindFirst: Boolean) {
+        fun linkedFrame(
+            text: String,
+            hyperlinkId: Int,
+            rows: Int = 1,
+        ): TestRenderFrame =
+            TestRenderFrame(
+                Array(rows) {
+                    Array(text.length) { column ->
+                        TestCell(codeWord = text[column].code, flags = TerminalRenderCellFlags.CODEPOINT, hyperlinkId = hyperlinkId)
+                    }
+                },
+            )
+
+        val previous =
+            testSession(
+                linkedFrame("alpha", 3, rows = 3),
+                hyperlinkResolver = TerminalHyperlinkResolver { "https://old.example/$it" },
+                workerDispatcher = Dispatchers.Unconfined,
+            )
+        val dispatcher = StandardTestDispatcher()
+        val replacement =
+            testSession(
+                linkedFrame("bravo", 7),
+                hyperlinkResolver = TerminalHyperlinkResolver { "https://new.example/$it" },
+                workerDispatcher = dispatcher,
+                publishInitialFrame = false,
+            )
+        try {
+            SwingUtilities.invokeAndWait {
+                val settings =
+                    SwingSettings(
+                        columns = 5,
+                        rows = 1,
+                        padding = SwingPadding(),
+                        shellIntegrationDecorationGutterWidth = 0,
+                        cursorBlinkMillis = 0,
+                    )
+                val openedLinks = mutableListOf<String>()
+                val reused =
+                    SwingTerminal(
+                        settingsProvider = { settings },
+                        hostServices =
+                            SwingHostServices(
+                                hyperlinkHandler =
+                                    TerminalHyperlinkHandler {
+                                        openedLinks.add(it)
+                                        true
+                                    },
+                            ),
+                    )
+                val fresh = SwingTerminal(settingsProvider = { settings })
+                try {
+                    reused.size = reused.preferredGridSize(5, 1)
+                    fresh.size = fresh.preferredGridSize(5, 1)
+                    reused.bind(previous)
+                    assertTrue(reused.selectAll())
+                    assertEquals(3 * reused.viewportState().cellHeightPixels, reused.viewportState().contentHeightPixels)
+                    val oldPixels = componentPixels(reused)
+                    if (unbindFirst) reused.unbind()
+                    reused.bind(replacement)
+                    fresh.bind(replacement)
+
+                    assertNull(replacement.renderPublisher.current(), "The test scheduler must hold the replacement's first frame")
+                    assertAll(
+                        {
+                            assertArrayEquals(
+                                componentPixels(fresh),
+                                componentPixels(reused),
+                                "The previous session must not remain visible",
+                            )
+                        },
+                        {
+                            assertEquals(
+                                0,
+                                reused.viewportState().contentHeightPixels,
+                                "Retained cache dimensions are not published content",
+                            )
+                        },
+                        {
+                            assertEquals(
+                                fresh.viewportState(),
+                                reused.viewportState(),
+                                "Empty viewport geometry must not depend on the prior source",
+                            )
+                        },
+                        { assertNull(reused.currentSelection(), "The previous selection must not survive replacement") },
+                        { assertFalse(reused.selectAll(), "Selection requires a published frame belonging to this session") },
+                        {
+                            for (listener in reused.mouseListeners) listener.mousePressed(mousePressedWithCtrl(reused, 1, 1))
+                            assertTrue(openedLinks.isEmpty(), "Retained hyperlink cells must not activate against the new session")
+                        },
+                        {
+                            for (listener in reused.mouseListeners) listener.mousePressed(mousePressed(reused, 1, 1, 2))
+                            assertNull(reused.currentSelection(), "Pointer selection must not use retained cells")
+                        },
+                    )
+                    val emptyPixels = componentPixels(reused)
+                    assertFalse(oldPixels.contentEquals(emptyPixels))
+
+                    dispatcher.scheduler.runCurrent()
+
+                    assertNotNull(replacement.renderPublisher.current())
+                    val newPixels = componentPixels(reused)
+                    assertFalse(emptyPixels.contentEquals(newPixels), "The first publication must display the replacement text")
+                    assertArrayEquals(componentPixels(fresh), newPixels)
+                    assertTrue(reused.viewportState().contentHeightPixels > 0)
+                    assertEquals(fresh.viewportState(), reused.viewportState())
+                    for (listener in reused.mouseListeners) listener.mousePressed(mousePressedWithCtrl(reused, 1, 1))
+                    assertEquals(listOf("https://new.example/7"), openedLinks)
+                    assertTrue(reused.selectAll())
+                    assertEquals(CellSelection(0, 0, 5, 0), reused.currentSelection())
+                } finally {
+                    reused.dispose()
+                    fresh.dispose()
+                }
+            }
+        } finally {
+            previous.close()
+            replacement.close()
+            dispatcher.scheduler.runCurrent()
+        }
+    }
+
     @ParameterizedTest
     @CsvSource(
         "ABC, אבג, 3, false",
@@ -686,6 +816,8 @@ class SwingTerminalSelectionTest {
         inputEncoder: TerminalInputEncoder = NoOpInputEncoder,
         renderReader: TerminalRenderFrameReader = StaticFrameReader(frame),
         hyperlinkResolver: TerminalHyperlinkResolver = TerminalHyperlinkResolver.NONE,
+        workerDispatcher: CoroutineDispatcher = Dispatchers.Default,
+        publishInitialFrame: Boolean = true,
     ): TerminalSession {
         val terminal = TerminalBuffers.create(width = frame.columns, height = frame.rows, maxHistory = 5)
         val session =
@@ -698,8 +830,9 @@ class SwingTerminalSelectionTest {
                 parser = NoOpParser,
                 inputEncoder = inputEncoder,
                 hyperlinkResolver = hyperlinkResolver,
+                workerDispatcher = workerDispatcher,
             )
-        session.renderPublisher.updateAndPublish(renderReader)
+        if (publishInitialFrame) session.renderPublisher.updateAndPublish(renderReader)
         return session
     }
 

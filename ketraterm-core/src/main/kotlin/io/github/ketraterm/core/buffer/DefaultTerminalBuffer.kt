@@ -143,6 +143,7 @@ internal class DefaultTerminalBuffer private constructor(
     }
 
     override fun reset() {
+        val wasReverseVideo = state.modes.isReverseVideo
         if (state.isAltScreenActive) {
             this.exitAltBuffer()
         }
@@ -154,6 +155,9 @@ internal class DefaultTerminalBuffer private constructor(
         state.altBuffer.clearKittyKeyboardStack()
         state.isAttributeChangeExtentRectangle = false
         state.modes.reset()
+        if (wasReverseVideo != state.modes.isReverseVideo) {
+            state.markGlobalAttributesChanged()
+        }
         state.tabStops.resetToDefault()
         state.cursorShape = state.defaultCursorShape
         state.palette = state.themePalette
@@ -180,7 +184,7 @@ internal class DefaultTerminalBuffer private constructor(
         resetSavedCursorToHome(state.altBuffer.savedCursor)
         state.cursorShape = state.defaultCursorShape
         if (wasReverseVideo != state.modes.isReverseVideo) {
-            state.markVisibleLinesChanged()
+            state.markGlobalAttributesChanged()
         }
         state.markCursorChanged()
     }

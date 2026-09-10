@@ -83,6 +83,10 @@ internal class TerminalState(
     var contentGeneration: Long = 0L
         private set
 
+    /** Global interpretation of stored attributes, including both buffers and retained history. */
+    var globalAttributeGeneration: Long = 0L
+        private set
+
     var structureGeneration: Long = 0L
         private set
 
@@ -204,6 +208,12 @@ internal class TerminalState(
         for (row in 0 until dimensions.height) {
             markLineChanged(ring[resolveRingIndex(row)])
         }
+    }
+
+    /** Invalidates rendered attributes without mutating stored cells or walking retained history. */
+    fun markGlobalAttributesChanged() {
+        markVisualChanged()
+        globalAttributeGeneration++
     }
 
     fun markStructureChanged() {

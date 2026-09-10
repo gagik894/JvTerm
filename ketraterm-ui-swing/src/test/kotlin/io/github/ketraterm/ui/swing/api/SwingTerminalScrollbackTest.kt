@@ -23,6 +23,7 @@ import io.github.ketraterm.input.event.TerminalMouseEvent
 import io.github.ketraterm.input.event.TerminalPasteEvent
 import io.github.ketraterm.parser.api.TerminalOutputParser
 import io.github.ketraterm.render.api.*
+import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.session.TerminalShellIntegrationState
@@ -31,9 +32,10 @@ import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingSettingsProvider
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
@@ -49,6 +51,35 @@ import javax.swing.SwingUtilities
 
 /** Rendering, viewport, and EDT coalescing tests for Swing terminal scrollback. */
 class SwingTerminalScrollbackTest {
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `reverse video changes invalidate retained history including soft reset`(softReset: Boolean) {
+        val terminal = TerminalBuffers.create(width = 2, height = 1, maxHistory = 1)
+        terminal.writeCodepoint('x'.code)
+        terminal.scrollUp()
+        val reader = terminal as TerminalRenderFrameReader
+        val reused = TerminalRenderCache(2, 1)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        assertEquals('x'.code, reused.codeWords[0])
+        assertFalse(TerminalRenderAttrs.isInverse(reused.attrWords[0]))
+
+        terminal.setReverseVideo(true)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        val inverted = TerminalRenderCache(2, 1)
+        inverted.updateFrom(reader, scrollbackOffset = 1)
+        assertTrue(TerminalRenderAttrs.isInverse(inverted.attrWords[0]))
+        assertArrayEquals(inverted.attrWords, reused.attrWords, "Existing history must receive global reverse-video attributes")
+
+        if (softReset) terminal.softReset() else terminal.setReverseVideo(false)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        val restored = TerminalRenderCache(2, 1)
+        restored.updateFrom(reader, scrollbackOffset = 1)
+        assertEquals('x'.code, restored.codeWords[0])
+        assertFalse(TerminalRenderAttrs.isInverse(restored.attrWords[0]))
+        assertArrayEquals(restored.attrWords, reused.attrWords, "Resetting reverse video must also restore cached history attributes")
+        assertArrayEquals(restored.codeWords, reused.codeWords)
+    }
+
     @Test
     fun `equal render requests schedule at most one pending EDT repaint`() {
         val terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5)

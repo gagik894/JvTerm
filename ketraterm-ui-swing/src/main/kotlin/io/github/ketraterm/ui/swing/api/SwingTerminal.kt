@@ -307,7 +307,7 @@ class SwingTerminal
                     override fun openHyperlink(hyperlinkId: Int): Boolean = this@SwingTerminal.openHyperlink(hyperlinkId)
                 },
             )
-        private val searchController =
+        private val searchController: TerminalSearchController =
             TerminalSearchController(
                 object : TerminalSearchHost {
                     override val session: TerminalSession? get() = this@SwingTerminal.session
@@ -322,7 +322,7 @@ class SwingTerminal
                         boundSession: TerminalSession,
                     ): Boolean = this@SwingTerminal.scrollViewportToOnEdt(offsetRows, historySize, boundSession)
 
-                    override fun repaint() = this@SwingTerminal.repaint()
+                    override fun repaint() = this@SwingTerminal.renderFrameController.repaintFrame()
                 },
             )
         private var shellSuggestionController: SwingShellSuggestionController? = null
@@ -456,6 +456,7 @@ class SwingTerminal
                     override val metrics: SwingMetrics get() = this@SwingTerminal.metrics
                     override val visualGeometry: TerminalVisualViewportGeometry
                         get() = this@SwingTerminal.visualGeometry
+                    override val searchHighlights get() = this@SwingTerminal.searchController.viewportHighlights
                     override val componentWidth: Int get() = this@SwingTerminal.width
                     override val componentHeight: Int get() = this@SwingTerminal.height
                     override val cursorPresentationEnabled: Boolean get() = this@SwingTerminal.cursorPresentationEnabled
@@ -974,7 +975,7 @@ class SwingTerminal
 
             val g = graphics.create() as Graphics2D
             try {
-                if (session == null) {
+                if (!renderCache.hasFrame) {
                     painter.clear(g, settings.palette, width, height)
                     visualBellController.paint(g, width, height)
                     return
@@ -1024,6 +1025,7 @@ class SwingTerminal
             if (disposed) return
             bindingJob?.cancel(CancellationException("Terminal session binding replaced"))
             this.session = session
+            resetRenderCaches()
             updateMinimizedStateFromAncestor()
             applySettingsToSession(session, settings)
             resetScrollbackState()
@@ -1068,6 +1070,7 @@ class SwingTerminal
             bindingJob = null
             cancelAndHideShellSuggestionsOnEdt("Terminal session unbound")
             session = null
+            resetRenderCaches()
             resetScrollbackState()
             selectionController.clearSelection()
             searchController.reset(renderCache.rows)
@@ -1162,7 +1165,7 @@ class SwingTerminal
                 SwingUtilities.invokeAndWait { selection = currentSelection() }
                 return selection
             }
-            if (session == null) return null
+            if (!renderCache.hasFrame) return null
             return selectionController.getViewportSelection(renderCache)
         }
 
@@ -1178,7 +1181,7 @@ class SwingTerminal
          */
         fun selectAll(): Boolean {
             if (!SwingUtilities.isEventDispatchThread()) return false
-            if (session == null || renderCache.columns <= 0 || renderCache.rows <= 0) return false
+            if (!renderCache.hasFrame) return false
             val firstAbsoluteRow = renderCache.discardedCount
             val lastAbsoluteRow = renderCache.discardedCount + renderCache.historySize + renderCache.rows - 1L
             selectionController.selectAbsoluteRows(firstAbsoluteRow, lastAbsoluteRow, renderCache.columns)
@@ -1913,10 +1916,10 @@ class SwingTerminal
         private fun requestedRenderRows(): Int = viewportController.requestedRows(visibleRenderRows())
 
         private fun visualContentHeightPixels(): Int =
-            if (visualGeometry.rowCount == renderCache.rows) {
-                visualGeometry.visualHeight
-            } else {
-                renderCache.rows * metrics.cellHeight
+            when {
+                !renderCache.hasFrame -> 0
+                visualGeometry.rowCount == renderCache.rows -> visualGeometry.visualHeight
+                else -> renderCache.rows * metrics.cellHeight
             }
 
         private fun commandNavigationAnchorRow(): Int =
@@ -1926,10 +1929,15 @@ class SwingTerminal
                 0
             }
 
+        private fun resetRenderCaches() {
+            renderCache.reset()
+            searchCache.reset()
+        }
+
         private fun refreshRenderCacheFromSession(session: TerminalSession) {
             session.renderPublisher.readCurrent { published ->
                 renderCache.updateFrom(published)
-            }
+            } ?: return
             hyperlinkDiscoveryController.scheduleForFrame()
         }
 

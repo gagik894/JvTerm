@@ -154,10 +154,10 @@ internal class TerminalSearchController(
     ) {
         val oldActive = if (preserveActiveResult) highlights?.activeResultIndex ?: NO_ACTIVE_RESULT else NO_ACTIVE_RESULT
         // Resolve retained bounds under the session lock; the published viewport may lag output.
-        boundSession.readRenderFrameForAbsoluteRange(
+        host.searchCache.updateFromAbsoluteRange(
+            reader = boundSession,
             startAbsoluteRow = 0L,
             endAbsoluteRow = Long.MAX_VALUE,
-            consumer = host.searchCache,
         )
         val cache = host.searchCache
         val nextHighlights = model.search(cache, query, ignoreCase = ignoreCase)

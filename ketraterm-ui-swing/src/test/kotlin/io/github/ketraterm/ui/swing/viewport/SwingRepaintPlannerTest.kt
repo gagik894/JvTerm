@@ -15,16 +15,177 @@
  */
 package io.github.ketraterm.ui.swing.viewport
 
+import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.session.TerminalShellIntegrationState
 import io.github.ketraterm.ui.swing.render.TerminalShellIntegrationViewportDecorations
 import io.github.ketraterm.ui.swing.render.TerminalVisualViewportGeometry
+import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import org.junit.jupiter.api.Assumptions.assumeTrue
+import java.lang.management.ManagementFactory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class SwingRepaintPlannerTest {
+    @Test
+    fun `search replacement repaints old and new rows while retaining unchanged highlights`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val highlights = TerminalSearchViewportHighlights()
+        highlights.reset(4)
+        highlights.add(0, 0, 2, active = true)
+        highlights.add(2, 0, 2, active = false)
+        highlights.finish()
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink, searchHighlights = highlights)
+
+        highlights.reset(4)
+        highlights.add(1, 0, 2, active = true)
+        highlights.add(2, 0, 2, active = false)
+        highlights.finish()
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink, searchHighlights = highlights)
+
+        assertEquals(listOf(Region(0, 0, WIDTH, 2 * CELL_HEIGHT)), sink.regions)
+        sink.regions.clear()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink, searchHighlights = highlights)
+        assertEquals(emptyList(), sink.regions)
+    }
+
+    @Test
+    fun `active search navigation repaints both result styles even when ranges stay equal`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val highlights = TerminalSearchViewportHighlights()
+        highlights.reset(4)
+        highlights.add(0, 0, 2, active = true)
+        highlights.add(2, 0, 2, active = false)
+        highlights.finish()
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink, searchHighlights = highlights)
+
+        highlights.reset(4)
+        highlights.add(0, 0, 2, active = false)
+        highlights.add(2, 0, 2, active = true)
+        highlights.finish()
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink, searchHighlights = highlights)
+
+        assertEquals(listOf(Region(0, 0, WIDTH, CELL_HEIGHT), Region(0, 2 * CELL_HEIGHT, WIDTH, CELL_HEIGHT)), sink.regions)
+    }
+
+    @Test
+    fun `moving a search range within a row repaints once including cursor damage and fractional geometry`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        frame.cursor = cursor(column = 1, row = 1, generation = 1)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val geometry = visualGeometry(4, contentOriginY = -12.0)
+        val highlights = TerminalSearchViewportHighlights()
+        highlights.reset(4)
+        highlights.add(1, 0, 2, active = true)
+        highlights.finish()
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(
+            cache,
+            METRICS,
+            WIDTH,
+            HEIGHT,
+            PADDING,
+            NoOpRepaintSink,
+            visualGeometry = geometry,
+            searchHighlights = highlights,
+        )
+
+        frame.cursor = cursor(column = 2, row = 1, generation = 2)
+        frame.frameGeneration++
+        cache.updateFrom(frame.reader)
+        highlights.reset(4)
+        highlights.add(1, 1, 3, active = true)
+        highlights.finish()
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(
+            cache,
+            METRICS,
+            WIDTH,
+            HEIGHT,
+            PADDING,
+            sink,
+            visualGeometry = geometry,
+            searchHighlights = highlights,
+        )
+
+        assertEquals(listOf(Region(0, 4, WIDTH, CELL_HEIGHT)), sink.regions)
+    }
+
+    @Test
+    fun `clearing search after a forced repaint damages previously highlighted rows`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink)
+        val highlights = TerminalSearchViewportHighlights()
+        highlights.reset(4)
+        highlights.add(1, 0, 2, active = true)
+        highlights.finish()
+        planner.requestFrameRepaint(
+            cache,
+            METRICS,
+            WIDTH,
+            HEIGHT,
+            PADDING,
+            NoOpRepaintSink,
+            forceFullRepaint = true,
+            searchHighlights = highlights,
+        )
+
+        highlights.reset(4)
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink, searchHighlights = highlights)
+
+        assertEquals(listOf(Region(0, CELL_HEIGHT, WIDTH, CELL_HEIGHT)), sink.regions)
+    }
+
+    @Test
+    fun `search repaint planning reuses viewport storage after warmup`() {
+        val bean = ManagementFactory.getThreadMXBean()
+        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
+        val allocationBean = bean as ThreadMXBean
+        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+        val frame = MutableFrame(columns = 80, rows = 24)
+        val cache = TerminalRenderCache(80, 24)
+        cache.updateFrom(frame.reader)
+        val highlights = TerminalSearchViewportHighlights()
+        val planner = SwingRepaintPlanner()
+
+        fun requestFrames() {
+            repeat(10_000) { iteration ->
+                highlights.reset(24)
+                for (row in 0 until 24) {
+                    for (column in 0 until 80 step 10) {
+                        highlights.add(row, column, column + 3, active = iteration % 2 == 0)
+                    }
+                }
+                highlights.finish()
+                planner.requestFrameRepaint(cache, METRICS, 800, 480, PADDING, NoOpRepaintSink, searchHighlights = highlights)
+            }
+        }
+        repeat(5) { requestFrames() }
+        val threadId = Thread.currentThread().threadId()
+        var minimum = Long.MAX_VALUE
+        repeat(5) {
+            val before = allocationBean.getThreadAllocatedBytes(threadId)
+            requestFrames()
+            minimum = minOf(minimum, allocationBean.getThreadAllocatedBytes(threadId) - before)
+        }
+        assertEquals(0L, minimum)
+    }
+
     @Test
     fun `rtl cursor movement repaints old and new visual cells`() {
         val frame = MutableFrame(columns = 3, rows = 1)

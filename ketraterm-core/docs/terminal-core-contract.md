@@ -50,6 +50,23 @@ The core does not own:
 External parser and input code should depend on the narrowest interface they
 need instead of the full facade.
 
+### Render frame generations
+
+Render frames distinguish stored content from its global presentation:
+
+- `contentGeneration` advances for retained cell or row-mapping changes. A
+  reverse-video transition does not change stored text, attributes, or wrapping,
+  so it preserves this generation and permits text-search result reuse.
+- `lineGeneration(row)` covers the rendered row, including global reverse-video
+  interpretation. Enabling or disabling reverse video invalidates every row,
+  including retained history and rows in the inactive buffer. Soft and full
+  reset use the same invalidation when they restore normal video.
+- Global attribute invalidation advances one counter without walking retained
+  rows. Render row generations combine this counter with each line's own
+  generation; callers compare for equality, including across counter overflow.
+- `structureGeneration` changes for terminal-owned shape or row-mapping changes.
+  Reverse video preserves row identities and this generation.
+
 ## Writer contract
 
 ### Printable ingress

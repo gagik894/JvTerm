@@ -28,6 +28,8 @@ import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.search.TerminalSearchModel
+import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
@@ -54,6 +56,73 @@ class SwingRenderFrameControllerTest {
 
     @Nested
     inner class PublishedFrameHandling {
+        @Test
+        fun `removing a wrapped search result repaints its unchanged first row`() {
+            val cells =
+                arrayOf("abc", "def")
+                    .map { text ->
+                        Array(text.length) { TestCell(codeWord = text[it].code, flags = TerminalRenderCellFlags.CODEPOINT) }
+                    }.toTypedArray()
+            val frame =
+                object : TestRenderFrame(cells) {
+                    override var frameGeneration = 1L
+
+                    override fun lineWrapped(row: Int): Boolean = row == 0
+
+                    override fun lineGeneration(row: Int): Long = if (row == 0) 1L else frameGeneration
+                }
+            val session = createSession(frame)
+            val host = RecordingRenderFrameHost(session)
+            host.searchQuery = "cde"
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                assertEquals(1, host.searchHighlights.segmentCountForRow(0))
+                val firstRowGeneration = host.renderCache.lineGenerations[0]
+                host.clearRepaints()
+                cells[1][0] = TestCell(codeWord = 'x'.code, flags = TerminalRenderCellFlags.CODEPOINT)
+                frame.frameGeneration++
+                session.renderPublisher.updateAndPublish(frame)
+
+                controller.handlePublishedFrame()
+
+                assertEquals(firstRowGeneration, host.renderCache.lineGenerations[0])
+                assertEquals(0, host.searchHighlights.segmentCountForRow(0))
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 0, 800, 40)), host.regions)
+                host.clearRepaints()
+                controller.handlePublishedFrame()
+                assertTrue(host.regions.isEmpty())
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun `search commands between publications become the next repaint baseline`() {
+            val session = createSession(TestRenderFrame.text("needle"))
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.searchQuery = "needle"
+                host.refreshSearchForFrame()
+                controller.repaintFrame()
+                assertEquals(listOf(Region(0, 0, 800, 20)), host.regions)
+
+                host.clearRepaints()
+                host.searchQuery = ""
+                controller.handlePublishedFrame()
+
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 0, 800, 20)), host.regions)
+            } finally {
+                session.close()
+            }
+        }
+
         @Test
         fun resetFromHiddenPhaseMustRepaintUnchangedCursor() {
             val session = createSession(blinkFrame())
@@ -238,6 +307,9 @@ class SwingRenderFrameControllerTest {
                 cursorStrokeWidth = 2,
             )
         override val visualGeometry = TerminalVisualViewportGeometry()
+        override val searchHighlights = TerminalSearchViewportHighlights()
+        private val searchModel = TerminalSearchModel()
+        var searchQuery = ""
         override val componentWidth = 800
         override val componentHeight = 480
         var blinkVisible = true
@@ -288,6 +360,7 @@ class SwingRenderFrameControllerTest {
 
         override fun refreshSearchForFrame() {
             semanticCalls += "refreshSearchForFrame"
+            searchModel.search(renderCache, searchQuery, ignoreCase = false).buildViewportHighlights(renderCache, searchHighlights)
         }
 
         override fun publishViewportState(historySize: Int) {

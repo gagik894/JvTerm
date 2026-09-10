@@ -1,16 +1,35 @@
 # Swing Repaint Optimization & Selection Layout
 
-The `ketraterm-ui-swing` module utilizes structured repaint planning and precise cell coordinate mappings to achieve high-frequency rendering updates with minimal CPU footprint.
+The Swing renderer combines terminal and overlay damage before requesting
+repaints, using the same viewport geometry as painting.
 
 ---
 
 ## 1. Minimal Repaint Planning (`SwingRepaintPlanner`)
 
-Repainting the entire Swing component on every terminal update is highly inefficient. The [SwingRepaintPlanner](../src/main/kotlin/io/github/ketraterm/ui/swing/viewport/SwingRepaintPlanner.kt) maps changes in the `TerminalRenderCache` to schedule targeted repaint requests:
+The EDT-owned [SwingRepaintPlanner](../src/main/kotlin/io/github/ketraterm/ui/swing/viewport/SwingRepaintPlanner.kt)
+remembers the state for which it last **scheduled** a repaint. That state includes
+terminal row metadata, cursor state, and a copied viewport search projection.
+The copy uses reusable primitive storage, so rebuilding the current projection
+cannot overwrite the previous comparison state. Swing may coalesce pending
+repaint requests before painting.
 
-* **Cursor-Only Repaints**: When only the cursor moves, the planner computes the pixel bounding box of both the old cursor cell and the new cursor cell. Only these two small rectangular areas are repainted, avoiding full-screen refreshes.
-* **Row-Level Repaints**: The planner scans the `lineGenerations` array. Rows whose generation number matches the previous frame are skipped. Only modified rows are invalidated and repainted.
-* **Full Repaint triggers**: A full component repaint is requested only during structural changes (e.g. resizes, buffer swaps, scroll offsets, or column size changes).
+* **Rows:** A row is damaged when its generation or wrapping changes, or its
+  search segment ranges, count, or active-result styling changes. Adjacent
+  damaged rows are combined into one repaint region. Comparing search
+  projections examines viewport segments, without traversing retained history.
+* **Cursor:** Cursor changes repaint both old and new visual cell bounds, unless
+  those rows are already covered by row damage.
+* **Full surface:** Shape, buffer, and viewport mapping changes require a full
+  repaint. Callers may also force one for changes such as terminal chrome.
+
+[SwingRenderFrameController](../src/main/kotlin/io/github/ketraterm/ui/swing/render/SwingRenderFrameController.kt)
+refreshes search projection before planning each published frame. Query changes,
+clearing search, and result navigation use the same planner between publications;
+they must also advance its scheduled-state snapshot. For example, a match across
+wrapped rows `abc` / `def` for query `cde` highlights both rows. Changing only the
+second row to `xef` damages both rows because the first row loses its search
+segment even though its terminal generation remains unchanged.
 
 ---
 

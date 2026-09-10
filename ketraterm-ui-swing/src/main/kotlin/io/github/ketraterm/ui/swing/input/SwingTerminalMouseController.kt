@@ -39,6 +39,7 @@ internal class SwingTerminalMouseController(
             override fun mousePressed(event: MouseEvent) {
                 host.requestFocusInWindow()
                 if (handleContextMenu(event)) return
+                if (!host.renderCache.hasFrame) return
                 if (host.handlePromptMarkerMousePressed(event)) return
                 if (handleMouseTracking(event, TerminalMouseEventType.PRESS)) return
                 if (host.handleHyperlinkMousePressed(event)) return
@@ -47,6 +48,7 @@ internal class SwingTerminalMouseController(
 
             override fun mouseReleased(event: MouseEvent) {
                 if (handleContextMenu(event)) return
+                if (!host.renderCache.hasFrame) return
                 if (handleMouseTracking(event, TerminalMouseEventType.RELEASE)) return
                 host.handleSelectionMouseReleased(event)
             }
@@ -60,11 +62,13 @@ internal class SwingTerminalMouseController(
     val mouseMotionListener =
         object : MouseMotionAdapter() {
             override fun mouseDragged(event: MouseEvent) {
+                if (!host.renderCache.hasFrame) return
                 if (handleMouseTracking(event, TerminalMouseEventType.MOTION)) return
                 host.handleSelectionMouseDragged(event)
             }
 
             override fun mouseMoved(event: MouseEvent) {
+                if (!host.renderCache.hasFrame) return
                 if (host.handlePromptMarkerMouseMoved(event)) {
                     return
                 }
@@ -77,6 +81,7 @@ internal class SwingTerminalMouseController(
         }
 
     private fun handleMouseWheel(event: MouseWheelEvent) {
+        if (!host.renderCache.hasFrame) return
         if (isMouseTrackingIntercepted(event)) {
             host.finishViewportScroll()
             handleMouseTracking(event, TerminalMouseEventType.WHEEL)
@@ -107,9 +112,7 @@ internal class SwingTerminalMouseController(
         }
     }
 
-    fun isMouseTrackingIntercepted(event: MouseEvent): Boolean {
-        return !event.isShiftDown && host.mouseTrackingMode() != MouseTrackingMode.OFF
-    }
+    fun isMouseTrackingIntercepted(event: MouseEvent): Boolean = !event.isShiftDown && host.mouseTrackingMode() != MouseTrackingMode.OFF
 
     private fun handleContextMenu(event: MouseEvent): Boolean {
         if (!event.isPopupTrigger) return false

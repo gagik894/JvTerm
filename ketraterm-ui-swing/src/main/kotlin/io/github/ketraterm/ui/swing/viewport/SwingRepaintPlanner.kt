@@ -20,6 +20,7 @@ import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.TerminalVisualViewportGeometry
 import io.github.ketraterm.ui.swing.render.visualCellRangeSpan
 import io.github.ketraterm.ui.swing.render.visualCellRangeStart
+import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -28,8 +29,9 @@ import kotlin.math.floor
  * Computes bounded Swing repaint regions from render-cache change metadata.
  *
  * The planner is component-owned and EDT-confined. It keeps the previously
- * painted cursor so cursor-only updates can repaint both the old and new cell
- * without repainting the full terminal surface.
+ * scheduled cursor, terminal rows, and search projection. Search damage compares
+ * exact viewport segments, including active-result styling, so a match spanning
+ * unchanged terminal rows invalidates those rows when it changes.
  */
 internal class SwingRepaintPlanner {
     private var lastCursorKnown: Boolean = false
@@ -46,9 +48,10 @@ internal class SwingRepaintPlanner {
     private var lastActiveBufferOrdinal: Int = UNINITIALIZED_ACTIVE_BUFFER
     private var lastLineGenerations: LongArray = LongArray(0)
     private var lastLineWrapped: BooleanArray = BooleanArray(0)
+    private val lastSearchHighlights = TerminalSearchViewportHighlights()
 
     /**
-     * Clears remembered cursor state when the component unbinds or resets.
+     * Clears remembered frame and overlay state when the component unbinds or resets.
      */
     fun reset() {
         lastCursorKnown = false
@@ -65,12 +68,15 @@ internal class SwingRepaintPlanner {
         lastActiveBufferOrdinal = UNINITIALIZED_ACTIVE_BUFFER
         lastLineGenerations = LongArray(0)
         lastLineWrapped = BooleanArray(0)
+        lastSearchHighlights.reset(0)
     }
 
     /**
      * Requests the smallest repaint regions needed for the latest published
      * [cache] update. [visualGeometry] must match the geometry used by painting
-     * the same cache.
+     * the same cache. [searchHighlights] is the completed projection consumed
+     * by that paint; it is copied before this method returns so later updates
+     * cannot erase pending old/new overlay damage.
      */
     fun requestFrameRepaint(
         cache: TerminalRenderCache,
@@ -81,9 +87,10 @@ internal class SwingRepaintPlanner {
         repaintSink: TerminalRepaintSink,
         forceFullRepaint: Boolean = false,
         visualGeometry: TerminalVisualViewportGeometry? = null,
+        searchHighlights: TerminalSearchViewportHighlights? = null,
     ) {
         if (forceFullRepaint || requiresFullRepaint(cache)) {
-            snapshotCacheState(cache)
+            snapshotCacheState(cache, searchHighlights)
             snapshotCursor(cache)
             repaintSink.requestFullRepaint()
             return
@@ -99,6 +106,7 @@ internal class SwingRepaintPlanner {
             padding = padding,
             visualGeometry = visualGeometry,
             repaintSink = repaintSink,
+            searchHighlights = searchHighlights,
         )
 
         if (cursorChanged(cache)) {
@@ -116,6 +124,7 @@ internal class SwingRepaintPlanner {
                 visualGeometry = visualGeometry,
                 skipChangedRows = true,
                 repaintSink = repaintSink,
+                searchHighlights = searchHighlights,
             )
             repaintCursorIfNeeded(
                 known = true,
@@ -131,10 +140,11 @@ internal class SwingRepaintPlanner {
                 visualGeometry = visualGeometry,
                 skipChangedRows = true,
                 repaintSink = repaintSink,
+                searchHighlights = searchHighlights,
             )
         }
 
-        snapshotCacheState(cache)
+        snapshotCacheState(cache, searchHighlights)
         snapshotCursor(cache)
     }
 
@@ -250,17 +260,18 @@ internal class SwingRepaintPlanner {
         padding: java.awt.Insets,
         visualGeometry: TerminalVisualViewportGeometry?,
         repaintSink: TerminalRepaintSink,
+        searchHighlights: TerminalSearchViewportHighlights?,
     ) {
         var row = 0
         while (row < visibleRows) {
-            if (!rowChanged(cache, row)) {
+            if (!rowChanged(cache, row, searchHighlights)) {
                 row++
                 continue
             }
 
             val startRow = row
             row++
-            while (row < visibleRows && rowChanged(cache, row)) {
+            while (row < visibleRows && rowChanged(cache, row, searchHighlights)) {
                 row++
             }
 
@@ -291,10 +302,11 @@ internal class SwingRepaintPlanner {
         visualGeometry: TerminalVisualViewportGeometry?,
         skipChangedRows: Boolean,
         repaintSink: TerminalRepaintSink,
+        searchHighlights: TerminalSearchViewportHighlights? = null,
     ): Boolean {
         if (!known || !visible) return false
         if (column !in 0 until cache.columns || row !in 0 until visibleRows) return false
-        if (skipChangedRows && rowChanged(cache, row)) return false
+        if (skipChangedRows && rowChanged(cache, row, searchHighlights)) return false
 
         val flags = cache.flags[cache.rowOffset(row) + column]
         val startColumn = visualCellRangeStart(flags, column)
@@ -386,9 +398,11 @@ internal class SwingRepaintPlanner {
     private fun rowChanged(
         cache: TerminalRenderCache,
         row: Int,
+        searchHighlights: TerminalSearchViewportHighlights?,
     ): Boolean =
         lastLineGenerations[row] != cache.lineGenerations[row] ||
-            lastLineWrapped[row] != cache.lineWrapped[row]
+            lastLineWrapped[row] != cache.lineWrapped[row] ||
+            !lastSearchHighlights.rowMatches(row, searchHighlights)
 
     private fun requiresFullRepaint(cache: TerminalRenderCache): Boolean =
         cache.shapeChangedOnLastUpdate ||
@@ -419,7 +433,10 @@ internal class SwingRepaintPlanner {
         lastCursorGeneration = cache.cursorGeneration
     }
 
-    private fun snapshotCacheState(cache: TerminalRenderCache) {
+    private fun snapshotCacheState(
+        cache: TerminalRenderCache,
+        searchHighlights: TerminalSearchViewportHighlights?,
+    ) {
         if (lastLineGenerations.size != cache.rows) {
             lastLineGenerations = LongArray(cache.rows)
             lastLineWrapped = BooleanArray(cache.rows)
@@ -437,6 +454,11 @@ internal class SwingRepaintPlanner {
         lastStructureGeneration = cache.structureGeneration
         lastScrollbackOffset = cache.scrollbackOffset
         lastActiveBufferOrdinal = cache.activeBuffer.ordinal
+        if (searchHighlights == null) {
+            lastSearchHighlights.reset(0)
+        } else {
+            lastSearchHighlights.copyFrom(searchHighlights)
+        }
     }
 
     private companion object {

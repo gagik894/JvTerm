@@ -17,6 +17,7 @@ package io.github.ketraterm.ui.swing.render
 
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.session.TerminalSession
+import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 
@@ -29,6 +30,7 @@ internal interface SwingRenderFrameHost {
     val settings: SwingSettings
     val metrics: SwingMetrics
     val visualGeometry: TerminalVisualViewportGeometry
+    val searchHighlights: TerminalSearchViewportHighlights
     val componentWidth: Int
     val componentHeight: Int
     val cursorPresentationEnabled: Boolean
