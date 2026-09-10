@@ -95,6 +95,12 @@ internal class CoreTerminalRenderFrame(
             return state.frameGeneration
         }
 
+    override val contentGeneration: Long
+        get() {
+            checkValid()
+            return state.contentGeneration
+        }
+
     override val structureGeneration: Long
         get() {
             checkValid()

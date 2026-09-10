@@ -62,6 +62,19 @@ interface TerminalRenderFrame {
     val frameGeneration: Long
 
     /**
+     * Generation for retained cell content and terminal-owned row mapping, including
+     * off-screen history. Cell, cluster, attribute, wrap, resize, scroll, reset, and
+     * buffer changes advance this value; cursor and caller-requested viewport changes
+     * do not need to. Compare for equality, since generations can wrap.
+     *
+     * The default conservatively includes all visual changes. Implementations with
+     * separate content tracking should override this to let consumers reuse work
+     * across cursor-only frames. Generations are local to one content source.
+     */
+    val contentGeneration: Long
+        get() = frameGeneration
+
+    /**
      * Generation that changes when terminal-owned row mapping or shape changes.
      *
      * Resize, full reset, scrolling, buffer switches, and reflow should advance

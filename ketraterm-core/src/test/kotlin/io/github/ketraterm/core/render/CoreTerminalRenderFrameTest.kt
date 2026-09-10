@@ -24,6 +24,73 @@ import org.junit.jupiter.api.Test
 
 class CoreTerminalRenderFrameTest {
     @Test
+    fun `content generation ignores cursor title and viewport changes`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        buffer.writeText("one")
+        buffer.carriageReturn()
+        buffer.newLine()
+        buffer.newLine()
+        var contentGeneration = 0L
+        var frameGeneration = 0L
+        buffer.readRenderFrame {
+            contentGeneration = it.contentGeneration
+            frameGeneration = it.frameGeneration
+        }
+
+        buffer.positionCursor(1, 0)
+        buffer.setCursorShape(TerminalRenderCursorShape.UNDERLINE)
+        buffer.setWindowTitle("changed title")
+        buffer.readRenderFrame(scrollbackOffset = 1) {
+            assertNotEquals(frameGeneration, it.frameGeneration)
+            assertEquals(contentGeneration, it.contentGeneration)
+        }
+    }
+
+    @Test
+    fun `content generation includes mutations outside the requested viewport`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        buffer.writeText("old")
+        buffer.newLine()
+        buffer.newLine()
+        var contentGeneration = 0L
+        var lineGeneration = 0L
+        buffer.readRenderFrame(scrollbackOffset = 1, viewportRows = 1) {
+            contentGeneration = it.contentGeneration
+            lineGeneration = it.lineGeneration(0)
+        }
+
+        buffer.carriageReturn()
+        buffer.writeText("new")
+
+        buffer.readRenderFrame(scrollbackOffset = 1, viewportRows = 1) {
+            assertNotEquals(contentGeneration, it.contentGeneration)
+            assertEquals(lineGeneration, it.lineGeneration(0))
+        }
+    }
+
+    @Test
+    fun `content generation changes for edits scrolling resize buffer switches and reset`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+
+        fun assertContentChanges(change: () -> Unit) {
+            var previous = 0L
+            buffer.readRenderFrame { previous = it.contentGeneration }
+            change()
+            buffer.readRenderFrame { assertNotEquals(previous, it.contentGeneration) }
+        }
+
+        assertContentChanges { buffer.writeText("text") }
+        assertContentChanges { buffer.eraseCurrentLine() }
+        buffer.positionCursor(0, 1)
+        assertContentChanges { buffer.newLine() }
+        assertContentChanges { buffer.resize(5, 3) }
+        assertContentChanges { buffer.enterAltBuffer() }
+        assertContentChanges { buffer.exitAltBuffer() }
+        assertContentChanges { buffer.eraseScreenAndHistory() }
+        assertContentChanges { buffer.reset() }
+    }
+
+    @Test
     fun `terminal buffer exposes render frame reader callback`() {
         val buffer = DefaultTerminalBuffer(initialWidth = 3, initialHeight = 2)
         val reader = buffer as TerminalRenderFrameReader

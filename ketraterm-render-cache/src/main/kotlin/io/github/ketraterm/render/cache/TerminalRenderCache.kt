@@ -173,6 +173,10 @@ class TerminalRenderCache(
     var structureGeneration: Long = UNINITIALIZED_GENERATION
         private set
 
+    /** Last copied [TerminalRenderFrame.contentGeneration], including a reader's conservative fallback. */
+    var contentGeneration: Long = UNINITIALIZED_GENERATION
+        private set
+
     /**
      * Last copied active buffer kind.
      */
@@ -447,6 +451,7 @@ class TerminalRenderCache(
         discardedCount = source.discardedCount
         hasBlinkingText = source.hasBlinkingText
         frameGeneration = source.frameGeneration
+        contentGeneration = source.contentGeneration
         structureGeneration = source.structureGeneration
         activeBuffer = source.activeBuffer
         palette = source.palette
@@ -555,6 +560,7 @@ class TerminalRenderCache(
         historySize = frame.historySize
         this.scrollbackOffset = frame.scrollbackOffset
         frameGeneration = frame.frameGeneration
+        contentGeneration = frame.contentGeneration
         structureGeneration = frame.structureGeneration
         discardedCount = frame.discardedCount
     }
@@ -606,6 +612,7 @@ class TerminalRenderCache(
         scrollbackOffset = 0
         discardedCount = 0L
         frameGeneration = UNINITIALIZED_GENERATION
+        contentGeneration = UNINITIALIZED_GENERATION
         structureGeneration = UNINITIALIZED_GENERATION
         activeBuffer = TerminalRenderBufferKind.PRIMARY
         cursorChangedOnLastUpdate = false

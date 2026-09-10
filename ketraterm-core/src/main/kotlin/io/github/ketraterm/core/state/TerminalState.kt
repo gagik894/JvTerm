@@ -80,6 +80,9 @@ internal class TerminalState(
     var frameGeneration: Long = 0L
         private set
 
+    var contentGeneration: Long = 0L
+        private set
+
     var structureGeneration: Long = 0L
         private set
 
@@ -193,6 +196,7 @@ internal class TerminalState(
 
     fun markLineChanged(line: Line) {
         markVisualChanged()
+        contentGeneration++
         line.renderGeneration = frameGeneration
     }
 
@@ -204,6 +208,7 @@ internal class TerminalState(
 
     fun markStructureChanged() {
         markVisualChanged()
+        contentGeneration++
         structureGeneration++
     }
 

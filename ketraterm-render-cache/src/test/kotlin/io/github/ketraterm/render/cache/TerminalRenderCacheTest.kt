@@ -21,6 +21,21 @@ import org.junit.jupiter.api.Test
 
 class TerminalRenderCacheTest {
     @Test
+    fun `content generation survives frame and cache copies independently of frame generation`() {
+        val frame = MutableFrame(columns = 3, rows = 2)
+        val source = TerminalRenderCache(1, 1)
+        val destination = TerminalRenderCache(1, 1)
+        for (generation in longArrayOf(5L, Long.MAX_VALUE, Long.MIN_VALUE, 0L)) {
+            frame.contentGeneration = generation
+            frame.frameGeneration++
+            source.updateFrom(frame.reader)
+            destination.updateFrom(source)
+            assertEquals(generation, source.contentGeneration)
+            assertEquals(generation, destination.contentGeneration)
+        }
+    }
+
+    @Test
     fun `constructor rejects non-positive dimensions`() {
         assertAll(
             { assertThrows(IllegalArgumentException::class.java) { TerminalRenderCache(0, 1) } },
@@ -569,6 +584,7 @@ class TerminalRenderCacheTest {
         val copyCounts = IntArray(rows)
 
         override var frameGeneration: Long = 0L
+        override var contentGeneration: Long = 0L
         override var structureGeneration: Long = 0L
         override var activeBuffer: TerminalRenderBufferKind = TerminalRenderBufferKind.PRIMARY
         override var cursor: TerminalRenderCursor =

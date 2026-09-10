@@ -109,9 +109,17 @@ internal class TerminalSearchHighlights {
                 -1
             }
 
-        var segmentIndex = 0
+        // Scanning emits segments in row order. Skip retained matches above the viewport.
+        var low = 0
+        var high = segmentCount
+        while (low < high) {
+            val middle = low + (high - low) / 2
+            if (segmentRows[middle] < firstAbsoluteRow) low = middle + 1 else high = middle
+        }
+        var segmentIndex = low
         while (segmentIndex < segmentCount) {
             val absoluteRow = segmentRows[segmentIndex]
+            if (absoluteRow > lastAbsoluteRow) break
             if (absoluteRow in firstAbsoluteRow..lastAbsoluteRow) {
                 val row = (absoluteRow - firstAbsoluteRow).toInt()
                 val range = segmentRanges[segmentIndex]

@@ -18,9 +18,29 @@ package io.github.ketraterm.ui.swing.search
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class TerminalSearchModelTest {
+    @Test
+    fun `viewport projection includes all boundary matches and clips a wrapped active result`() {
+        val cache = renderCache(WrappedTextFrame(Array(1000) { "aa" }, wrapped = BooleanArray(1000) { it < 999 }))
+        val highlights = TerminalSearchModel().search(cache, "aaa", ignoreCase = false)
+        val viewportCache = renderCache(WrappedTextFrame(arrayOf("aa", "aa"), historySize = 998, scrollbackOffset = 499))
+        val viewport = TerminalSearchViewportHighlights()
+        // Result 332 starts on row 498 and continues into the first viewport row (499).
+        highlights.activate(332)
+
+        highlights.buildViewportHighlights(viewportCache, viewport)
+
+        assertEquals(3, viewport.segmentCount)
+        assertEquals(2, viewport.segmentCountForRow(0))
+        assertEquals(1, viewport.segmentCountForRow(1))
+        assertEquals(0, viewport.startColumn(0))
+        assertEquals(1, viewport.endColumn(0))
+        assertTrue(viewport.isActive(0))
+    }
+
     @Test
     fun `literal search returns all result occurrences`() {
         val cache = renderCache(WrappedTextFrame(arrayOf("foo bar foo")))
