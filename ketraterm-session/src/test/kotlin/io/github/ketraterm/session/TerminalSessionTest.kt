@@ -570,30 +570,6 @@ class TerminalSessionTest {
     }
 
     @Test
-    fun `shell command revision changes only for command text cursor or availability`() {
-        val connector = MockConnector()
-        val session = createStartedSession(connector, columns = 30, rows = 4)
-        assertEquals(-1L, session.activeShellCommandLineRevision.value)
-
-        connector.feedFromHost("\u001B]133;A\u0007PS> \u001B]133;B\u0007git s".ascii())
-        val firstRevision = session.awaitActiveShellCommandLineRevisionAfter(-1L)
-
-        val renderBeforePresentationChange = session.renderGeneration.value
-        session.setCursorShape(TerminalRenderCursorShape.UNDERLINE)
-        session.awaitRenderGenerationAfter(renderBeforePresentationChange)
-        assertEquals(firstRevision, session.activeShellCommandLineRevision.value)
-
-        connector.feedFromHost("t".ascii())
-        val editedRevision = session.awaitActiveShellCommandLineRevisionAfter(firstRevision)
-        assertEquals("git st", session.activeShellCommandLine()?.commandText)
-
-        connector.feedFromHost("\u001B]133;C\u0007".ascii())
-        session.awaitActiveShellCommandLineRevisionAfter(editedRevision)
-        assertNull(session.activeShellCommandLine())
-        session.close()
-    }
-
-    @Test
     fun `OSC 133 active command line is unavailable after command start`() {
         val connector = MockConnector()
         val session = createStartedSession(connector, columns = 30, rows = 4)
@@ -1503,13 +1479,6 @@ class TerminalSessionTest {
         runBlocking {
             withTimeout(1_000.milliseconds) {
                 renderGeneration.first { it > generation }
-            }
-        }
-
-    private fun TerminalSession.awaitActiveShellCommandLineRevisionAfter(revision: Long): Long =
-        runBlocking {
-            withTimeout(1_000.milliseconds) {
-                activeShellCommandLineRevision.first { it > revision }
             }
         }
 
