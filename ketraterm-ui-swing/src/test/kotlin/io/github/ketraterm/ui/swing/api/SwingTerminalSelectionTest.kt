@@ -30,10 +30,7 @@ import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.ui.swing.render.TestCell
 import io.github.ketraterm.ui.swing.render.TestRenderFrame
-import io.github.ketraterm.ui.swing.settings.SwingPadding
-import io.github.ketraterm.ui.swing.settings.SwingSettings
-import io.github.ketraterm.ui.swing.settings.TerminalClipboardHandler
-import io.github.ketraterm.ui.swing.settings.TerminalHyperlinkHandler
+import io.github.ketraterm.ui.swing.settings.*
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestion
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
 import kotlinx.coroutines.CoroutineDispatcher
@@ -320,7 +317,7 @@ class SwingTerminalSelectionTest {
                 assertEquals(2, event.column)
                 assertEquals(0, event.row)
                 val metrics =
-                    io.github.ketraterm.ui.swing.settings.SwingMetrics
+                    SwingMetrics
                         .from(component.getFontMetrics(settings.font))
                 assertEquals(2 * metrics.cellWidth + 1, event.pixelX)
                 assertEquals(1, event.pixelY)
@@ -450,6 +447,84 @@ class SwingTerminalSelectionTest {
         assertNotNull(selection)
         assertTrue(selection!!.isBlock, "selection should be block selection")
         session.close()
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `vertical block drag keeps one visual column across opposite bidi rows`(upward: Boolean) {
+        val frame =
+            TestRenderFrame(
+                arrayOf("ABC", "אבג")
+                    .map { text ->
+                        Array(text.length) { column ->
+                            TestCell(codeWord = text[column].code, flags = TerminalRenderCellFlags.CODEPOINT)
+                        }
+                    }.toTypedArray(),
+            )
+        val clipboard = RecordingClipboard()
+        val session = testSession(frame, workerDispatcher = Dispatchers.Unconfined)
+        val settings =
+            SwingSettings(
+                padding = SwingPadding(),
+                shellIntegrationDecorationGutterWidth = 0,
+                cursorBlinkMillis = 0,
+                selectionBackground = 0xFFFF00FF.toInt(),
+            )
+        val component =
+            SwingTerminal(
+                settingsProvider = { settings },
+                hostServices = SwingHostServices(clipboardHandler = clipboard),
+            )
+        try {
+            SwingUtilities.invokeAndWait {
+                component.size = component.preferredGridSize(3, 2)
+                component.bind(session)
+                val metrics = SwingMetrics.from(component.getFontMetrics(settings.font))
+                val before = componentPixels(component)
+                val startY = (if (upward) metrics.cellHeight else 0) + 1
+                val endY = (if (upward) 0 else metrics.cellHeight) + 1
+                for (listener in component.mouseListeners) {
+                    listener.mousePressed(mousePressedWithAlt(component, x = 1, y = startY))
+                }
+                for (listener in component.mouseMotionListeners) {
+                    listener.mouseDragged(mouseDraggedWithAlt(component, x = 1, y = endY))
+                }
+                for (listener in component.mouseListeners) {
+                    listener.mouseReleased(mouseReleased(component, x = 1, y = endY))
+                }
+
+                val selection = requireNotNull(component.currentSelection())
+                assertTrue(selection.isBlock)
+                assertEquals(0, selection.startRow)
+                assertEquals(1, selection.endRow)
+                for (row in 0..1) {
+                    assertEquals(CellSelection.packRange(0, 1), selection.packedColumnRange(row, 3))
+                }
+                assertTrue(component.copySelectionToClipboard())
+                assertEquals("A\nג", clipboard.copied.get())
+
+                val selected = componentPixels(component)
+                for (row in 0..1) {
+                    for (column in 0..2) {
+                        var changedPixels = 0
+                        for (y in row * metrics.cellHeight until (row + 1) * metrics.cellHeight) {
+                            for (x in column * metrics.cellWidth until (column + 1) * metrics.cellWidth) {
+                                val index = y * component.width + x
+                                if (before[index] != selected[index]) changedPixels++
+                            }
+                        }
+                        if (column == 0) {
+                            assertTrue(changedPixels > 0, "The first visual cell on row $row must be highlighted")
+                        } else {
+                            assertEquals(0, changedPixels, "Selection must not alter visual cell $column on row $row")
+                        }
+                    }
+                }
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            session.close()
+        }
     }
 
     @Test

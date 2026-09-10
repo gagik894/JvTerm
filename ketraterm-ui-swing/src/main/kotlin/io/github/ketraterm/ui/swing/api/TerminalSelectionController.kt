@@ -30,7 +30,14 @@ internal interface TerminalSelectionHost {
     val componentWidth: Int
     val componentHeight: Int
 
+    /** Hits a logical cell after applying the row's bidi mapping. */
     fun cellAt(
+        x: Int,
+        y: Int,
+    ): Long
+
+    /** Hits a visual cell before the row's bidi mapping is applied. */
+    fun visualCellAt(
         x: Int,
         y: Int,
     ): Long
@@ -47,11 +54,14 @@ internal class TerminalSelectionController(
 ) {
     private val selectionTextExtractor = TerminalSelectionTextExtractor()
 
+    // Alt can change during a drag after its anchor row has left the viewport.
+    // Retain both cell coordinates; selectionAnchorColumn is a half-open edge.
+    private var dragAnchorLogicalColumn: Int = 0
+    private var dragAnchorVisualColumn: Int = 0
+
     var selectionAnchorAbsoluteRow: Long? = null
         private set
     var selectionAnchorColumn: Int = 0
-        private set
-    var selectionAnchorRow: Int = 0
         private set
     var selectionCaretAbsoluteRow: Long? = null
         private set
@@ -72,6 +82,7 @@ internal class TerminalSelectionController(
         }
 
     fun clearSelection() {
+        stopSelectionDrag()
         selectionAnchorAbsoluteRow = null
         selectionCaretAbsoluteRow = null
     }
@@ -105,7 +116,7 @@ internal class TerminalSelectionController(
         host.requestFocusInWindow()
 
         selectingWithMouse = true
-        selectionIsBlock = event.isAltDown
+        selectionIsBlock = event.isAltDown && event.clickCount < 2
         lastSelectionDragX = event.x
         lastSelectionDragY = event.y
 
@@ -113,12 +124,15 @@ internal class TerminalSelectionController(
         val cell = host.cellAt(event.x, event.y)
         val column = unpackCellColumn(cell)
         val row = unpackCellRow(cell)
+        dragAnchorLogicalColumn = column
+        dragAnchorVisualColumn = unpackCellColumn(host.visualCellAt(event.x, event.y))
 
         when {
             event.clickCount >= 3 -> {
                 val absRow = cache.discardedCount + cache.historySize - cache.scrollbackOffset + row
                 selectionAnchorAbsoluteRow = absRow
                 selectionAnchorColumn = 0
+                dragAnchorLogicalColumn = 0
                 selectionCaretAbsoluteRow = absRow
                 selectionCaretColumn = cache.columns
             }
@@ -128,6 +142,7 @@ internal class TerminalSelectionController(
                 if (wordSel != null) {
                     selectionAnchorAbsoluteRow = cache.discardedCount + cache.historySize - cache.scrollbackOffset + wordSel.anchorRow
                     selectionAnchorColumn = wordSel.anchorColumn
+                    dragAnchorLogicalColumn = wordSel.anchorColumn
                     selectionCaretAbsoluteRow = cache.discardedCount + cache.historySize - cache.scrollbackOffset + wordSel.caretRow
                     selectionCaretColumn = wordSel.caretColumn
                 } else {
@@ -136,8 +151,7 @@ internal class TerminalSelectionController(
             }
 
             else -> {
-                selectionAnchorColumn = column
-                selectionAnchorRow = row
+                selectionAnchorColumn = if (selectionIsBlock) dragAnchorVisualColumn else dragAnchorLogicalColumn
                 selectionAnchorAbsoluteRow = cache.discardedCount + cache.historySize - cache.scrollbackOffset + row
                 selectionCaretAbsoluteRow = null
             }
@@ -148,9 +162,8 @@ internal class TerminalSelectionController(
     }
 
     fun handleSelectionMouseDragged(event: MouseEvent) {
-        if (event.modifiersEx and MouseEvent.BUTTON1_DOWN_MASK == 0) return
+        if (!selectingWithMouse || selectionAnchorAbsoluteRow == null || event.modifiersEx and MouseEvent.BUTTON1_DOWN_MASK == 0) return
 
-        selectingWithMouse = true
         selectionIsBlock = event.isAltDown
         lastSelectionDragX = event.x
         lastSelectionDragY = event.y
@@ -182,18 +195,19 @@ internal class TerminalSelectionController(
         val endAbsRow = if (isForward) caretAbsRow else anchorAbsRow
         val endCol = if (isForward) selectionCaretColumn else selectionAnchorColumn
 
-        val startViewportRow = (startAbsRow - c.discardedCount - (c.historySize - c.scrollbackOffset)).toInt()
-        val endViewportRow = (endAbsRow - c.discardedCount - (c.historySize - c.scrollbackOffset)).toInt()
+        val viewportTop = c.discardedCount + c.historySize - c.scrollbackOffset
+        val startViewportRow = startAbsRow - viewportTop
+        val endViewportRow = endAbsRow - viewportTop
 
         if (endViewportRow < 0 || startViewportRow >= c.rows) {
             return null
         }
 
-        val clampedStartRow = startViewportRow.coerceIn(0, c.rows - 1)
-        val clampedStartCol = if (startViewportRow < 0) 0 else startCol.coerceIn(0, c.columns)
+        val clampedStartRow = startViewportRow.coerceIn(0L, c.rows - 1L).toInt()
+        val clampedStartCol = if (!selectionIsBlock && startViewportRow < 0) 0 else startCol.coerceIn(0, c.columns)
 
-        val clampedEndRow = endViewportRow.coerceIn(0, c.rows - 1)
-        val clampedEndCol = if (endViewportRow >= c.rows) c.columns else endCol.coerceIn(0, c.columns)
+        val clampedEndRow = endViewportRow.coerceIn(0L, c.rows - 1L).toInt()
+        val clampedEndCol = if (!selectionIsBlock && endViewportRow >= c.rows) c.columns else endCol.coerceIn(0, c.columns)
 
         return if (isForward) {
             CellSelection(
@@ -218,57 +232,23 @@ internal class TerminalSelectionController(
         val anchorAbsRow = selectionAnchorAbsoluteRow ?: return null
         val caretAbsRow = selectionCaretAbsoluteRow ?: return null
 
-        val isForward =
-            caretAbsRow > anchorAbsRow ||
-                (caretAbsRow == anchorAbsRow && selectionCaretColumn >= selectionAnchorColumn)
-
-        val startAbsRow = if (isForward) anchorAbsRow else caretAbsRow
-        val startCol = if (isForward) selectionAnchorColumn else selectionCaretColumn
-        val endAbsRow = if (isForward) caretAbsRow else anchorAbsRow
-        val endCol = if (isForward) selectionCaretColumn else selectionAnchorColumn
-
+        val startAbsRow = minOf(anchorAbsRow, caretAbsRow)
+        val endAbsRow = maxOf(anchorAbsRow, caretAbsRow)
         var text: String? = null
         reader.readRenderFrameForAbsoluteRange(startAbsRow, endAbsRow) { frame ->
             val frameTopAbsRow = frame.discardedCount + frame.historySize - frame.scrollbackOffset
             val frameLastAbsRow = frameTopAbsRow + frame.rows - 1L
-            val clampedStart = maxOf(startAbsRow, frame.discardedCount)
-            val clampedEnd = minOf(endAbsRow, frameLastAbsRow)
-            if (clampedStart > clampedEnd) return@readRenderFrameForAbsoluteRange
+            if (endAbsRow < frameTopAbsRow || startAbsRow > frameLastAbsRow) return@readRenderFrameForAbsoluteRange
 
             val tempCache = TerminalRenderCache(frame.columns, frame.rows)
             tempCache.accept(frame)
-
-            val startRowInFrame = (clampedStart - frameTopAbsRow).toInt()
-            val endRowInFrame = (clampedEnd - frameTopAbsRow).toInt()
-            if (startRowInFrame !in 0 until frame.rows || endRowInFrame !in 0 until frame.rows) {
-                return@readRenderFrameForAbsoluteRange
-            }
-
-            val relativeSelection =
-                if (isForward) {
-                    CellSelection(
-                        anchorColumn = startCol.coerceIn(0, frame.columns),
-                        anchorRow = startRowInFrame,
-                        caretColumn = endCol.coerceIn(0, frame.columns),
-                        caretRow = endRowInFrame,
-                        isBlock = selectionIsBlock,
-                    )
-                } else {
-                    CellSelection(
-                        anchorColumn = endCol.coerceIn(0, frame.columns),
-                        anchorRow = endRowInFrame,
-                        caretColumn = startCol.coerceIn(0, frame.columns),
-                        caretRow = startRowInFrame,
-                        isBlock = selectionIsBlock,
-                    )
-                }
-            val extracted =
+            val relativeSelection = getViewportSelection(tempCache) ?: return@readRenderFrameForAbsoluteRange
+            text =
                 selectionTextExtractor.selectedText(
                     cache = tempCache,
                     selection = relativeSelection,
                     joinSoftWrappedRows = !selectionIsBlock,
                 )
-            text = extracted
         }
         return text
     }
@@ -277,26 +257,22 @@ internal class TerminalSelectionController(
         x: Int,
         y: Int,
     ) {
+        val anchorAbsRow = selectionAnchorAbsoluteRow ?: return
         val cache = host.renderCache
-        val cell = host.cellAt(x, y)
+        val cell = if (selectionIsBlock) host.visualCellAt(x, y) else host.cellAt(x, y)
         val column = unpackCellColumn(cell)
         val row = unpackCellRow(cell)
 
         val caretAbsRow = cache.discardedCount + cache.historySize - cache.scrollbackOffset + row
-        val anchorAbsRow =
-            selectionAnchorAbsoluteRow ?: (cache.discardedCount + cache.historySize - cache.scrollbackOffset + selectionAnchorRow)
-
+        val anchorColumn = if (selectionIsBlock) dragAnchorVisualColumn else dragAnchorLogicalColumn
+        selectionAnchorColumn = if (selectionIsBlock && column < anchorColumn) anchorColumn + 1 else anchorColumn
         val caretColumn =
-            if (
-                caretAbsRow < anchorAbsRow ||
-                (caretAbsRow == anchorAbsRow && column < selectionAnchorColumn)
-            ) {
-                column
-            } else {
-                column + 1
+            when {
+                selectionIsBlock -> if (column < anchorColumn) column else column + 1
+                caretAbsRow < anchorAbsRow || caretAbsRow == anchorAbsRow && column < anchorColumn -> column
+                else -> column + 1
             }
 
-        selectionAnchorAbsoluteRow = anchorAbsRow
         selectionCaretAbsoluteRow = caretAbsRow
         selectionCaretColumn = caretColumn
     }

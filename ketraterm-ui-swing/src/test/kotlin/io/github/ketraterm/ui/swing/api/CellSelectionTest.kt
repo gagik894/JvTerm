@@ -16,9 +16,32 @@
 package io.github.ketraterm.ui.swing.api
 
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 class CellSelectionTest {
+    @Test
+    fun `block bounds normalize horizontal and vertical directions independently`() {
+        val selection = CellSelection(anchorColumn = 5, anchorRow = 0, caretColumn = 2, caretRow = 2, isBlock = true)
+
+        assertEquals(2, selection.startColumn)
+        assertEquals(5, selection.endColumn)
+        for (row in 0..2) {
+            assertEquals(CellSelection.packRange(2, 5), selection.packedColumnRange(row, 10))
+        }
+        assertEquals(CellSelection.NO_RANGE, selection.packedColumnRange(3, 10))
+    }
+
+    @Test
+    fun `zero width block is empty even when its rows differ`() {
+        val selection = CellSelection(anchorColumn = 2, anchorRow = 0, caretColumn = 2, caretRow = 2, isBlock = true)
+
+        assertTrue(selection.isEmpty)
+        for (row in 0..2) {
+            assertEquals(CellSelection.NO_RANGE, selection.packedColumnRange(row, 10))
+        }
+    }
+
     @Test
     fun `single row selection exposes half-open range`() {
         val selection = CellSelection(anchorColumn = 2, anchorRow = 0, caretColumn = 5, caretRow = 0)

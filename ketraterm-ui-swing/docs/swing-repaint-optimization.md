@@ -37,7 +37,15 @@ segment even though its terminal generation remains unchanged.
 
 Selection handles selection sweeps, word-level highlights, and block selections:
 
-* **Sweep Selection**: Tracks mouse drag coordinates, mapping the screen pixels to physical grid cell rows and columns.
+* **Sweep Selection**: Uses logical text columns. Each row's bidi mapping projects
+  the selected logical cells into visual spans for painting.
+* **Block Selection**: Keeps horizontal bounds in visual columns, independently
+  of each row's text direction. Vertical viewport clipping changes only the row
+  bounds. Painting uses the visual interval directly; copying visits the selected
+  cells in logical order on each row and preserves row breaks. Intersected wide
+  cells and grapheme clusters are included whole. The drag retains both logical
+  and visual anchor columns so changing Alt while the anchor is offscreen does
+  not reinterpret its coordinate.
 * **Smart Word & Path Expansion**:
   * **Standard Words**: Double-clicking a cell expands the selection left and right to contiguous letters, numbers, and underscores.
   * **Paths / URIs**: If the clicked sequence contains directory slash markers (`/`, `\`), dot indicators (`.`), or colon signs (`:`), the text extractor expands the selection across path-safe characters, allowing users to easily select full file paths or URLs.

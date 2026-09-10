@@ -43,7 +43,7 @@ internal class TerminalSelectionPainter(
     ) {
         if (selection == null) return
 
-        val range = selection.packedColumnRange(row, cache.columns, cache)
+        val range = selection.packedColumnRange(row, cache, bidi)
         if (range == CellSelection.NO_RANGE) return
 
         val startColumn = CellSelection.rangeStart(range)
@@ -75,7 +75,8 @@ internal class TerminalSelectionPainter(
         }
 
         g.color = colorCache.color(selColor)
-        forEachVisualCellSpan(bidi, startColumn, endColumn) { visualStart, visualEnd ->
+        // Block ranges are already visual; only linear selections need row reordering.
+        forEachVisualCellSpan(if (selection.isBlock) null else bidi, startColumn, endColumn) { visualStart, visualEnd ->
             g.fillRect(
                 visualStart * metrics.cellWidth,
                 row * metrics.cellHeight,

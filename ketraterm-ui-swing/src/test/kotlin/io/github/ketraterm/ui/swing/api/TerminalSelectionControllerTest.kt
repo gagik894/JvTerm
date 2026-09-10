@@ -17,11 +17,15 @@ package io.github.ketraterm.ui.swing.api
 
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import javax.swing.JButton
@@ -30,6 +34,7 @@ class TerminalSelectionControllerTest {
     private class FakeSelectionHost(
         override val renderCache: TerminalRenderCache,
     ) : TerminalSelectionHost {
+        private val bidiLayout = TerminalBidiLayout()
         override val settings = SwingSettings(padding = SwingPadding(0, 0, 0, 0))
         override val metrics =
             SwingMetrics(
@@ -61,8 +66,14 @@ class TerminalSelectionControllerTest {
             cellAtY = y
             val col = x / 10
             val row = y / 20
-            return (col.toLong() shl 32) or (row.toLong() and 0xffff_ffffL)
+            val logicalColumn = bidiLayout.row(renderCache, row)?.logicalColumn(col) ?: col
+            return (logicalColumn.toLong() shl 32) or (row.toLong() and 0xffff_ffffL)
         }
+
+        override fun visualCellAt(
+            x: Int,
+            y: Int,
+        ): Long = ((x / 10).toLong() shl 32) or ((y / 20).toLong() and 0xffff_ffffL)
 
         override fun scrollViewportByRows(deltaRows: Int): Boolean {
             scrollDeltaRows = deltaRows
@@ -423,6 +434,165 @@ class TerminalSelectionControllerTest {
 
         assertNull(controller.getSelectedText(reader))
     }
+
+    @ParameterizedTest
+    @CsvSource(
+        "1, 2, false",
+        "1, 2, true",
+        "0, 2, false",
+        "0, 2, true",
+        "1, 1, false",
+        "1, 1, true",
+    )
+    fun `vertical viewport clipping preserves block columns`(
+        firstVisibleAbsoluteRow: Int,
+        visibleRows: Int,
+        upward: Boolean,
+    ) {
+        val lines = listOf("abcdefgh", "ijklmnop", "qrstuvwx")
+        val cache = TerminalRenderCache(8, 3)
+        cache.accept(AbsoluteLinesFrame(lines, historySize = 0))
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 15, if (upward) 45 else 5))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, if (upward) 5 else 45))
+        controller.stopSelectionDrag()
+        val unclipped = requireNotNull(controller.getViewportSelection(cache))
+        for (row in 0..2) {
+            assertEquals(CellSelection.packRange(1, 3), unclipped.packedColumnRange(row, 8))
+        }
+
+        cache.accept(
+            AbsoluteLinesFrame(
+                lines = lines.subList(firstVisibleAbsoluteRow, firstVisibleAbsoluteRow + visibleRows),
+                historySize = firstVisibleAbsoluteRow,
+            ),
+        )
+
+        val clipped = requireNotNull(controller.getViewportSelection(cache))
+        assertTrue(clipped.isBlock)
+        assertEquals(0, clipped.startRow)
+        assertEquals(visibleRows - 1, clipped.endRow)
+        for (row in 0 until visibleRows) {
+            assertEquals(CellSelection.packRange(1, 3), clipped.packedColumnRange(row, 8))
+        }
+        assertEquals(
+            "bc\njk\nrs",
+            controller.getSelectedText(AbsoluteLinesReader(lines, historySize = 0, screenRows = 3)),
+            "Viewport clipping must not change the absolute selection used for copying",
+        )
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `backward horizontal block drag includes its anchor and current cells`(upward: Boolean) {
+        val cache = TerminalRenderCache(8, 3)
+        cache.accept(AbsoluteLinesFrame(listOf("abcdefgh", "ijklmnop", "qrstuvwx"), historySize = 0))
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 35, if (upward) 45 else 5))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 15, if (upward) 5 else 45))
+        controller.stopSelectionDrag()
+
+        val selection = requireNotNull(controller.getViewportSelection(cache))
+        assertTrue(selection.isBlock)
+        for (row in 0..2) {
+            assertEquals(CellSelection.packRange(1, 4), selection.packedColumnRange(row, 8))
+        }
+    }
+
+    @Test
+    fun `routed drag cannot resume a mouse gesture after programmatic selection`() {
+        val cache = TerminalRenderCache(8, 1)
+        cache.accept(AbsoluteLinesFrame(listOf("abcdefgh"), historySize = 0))
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 35, 5))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 55, 5))
+        controller.selectAbsoluteRows(0L, 0L, 8)
+
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 15, 5))
+
+        assertFalse(controller.selectingWithMouse)
+        assertEquals(CellSelection(0, 0, 8, 0), controller.getViewportSelection(cache))
+    }
+
+    @Test
+    fun `clearing a selection ends its mouse gesture`() {
+        val cache = TerminalRenderCache(8, 1)
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 35, 5))
+        controller.clearSelection()
+
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 15, 5))
+
+        assertFalse(controller.selectingWithMouse)
+        assertNull(controller.getViewportSelection(cache))
+        assertNull(controller.selectionAnchorAbsoluteRow)
+        assertNull(controller.selectionCaretAbsoluteRow)
+    }
+
+    @Test
+    fun `old block rows cannot overflow into the current viewport`() {
+        val cache = TerminalRenderCache(8, 1)
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 15, 5))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, 5))
+        controller.stopSelectionDrag()
+
+        cache.accept(AbsoluteLinesFrame(listOf("abcdefgh"), historySize = 0, discardedCount = 1L shl 32))
+
+        assertNull(controller.getViewportSelection(cache))
+    }
+
+    @Test
+    fun `switching block mode retains both anchor coordinates after its row leaves the viewport`() {
+        val lines = listOf("אבגדהוזח", "ABCDEFGH")
+        val cache = TerminalRenderCache(8, 2)
+        cache.accept(AbsoluteLinesFrame(lines, historySize = 0))
+        val controller = TerminalSelectionController(FakeSelectionHost(cache))
+        val reader = AbsoluteLinesReader(lines, historySize = 0, screenRows = 2)
+        val button = JButton()
+        controller.handleSelectionMousePressed(selectionMouseEvent(button, MouseEvent.MOUSE_PRESSED, 5, 5))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, 25))
+        assertEquals(CellSelection(0, 0, 3, 1, isBlock = true), controller.getViewportSelection(cache))
+        assertEquals("וזח\nABC", controller.getSelectedText(reader))
+
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, 25, alt = false))
+        assertEquals(CellSelection(7, 0, 3, 1), controller.getViewportSelection(cache))
+        assertEquals("ח\nABC", controller.getSelectedText(reader))
+
+        cache.accept(AbsoluteLinesFrame(lines.drop(1), historySize = 1))
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, 5))
+        assertEquals(CellSelection(0, 0, 3, 0, isBlock = true), controller.getViewportSelection(cache))
+        assertEquals("וזח\nABC", controller.getSelectedText(reader))
+
+        controller.handleSelectionMouseDragged(selectionMouseEvent(button, MouseEvent.MOUSE_DRAGGED, 25, 5, alt = false))
+        assertEquals(CellSelection(0, 0, 3, 0), controller.getViewportSelection(cache))
+        assertEquals("ח\nABC", controller.getSelectedText(reader))
+        controller.stopSelectionDrag()
+    }
+
+    private fun selectionMouseEvent(
+        component: JButton,
+        id: Int,
+        x: Int,
+        y: Int,
+        alt: Boolean = true,
+    ): MouseEvent =
+        MouseEvent(
+            component,
+            id,
+            0L,
+            InputEvent.BUTTON1_DOWN_MASK or if (alt) InputEvent.ALT_DOWN_MASK else 0,
+            x,
+            y,
+            if (id == MouseEvent.MOUSE_PRESSED) 1 else 0,
+            false,
+            MouseEvent.BUTTON1,
+        )
 
     private class AbsoluteLinesReader(
         private val lines: List<String>,

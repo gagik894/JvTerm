@@ -211,6 +211,11 @@ class SwingTerminal
                         y: Int,
                     ): Long = this@SwingTerminal.cellAt(x, y, this@SwingTerminal.renderCache)
 
+                    override fun visualCellAt(
+                        x: Int,
+                        y: Int,
+                    ): Long = this@SwingTerminal.visualCellAt(x, y, this@SwingTerminal.renderCache)
+
                     override fun scrollViewportByRows(deltaRows: Int): Boolean = rowScroller.scrollByRows(deltaRows)
 
                     override fun repaint() = this@SwingTerminal.repaint()
@@ -1151,7 +1156,8 @@ class SwingTerminal
 
         /**
          * Returns the current visible cell selection, or `null` when nothing is
-         * selected.
+         * selected. Linear selection columns are logical; block selection columns
+         * are visual, as defined by [CellSelection].
          *
          * This method may be called from any thread. Off-EDT callers wait for the
          * EDT to read the binding, selection, and viewport together. EDT callers
@@ -1678,6 +1684,18 @@ class SwingTerminal
             y: Int,
             cache: TerminalRenderCache,
         ): Long {
+            val visualCell = visualCellAt(x, y, cache)
+            val column = (visualCell ushr 32).toInt()
+            val row = visualCell.toInt()
+            val logicalColumn = visualGeometry.bidiLayout.row(cache, row)?.logicalColumn(column) ?: column
+            return packCell(logicalColumn, row)
+        }
+
+        private fun visualCellAt(
+            x: Int,
+            y: Int,
+            cache: TerminalRenderCache,
+        ): Long {
             val paddingLeft = SwingTerminalChrome.left(settings, cache.activeBuffer)
             val paddingTop = SwingTerminalChrome.top(settings, cache.activeBuffer)
             val column = ((x - paddingLeft) / metrics.cellWidth).coerceIn(0, cache.columns - 1)
@@ -1687,8 +1705,7 @@ class SwingTerminal
                 } else {
                     ((y - paddingTop) / metrics.cellHeight).coerceIn(0, cache.rows - 1)
                 }
-            val logicalColumn = visualGeometry.bidiLayout.row(cache, row)?.logicalColumn(column) ?: column
-            return packCell(logicalColumn, row)
+            return packCell(column, row)
         }
 
         private fun repaintHyperlinkSpan(

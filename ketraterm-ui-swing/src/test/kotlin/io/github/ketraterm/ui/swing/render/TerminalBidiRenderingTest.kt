@@ -16,13 +16,18 @@
 package io.github.ketraterm.ui.swing.render
 
 import io.github.ketraterm.render.api.*
+import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.api.CellSelection
+import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.painter.TerminalSelectionPainter
 import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.EnumSource
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.image.BufferedImage
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -66,6 +71,51 @@ class TerminalBidiRenderingTest {
     }
 
     @Test
+    fun `block selection overlay stays at its visual columns`() {
+        val image = paint(selection = CellSelection(0, 0, 1, 0, isBlock = true))
+
+        assertTrue(image.getRGB(1, 1) != TEST_BLUE)
+        assertEquals(TEST_GREEN, image.getRGB(metrics.cellWidth + 1, 1))
+        assertEquals(TEST_RED, image.getRGB(metrics.cellWidth * 2 + 1, 1))
+    }
+
+    @Test
+    fun `mixed bidi block overlay is contiguous while linear overlay follows logical cells`() {
+        val cache = renderCache(TestRenderFrame.text("AB אבג"))
+        val selection = CellSelection(1, 0, 4, 0, isBlock = true)
+
+        assertContentEquals(booleanArrayOf(false, true, true, true, false, false), paintedSelectionColumns(cache, selection))
+        assertContentEquals(
+            booleanArrayOf(false, true, true, false, false, true),
+            paintedSelectionColumns(cache, selection.copy(isBlock = false)),
+        )
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = [1, 2])
+    fun `block overlay includes both visual halves of an intersected wide cell`(selectedColumn: Int) {
+        val cache =
+            renderCache(
+                TestRenderFrame(
+                    arrayOf(
+                        arrayOf(
+                            TestCell(codeWord = 'א'.code, flags = TerminalRenderCellFlags.CODEPOINT),
+                            TestCell(
+                                codeWord = '字'.code,
+                                flags = TerminalRenderCellFlags.CODEPOINT or TerminalRenderCellFlags.WIDE_LEADING,
+                            ),
+                            TestCell(flags = TerminalRenderCellFlags.WIDE_TRAILING),
+                            TestCell(codeWord = 'ב'.code, flags = TerminalRenderCellFlags.CODEPOINT),
+                        ),
+                    ),
+                ),
+            )
+        val selection = CellSelection(selectedColumn, 0, selectedColumn + 1, 0, isBlock = true)
+
+        assertContentEquals(booleanArrayOf(false, true, true, false), paintedSelectionColumns(cache, selection))
+    }
+
+    @Test
     fun `search overlay follows logical rtl cells`() {
         val highlights = TerminalSearchViewportHighlights()
         highlights.reset(1)
@@ -74,6 +124,29 @@ class TerminalBidiRenderingTest {
         val image = paint(highlights = highlights)
         assertEquals(TEST_BLUE, image.getRGB(1, 1))
         assertTrue(image.getRGB(metrics.cellWidth * 2 + 1, 1) != TEST_RED)
+    }
+
+    private fun paintedSelectionColumns(
+        cache: TerminalRenderCache,
+        selection: CellSelection,
+    ): BooleanArray {
+        val image = BufferedImage(metrics.cellWidth * cache.columns, metrics.cellHeight, BufferedImage.TYPE_INT_ARGB)
+        val g = image.createGraphics()
+        try {
+            TerminalSelectionPainter(AwtColorCache()).paint(
+                g,
+                cache,
+                metrics,
+                row = 0,
+                selection,
+                selectionBackground = TEST_WHITE,
+                palette = settings.palette,
+                bidi = TerminalBidiLayout().row(cache, 0),
+            )
+        } finally {
+            g.dispose()
+        }
+        return BooleanArray(cache.columns) { column -> image.getRGB(column * metrics.cellWidth + 1, 1) != 0 }
     }
 
     private fun paint(
