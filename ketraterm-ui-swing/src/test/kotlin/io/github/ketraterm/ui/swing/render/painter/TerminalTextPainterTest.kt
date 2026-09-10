@@ -27,10 +27,12 @@ import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 import org.junit.jupiter.params.provider.ValueSource
 import java.awt.*
 import java.awt.geom.AffineTransform
 import java.awt.image.BufferedImage
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -40,6 +42,42 @@ import kotlin.test.assertTrue
  * according to the terminal's rigid column grid.
  */
 class TerminalTextPainterTest {
+    @ParameterizedTest
+    @CsvSource("ABC, אבג", "אבג, ABC", "אבA, Aאב")
+    fun freshSourceDoesNotReuseOldBidiClassification(
+        previousText: String,
+        replacementText: String,
+    ) {
+        val reused = fixture()
+        val fresh = fixture()
+        val previous = renderCache(TestRenderFrame.text(previousText))
+        val replacement = renderCache(TestRenderFrame.text(replacementText))
+        assertEquals(previous.columns, replacement.columns)
+        assertEquals(previous.rows, replacement.rows)
+        assertEquals(previous.frameGeneration, replacement.frameGeneration)
+        assertEquals(previous.structureGeneration, replacement.structureGeneration)
+        assertContentEquals(previous.lineIds, replacement.lineIds)
+        assertContentEquals(previous.lineGenerations, replacement.lineGenerations)
+        try {
+            reused.paintRow(previous)
+            reused.g.composite = AlphaComposite.Clear
+            reused.g.fillRect(0, 0, reused.image.width, reused.image.height)
+            reused.g.composite = AlphaComposite.SrcOver
+
+            reused.paintRow(replacement)
+            fresh.paintRow(replacement)
+
+            assertContentEquals(
+                fresh.image.getRGB(0, 0, fresh.image.width, fresh.image.height, null, 0, fresh.image.width),
+                reused.image.getRGB(0, 0, reused.image.width, reused.image.height, null, 0, reused.image.width),
+                "Replacement source $replacementText retained bidi state from $previousText",
+            )
+        } finally {
+            reused.g.dispose()
+            fresh.g.dispose()
+        }
+    }
+
     @Test
     fun `rtl punctuation segment uses the row direction instead of inferring ltr`() {
         val actual = fixture()

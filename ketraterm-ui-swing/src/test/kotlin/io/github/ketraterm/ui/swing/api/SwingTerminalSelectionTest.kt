@@ -38,13 +38,101 @@ import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestion
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
+import java.awt.image.BufferedImage
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
 
 class SwingTerminalSelectionTest {
+    @ParameterizedTest
+    @CsvSource(
+        "ABC, אבג, 3, false",
+        "אבג, ABC, 1, false",
+        "אבA, Aאב, 1, false",
+        "ABC, אבג, 3, true",
+        "אבג, ABC, 1, true",
+        "אבA, Aאב, 1, true",
+    )
+    fun sessionReplacementWithReusedLineMetadataResetsRenderingAndHitTesting(
+        previousText: String,
+        replacementText: String,
+        expectedLink: Int,
+        unbindFirst: Boolean,
+    ) {
+        fun frame(text: String): TestRenderFrame =
+            TestRenderFrame(
+                arrayOf(
+                    Array(text.length) { column ->
+                        TestCell(
+                            codeWord = text[column].code,
+                            flags = TerminalRenderCellFlags.CODEPOINT,
+                            hyperlinkId = column + 1,
+                            attr =
+                                TerminalRenderAttrs.pack(
+                                    backgroundKind = TerminalRenderColorKind.RGB,
+                                    backgroundValue = 0x550000 shr (column * 8),
+                                ),
+                        )
+                    },
+                ),
+            )
+        val first = testSession(frame(previousText), hyperlinkResolver = TerminalHyperlinkResolver { "https://old.example/$it" })
+        val second = testSession(frame(replacementText), hyperlinkResolver = TerminalHyperlinkResolver { "https://new.example/$it" })
+        try {
+            SwingUtilities.invokeAndWait {
+                var opened: String? = null
+                val settings = SwingSettings(cursorBlinkMillis = 0, padding = SwingPadding(), shellIntegrationDecorationGutterWidth = 0)
+                val reused =
+                    SwingTerminal(
+                        settingsProvider = { settings },
+                        hostServices =
+                            SwingHostServices(
+                                hyperlinkHandler =
+                                    TerminalHyperlinkHandler {
+                                        opened = it
+                                        true
+                                    },
+                            ),
+                    )
+                val fresh = SwingTerminal(settingsProvider = { settings })
+                try {
+                    reused.setSize(120, 40)
+                    fresh.setSize(120, 40)
+                    reused.bind(first)
+                    componentPixels(reused)
+                    if (unbindFirst) reused.unbind()
+                    reused.bind(second)
+                    fresh.bind(second)
+
+                    assertArrayEquals(componentPixels(fresh), componentPixels(reused), "Session replacement retained old bidi layout")
+                    for (listener in reused.mouseListeners) listener.mousePressed(mousePressedWithCtrl(reused, 1, 1))
+                    assertEquals("https://new.example/$expectedLink", opened)
+                } finally {
+                    reused.dispose()
+                    fresh.dispose()
+                }
+            }
+        } finally {
+            first.close()
+            second.close()
+        }
+    }
+
+    private fun componentPixels(component: SwingTerminal): IntArray {
+        val image = BufferedImage(component.width, component.height, BufferedImage.TYPE_INT_ARGB)
+        val g = image.createGraphics()
+        try {
+            component.paint(g)
+        } finally {
+            g.dispose()
+        }
+        return image.getRGB(0, 0, image.width, image.height, null, 0, image.width)
+    }
+
     @Test
     fun `rtl pointer activates the hyperlink under its visual cell`() {
         val opened = AtomicReference<String?>()
