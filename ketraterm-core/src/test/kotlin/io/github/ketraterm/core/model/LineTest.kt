@@ -188,9 +188,11 @@ class LineTest {
             // Overwrite with a different cluster
             l.setCluster(0, intArrayOf(0xCCCC, 0xDDDD, 0xEEEE), 3, 0)
 
-            // The first handle's slot must have been freed and reused
+            // The larger replacement needs a different region.
             val secondHandle = l.rawCodepoint(0)
-            assertEquals(firstHandle, secondHandle, "Freed slot must be reused for the new cluster")
+            assertNotEquals(firstHandle, secondHandle, "The smaller region must remain available")
+            l.setCluster(1, intArrayOf(0x1111, 0x2222), 2, 0)
+            assertEquals(firstHandle, l.rawCodepoint(1), "Overwrite must free the old region for reuse")
 
             // New data must be visible
             val dest = IntArray(4)
@@ -201,6 +203,8 @@ class LineTest {
                 { assertEquals(0xDDDD, dest[1]) },
                 { assertEquals(0xEEEE, dest[2]) },
             )
+            assertEquals(2, l.readCluster(1, dest))
+            assertArrayEquals(intArrayOf(0x1111, 0x2222), dest.copyOf(2))
         }
 
         @Test

@@ -50,5 +50,7 @@ Multi-codepoint grapheme clusters (such as emojis with joiners) cannot fit in a 
 
 ### Freelist Slot Reclamation:
 * When a cell containing a cluster handle is overwritten or erased, `free(handle)` returns the slot to a segregated freelist.
-* Subsequent allocations reuse these freed slots before expanding the metadata tables, maintaining a bounded memory footprint.
+* Each slot permanently owns its data region. Allocations reuse a sufficiently large free slot or create a new slot and region; they never relocate a smaller slot and abandon its old region.
+* Capacity classes are exact for 1–4 codepoints, then powers of two (8, 16, ...). Allocation searches matching and larger classes, while requests of 1–4 codepoints only search those small classes. This bounds free-list lookup work independently of scrollback size. Larger classes trade spare capacity for fast reuse.
+* Freeing retains storage for reuse; it does not shrink the arena. Reflow copies surviving clusters into a fresh store.
 * **Thread Safety**: Access to `ClusterStore` is confined strictly to the terminal core's state mutation thread.

@@ -247,6 +247,32 @@ class ClusterStoreTest {
         }
 
         @Test
+        fun `double free of head and tail after growth preserves reuse and live payloads`() {
+            val store = ClusterStore()
+            val handles = IntArray(130) { store.alloc(intArrayOf(it, it + 1)) }
+            val tail = handles.first()
+            val head = handles.last()
+            store.free(tail)
+            store.free(head)
+
+            assertThrows(IllegalStateException::class.java) { store.free(tail) }
+            assertThrows(IllegalStateException::class.java) { store.free(head) }
+
+            assertEquals(head, store.alloc(intArrayOf(500, 501)))
+            assertEquals(tail, store.alloc(intArrayOf(600, 601)))
+            assertCluster(store, head, intArrayOf(500, 501))
+            assertCluster(store, tail, intArrayOf(600, 601))
+            for (i in 1 until handles.lastIndex) {
+                assertCluster(store, handles[i], intArrayOf(i, i + 1))
+            }
+
+            assertDoesNotThrow {
+                store.free(head)
+                store.free(tail)
+            }
+        }
+
+        @Test
         fun `free preserves all other live handles`() {
             val store = ClusterStore()
             val h0 = store.alloc(intArrayOf(10, 11))
@@ -732,45 +758,101 @@ class ClusterStoreTest {
             store.free(hLarge)
 
             // Allocate a small cluster (length 2).
-            // It searches Bucket 0, 1, 2. Since Bucket 2 has the freed slot, it pops it.
+            // A larger free region can serve a smaller cluster without shrinking.
             val hSmall = store.alloc(intArrayOf(5, 6))
             assertEquals(hLarge, hSmall, "Should reuse the large slot index")
 
-            // Free the small cluster handle. It should go back to Bucket 2 because its physical capacity is still 4!
+            // Freeing uses the physical capacity, not the current payload length.
             store.free(hSmall)
 
             // Allocate another cluster of length 4.
-            // It should pop the same slot from Bucket 2.
+            // It should reuse the original region.
             val hLarge2 = store.alloc(intArrayOf(7, 8, 9, 10))
             assertEquals(hLarge, hLarge2, "Should reuse the same slot and fit its capacity of 4")
         }
 
         @Test
-        fun `small allocations do not pollute bucket 3 slots`() {
+        fun `small allocations preserve large free regions`() {
             val store = ClusterStore()
-            // Allocate a large cluster of length 5 -> goes to Bucket 3 (capacity 5+)
+            // Large regions remain available for longer clusters.
             val h5 = store.alloc(intArrayOf(1, 2, 3, 4, 5))
             store.free(h5)
 
             // Allocate a small cluster of length 2.
-            // Since L=2, it searches Buckets 0, 1, 2. Bucket 3 should NOT be searched.
-            // It should allocate a brand-new slot.
+            // Small allocations only search capacities up to four.
             val h2 = store.alloc(intArrayOf(6, 7))
-            assertNotEquals(h5, h2, "Should not pop a Bucket 3 slot for a small cluster")
+            assertNotEquals(h5, h2, "Should preserve the larger region for longer clusters")
         }
 
         @Test
-        fun `fallback searches smaller buckets when preferred ones are empty`() {
-            val store = ClusterStore()
-            // Alloc length 2 (slot 0, capacity 2)
-            val h2 = store.alloc(intArrayOf(1, 2))
-            store.free(h2)
+        fun `larger allocations preserve smaller free regions across capacity boundaries`() {
+            for (smallLength in intArrayOf(1, 2, 3, 4, 8, 16, 32, 64)) {
+                val store = ClusterStore()
+                val small = IntArray(smallLength) { 0x300 + it }
+                val large = IntArray(smallLength + 1) { 0x400 + it }
+                val smallHandle = store.alloc(small)
+                store.free(smallHandle)
 
-            // Alloc length 3.
-            // Bucket 1 (capacity 3) and Bucket 2 (capacity 4) are empty.
-            // It should fallback to check Bucket 0 (capacity 2), pop slot 0, and grow its capacity to 3.
-            val h3 = store.alloc(intArrayOf(3, 4, 5))
-            assertEquals(h2, h3, "Should fallback to pop slot 0 from Bucket 0 and grow it")
+                val largeHandle = store.alloc(large)
+                assertNotEquals(smallHandle, largeHandle, "Must preserve capacity $smallLength")
+                assertEquals(smallHandle, store.alloc(small), "Smaller region must remain reusable")
+                assertCluster(store, smallHandle, small)
+                assertCluster(store, largeHandle, large)
+            }
+        }
+
+        @Test
+        fun `large capacity classes reuse fitting regions without losing smaller ones`() {
+            val store = ClusterStore()
+            val small = store.alloc(IntArray(5) { it })
+            val large = store.alloc(IntArray(9) { it })
+            store.free(large)
+            store.free(small)
+
+            val payload = IntArray(16) { 100 + it }
+            assertEquals(large, store.alloc(payload))
+            assertEquals(small, store.alloc(IntArray(8) { 200 + it }))
+            assertCluster(store, large, payload)
+            assertCluster(store, small, IntArray(8) { 200 + it })
+        }
+
+        @Test
+        fun `repeated mixed size overwrites stop growing reserved storage`() {
+            val store = ClusterStore()
+            val sizes = intArrayOf(1, 2, 3, 4, 5, 8, 9, 16, 17, 32, 33, 64)
+            val handles = IntArray(sizes.size)
+            for (i in sizes.indices) {
+                handles[i] = store.alloc(IntArray(sizes[i]) { it })
+                store.free(handles[i])
+            }
+            val dataSize = ClusterStore::class.java.getDeclaredField("dataSize").apply { isAccessible = true }
+            val reserved = dataSize.getInt(store)
+
+            repeat(100) { cycle ->
+                for (i in sizes.indices) {
+                    val payload = IntArray(sizes[i]) { cycle + it }
+                    val handle = store.alloc(payload)
+                    assertEquals(handles[i], handle)
+                    assertCluster(store, handle, payload)
+                    store.free(handle)
+                }
+            }
+            assertEquals(reserved, dataSize.getInt(store), "Overwrites must reuse existing data regions")
+        }
+
+        @Test
+        fun `invalid source slice leaves free regions available`() {
+            val store = ClusterStore()
+            val handle = store.alloc(intArrayOf(1, 2))
+            store.free(handle)
+
+            for (offset in intArrayOf(-1, 1, Int.MAX_VALUE)) {
+                assertThrows(IndexOutOfBoundsException::class.java) {
+                    store.alloc(intArrayOf(3, 4), offset, 2)
+                }
+            }
+            assertEquals(handle, store.alloc(intArrayOf(5, 6)))
+            assertCluster(store, handle, intArrayOf(5, 6))
         }
     }
 }
