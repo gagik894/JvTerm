@@ -19,13 +19,10 @@ import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.api.TerminalRenderAttrs
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
-import io.github.ketraterm.ui.swing.render.SwingColors
+import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.cache.FontCache
 import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache
-import io.github.ketraterm.ui.swing.render.hasDrawableText
-import io.github.ketraterm.ui.swing.render.isFastAsciiCell
-import io.github.ketraterm.ui.swing.render.terminalFontStyle
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 import java.awt.font.FontRenderContext
@@ -314,7 +311,7 @@ internal class TerminalShapedTextRunPainter(
             )
         val fontStyle = terminalFontStyle(attr)
         val decoration = decorationKey(attr, extraAttr)
-        val blinkHidden = isBlinkHidden(attr, textBlinkVisible)
+        val textHidden = isTextHidden(attr, textBlinkVisible)
         val script = scriptKeyForSegment(cache, rowOffset, startColumn, runLimit)
         var column = startColumn + 1
         while (column < runLimit) {
@@ -349,7 +346,7 @@ internal class TerminalShapedTextRunPainter(
                     hyperlinkActivationForeground = hyperlinkActivationForeground,
                 )
             if (
-                isBlinkHidden(currentAttr, textBlinkVisible) != blinkHidden ||
+                isTextHidden(currentAttr, textBlinkVisible) != textHidden ||
                 currentForeground != foreground ||
                 terminalFontStyle(currentAttr) != fontStyle ||
                 decorationKey(currentAttr, currentExtraAttr) != decoration ||
@@ -435,7 +432,7 @@ internal class TerminalShapedTextRunPainter(
                     hyperlinkActivationForeground = hyperlinkActivationForeground,
                 )
             if (
-                isBlinkHidden(currentAttr, textBlinkVisible) ||
+                isTextHidden(currentAttr, textBlinkVisible) ||
                 currentForeground != foreground ||
                 terminalFontStyle(currentAttr) != fontStyle ||
                 decorationKey(currentAttr, currentExtraAttr) != decoration ||
@@ -487,7 +484,7 @@ internal class TerminalShapedTextRunPainter(
         val rowOffset = cache.rowOffset(row)
         val index = rowOffset + startColumn
         val attr = cache.attrWords[index]
-        if (isBlinkHidden(attr, textBlinkVisible)) return
+        if (isTextHidden(attr, textBlinkVisible)) return
 
         val extraAttr = cache.extraAttrWords[index]
         val hyperlinkId = hyperlinkIds[index]
@@ -769,11 +766,6 @@ internal class TerminalShapedTextRunPainter(
         } else {
             SwingColors.foreground(palette, attr, codePoint)
         }
-
-    private fun isBlinkHidden(
-        attr: Long,
-        textBlinkVisible: Boolean,
-    ): Boolean = !textBlinkVisible && TerminalRenderAttrs.isBlink(attr)
 
     private fun paintHyperlinkDecoration(
         g: Graphics2D,

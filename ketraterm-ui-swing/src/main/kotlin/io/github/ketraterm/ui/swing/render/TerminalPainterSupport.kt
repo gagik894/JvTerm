@@ -30,6 +30,15 @@ internal fun hasDrawableText(flags: Int): Boolean =
     flags and TerminalRenderCellFlags.CODEPOINT != 0 ||
         flags and TerminalRenderCellFlags.CLUSTER != 0
 
+/**
+ * Suppresses glyphs and their decorations before shaping, native emoji, or foreground overrides.
+ * Cell backgrounds and cursor geometry remain visible independently of text visibility.
+ */
+internal fun isTextHidden(
+    attr: Long,
+    textBlinkVisible: Boolean,
+): Boolean = TerminalRenderAttrs.isInvisible(attr) || (!textBlinkVisible && TerminalRenderAttrs.isBlink(attr))
+
 internal fun isFastAsciiCell(
     flags: Int,
     codeWord: Int,

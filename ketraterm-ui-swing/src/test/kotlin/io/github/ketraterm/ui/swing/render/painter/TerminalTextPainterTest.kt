@@ -19,10 +19,14 @@ import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
+import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.*
 import java.awt.geom.AffineTransform
 import java.awt.image.BufferedImage
@@ -35,6 +39,116 @@ import kotlin.test.assertTrue
  * according to the terminal's rigid column grid.
  */
 class TerminalTextPainterTest {
+    @Nested
+    inner class ConcealedTextRendering {
+        @ParameterizedTest
+        @ValueSource(strings = ["AAA", "ééé", "\u2588\u2588\u2588", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+        fun `conceal splits visible hyperlink runs without painting glyphs or decorations`(text: String) {
+            for (activationHover in listOf(false, true)) {
+                val fixture = fixture()
+                val visible = TerminalRenderAttrs.pack(underlineStyle = TerminalRenderUnderline.SINGLE)
+                val hidden = TerminalRenderAttrs.pack(invisible = true, underlineStyle = TerminalRenderUnderline.SINGLE)
+                val cache = renderCache(TestRenderFrame.text(text, attrs = longArrayOf(visible, hidden, visible)))
+                cache.hyperlinkIds.fill(1)
+                cache.extraAttrWords.fill(underlineColor(TEST_GREEN))
+
+                try {
+                    fixture.paintRow(cache, hoveredHyperlinkId = 1, hyperlinkActivationHover = activationHover)
+
+                    assertTrue(fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth, 0, fixture.metrics.cellHeight))
+                    assertTrue(
+                        !fixture.image.containsPaintedPixelInRange(
+                            fixture.metrics.cellWidth,
+                            fixture.metrics.cellWidth * 2,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "Concealed $text painted foreground with activationHover=$activationHover",
+                    )
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(
+                            fixture.metrics.cellWidth * 2,
+                            fixture.metrics.cellWidth * 3,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "Visible text after conceal must still paint",
+                    )
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `concealed native emoji stays hidden in row and cursor foreground`(cluster: Boolean) {
+            for (cursorForeground in listOf(false, true)) {
+                var rasterizations = 0
+                val rasterizer =
+                    object : TerminalPlatformEmojiRasterizer {
+                        override val available = true
+
+                        override fun rasterize(
+                            text: String,
+                            pixelSize: Int,
+                        ): BufferedImage {
+                            rasterizations++
+                            return BufferedImage(pixelSize, pixelSize, BufferedImage.TYPE_INT_ARGB).apply {
+                                for (y in 0 until height) for (x in 0 until width) setRGB(x, y, TEST_RED)
+                            }
+                        }
+                    }
+                val fixture = fixture(platformEmojiPainter = TerminalPlatformEmojiPainter(rasterizer))
+                val cache =
+                    renderCache(
+                        TestRenderFrame(
+                            arrayOf(
+                                arrayOf(
+                                    TestCell(
+                                        codeWord = ASTRAL_SMILE_CODE_POINT,
+                                        flags =
+                                            (if (cluster) TerminalRenderCellFlags.CLUSTER else TerminalRenderCellFlags.CODEPOINT) or
+                                                TerminalRenderCellFlags.WIDE_LEADING,
+                                        attr = TerminalRenderAttrs.pack(invisible = true),
+                                        cluster = if (cluster) "\uD83D\uDE42\uFE0F" else null,
+                                    ),
+                                    TestCell(flags = TerminalRenderCellFlags.WIDE_TRAILING),
+                                ),
+                            ),
+                        ),
+                    )
+                try {
+                    for (concealed in listOf(true, false)) {
+                        cache.attrWords[0] = TerminalRenderAttrs.pack(invisible = concealed)
+                        if (cursorForeground) {
+                            fixture.painter.paintCellForeground(
+                                fixture.g,
+                                cache,
+                                fixture.metrics,
+                                column = 0,
+                                row = 0,
+                                columnSpan = 2,
+                                foreground = TEST_GREEN,
+                                fontRenderContext = fixture.g.fontRenderContext,
+                            )
+                        } else {
+                            fixture.paintRow(cache)
+                        }
+                        assertEquals(
+                            !concealed,
+                            fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth * 2, 0, fixture.metrics.cellHeight),
+                            "Native emoji visibility must respect conceal, including cursor foreground",
+                        )
+                        assertEquals(if (concealed) 0 else 1, rasterizations)
+                    }
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+    }
+
     @Nested
     inner class AsciiTextRendering {
         @Test
@@ -1106,11 +1220,12 @@ class TerminalTextPainterTest {
         foreground: Int = TEST_RED,
         background: Int = TEST_BLACK,
         width: Int = 80,
+        platformEmojiPainter: TerminalPlatformEmojiPainter = TerminalPlatformEmojiPainter(),
     ): Fixture {
         val image = BufferedImage(width, 40, BufferedImage.TYPE_INT_ARGB)
         val settings = defaultTestSettings(foreground = foreground, background = background)
         val colorCache = AwtColorCache()
-        val painter = TerminalTextPainter(colorCache, TerminalDecorationPainter(colorCache))
+        val painter = TerminalTextPainter(colorCache, TerminalDecorationPainter(colorCache), platformEmojiPainter)
         painter.updateSettings(settings)
         return Fixture(
             image = image,

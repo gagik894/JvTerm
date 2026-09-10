@@ -127,7 +127,7 @@ internal class TerminalTextPainter(
                 continue
             }
 
-            if (isBlinkHidden(attrWords[index], textBlinkVisible)) {
+            if (isTextHidden(attrWords[index], textBlinkVisible)) {
                 column++
                 continue
             }
@@ -224,7 +224,7 @@ internal class TerminalTextPainter(
         if (!hasDrawableText(flags)) return
 
         val attr = attrWords[index]
-        if (isBlinkHidden(attr, textBlinkVisible)) return
+        if (isTextHidden(attr, textBlinkVisible)) return
 
         val codeWord = codeWords[index]
         val isPrimitive = flags and TerminalRenderCellFlags.CLUSTER == 0 && cellPrimitives.canPaint(codeWord)
@@ -361,7 +361,7 @@ internal class TerminalTextPainter(
             val currentAttr = attrWords[index]
             val currentExtraAttr = extraAttrWords[index]
             val currentHyperlinkId = hyperlinkIds[index]
-            val currentBlinkHidden = isBlinkHidden(currentAttr, textBlinkVisible)
+            val currentTextHidden = isTextHidden(currentAttr, textBlinkVisible)
             val currentHovered =
                 isHoveredHyperlink(
                     currentHyperlinkId,
@@ -382,7 +382,7 @@ internal class TerminalTextPainter(
                     hyperlinkActivationForeground = hyperlinkActivationForeground,
                 )
             if (
-                currentBlinkHidden ||
+                currentTextHidden ||
                 !isFastAsciiCell(flags, codeWord) ||
                 currentForeground != foreground ||
                 terminalFontStyle(currentAttr) != fontStyle ||
@@ -440,7 +440,7 @@ internal class TerminalTextPainter(
         val index = cache.rowOffset(row) + column
         val flags = flagsPlane[index]
         val attr = attrWords[index]
-        if (isBlinkHidden(attr, textBlinkVisible)) return endColumnForHiddenCell(cache, flags, column)
+        if (isTextHidden(attr, textBlinkVisible)) return endColumnForHiddenCell(cache, flags, column)
 
         val extraAttr = extraAttrWords[index]
         val hyperlinkId = hyperlinkIds[index]
@@ -595,11 +595,6 @@ internal class TerminalTextPainter(
         } else {
             SwingColors.foreground(palette, attr, codePoint)
         }
-
-    private fun isBlinkHidden(
-        attr: Long,
-        textBlinkVisible: Boolean,
-    ): Boolean = !textBlinkVisible && TerminalRenderAttrs.isBlink(attr)
 
     private fun endColumnForHiddenCell(
         cache: TerminalRenderCache,
