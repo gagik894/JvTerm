@@ -24,6 +24,7 @@ import kotlin.math.min
 
 /**
  * Paints emoji through a native platform text stack when available.
+ * Classifies text before accessing the lazy rasterizer so ordinary text cannot trigger native font loading.
  */
 internal class TerminalPlatformEmojiPainter(
     rasterizerFactory: () -> TerminalPlatformEmojiRasterizer = { TerminalPlatformEmojiRasterizer.create() },
@@ -47,7 +48,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!rasterizer.available || !isDefaultEmojiPresentationCodePoint(codePoint)) return false
+        if (!isDefaultEmojiPresentationCodePoint(codePoint) || !rasterizer.available) return false
         val text = String(Character.toChars(codePoint))
         return paintText(g, text, column, row, columnSpan, metrics)
     }
@@ -62,7 +63,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!rasterizer.available || !containsEmojiPresentation(codepoints, offset, length)) return false
+        if (!containsEmojiPresentation(codepoints, offset, length) || !rasterizer.available) return false
         val text = String(codepoints, offset, length)
         return paintText(g, text, column, row, columnSpan, metrics)
     }
