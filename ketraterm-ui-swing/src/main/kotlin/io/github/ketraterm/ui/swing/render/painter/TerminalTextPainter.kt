@@ -16,7 +16,6 @@
 package io.github.ketraterm.ui.swing.render.painter
 
 import io.github.ketraterm.render.api.TerminalColorPalette
-import io.github.ketraterm.render.api.TerminalRenderAttrs
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.api.TerminalFontResolver
@@ -47,12 +46,14 @@ internal class TerminalTextPainter(
     private val asciiDrawChars = TerminalAsciiDrawCharsCache()
     private val cellPrimitives = TerminalCellPrimitivePainter()
     private val textRun = TerminalTextRunBuffer(INITIAL_TEXT_RUN_CAPACITY)
+    private val runStyle = TerminalTextRunStyle()
     private val shapedTextRuns =
         TerminalShapedTextRunPainter(
             colorCache = colorCache,
             decorationPainter = decorationPainter,
             fontCache = fontCache,
             complexTextLayouts = complexTextLayouts,
+            runStyle = runStyle,
         )
 
     /**
@@ -91,6 +92,18 @@ internal class TerminalTextPainter(
         hyperlinkActivationHover: Boolean = false,
         hyperlinkActivationForeground: Int = DEFAULT_HYPERLINK_ACTIVATION_FOREGROUND,
     ) {
+        runStyle.configureRow(
+            row = row,
+            textBlinkVisible = textBlinkVisible,
+            hyperlinkIds = hyperlinkIds,
+            hoveredHyperlinkId = hoveredHyperlinkId,
+            hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
+            hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
+            hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
+            hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
+            hyperlinkActivationHover = hyperlinkActivationHover,
+            hyperlinkActivationForeground = hyperlinkActivationForeground,
+        )
         if (shapedTextRuns.cachedRowContainsStrongRtl(cache, row)) {
             shapedTextRuns.paintBidiRow(
                 g = g,
@@ -99,15 +112,6 @@ internal class TerminalTextPainter(
                 metrics = metrics,
                 row = row,
                 fontRenderContext = fontRenderContext,
-                textBlinkVisible = textBlinkVisible,
-                hyperlinkIds = hyperlinkIds,
-                hoveredHyperlinkId = hoveredHyperlinkId,
-                hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
             )
             return
         }
@@ -145,15 +149,6 @@ internal class TerminalTextPainter(
                             startColumn = column,
                             baselineY = baselineY,
                             fontRenderContext = fontRenderContext,
-                            textBlinkVisible = textBlinkVisible,
-                            hyperlinkIds = hyperlinkIds,
-                            hoveredHyperlinkId = hoveredHyperlinkId,
-                            hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                            hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                            hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                            hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                            hyperlinkActivationHover = hyperlinkActivationHover,
-                            hyperlinkActivationForeground = hyperlinkActivationForeground,
                         )
 
                     shapedTextRuns.isComplexShapingCell(cache, index) ->
@@ -166,15 +161,6 @@ internal class TerminalTextPainter(
                             startColumn = column,
                             baselineY = baselineY,
                             fontRenderContext = fontRenderContext,
-                            textBlinkVisible = textBlinkVisible,
-                            hyperlinkIds = hyperlinkIds,
-                            hoveredHyperlinkId = hoveredHyperlinkId,
-                            hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                            hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                            hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                            hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                            hyperlinkActivationHover = hyperlinkActivationHover,
-                            hyperlinkActivationForeground = hyperlinkActivationForeground,
                         )
 
                     else ->
@@ -187,15 +173,6 @@ internal class TerminalTextPainter(
                             column = column,
                             baselineY = baselineY,
                             fontRenderContext = fontRenderContext,
-                            textBlinkVisible = textBlinkVisible,
-                            hyperlinkIds = hyperlinkIds,
-                            hoveredHyperlinkId = hoveredHyperlinkId,
-                            hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                            hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                            hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                            hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                            hyperlinkActivationHover = hyperlinkActivationHover,
-                            hyperlinkActivationForeground = hyperlinkActivationForeground,
                         )
                 }
         }
@@ -311,105 +288,28 @@ internal class TerminalTextPainter(
         startColumn: Int,
         baselineY: Int,
         fontRenderContext: FontRenderContext,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
     ): Int {
         val flagsPlane = cache.flags
-        val attrWords = cache.attrWords
-        val extraAttrWords = cache.extraAttrWords
         val codeWords = cache.codeWords
         val rowOffset = cache.rowOffset(row)
-        val startIndex = rowOffset + startColumn
-        val attr = attrWords[startIndex]
-        val extraAttr = extraAttrWords[startIndex]
-        val hyperlinkId = hyperlinkIds[startIndex]
-        val hovered =
-            isHoveredHyperlink(
-                hyperlinkId,
-                row,
-                startColumn,
-                hoveredHyperlinkId,
-                hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn,
-            )
-        val foreground =
-            effectiveForeground(
-                palette = palette,
-                attr = attr,
-                hovered = hovered,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        val fontStyle = terminalFontStyle(attr)
-        val decoration = decorationKey(attr, extraAttr)
-        var column = startColumn
+        runStyle.begin(cache, palette, rowOffset, startColumn)
 
         textRun.clear()
+        textRun.appendAscii(codeWords[rowOffset + startColumn])
+        var column = startColumn + 1
         while (column < cache.columns) {
             val index = rowOffset + column
-            val flags = flagsPlane[index]
             val codeWord = codeWords[index]
-            val currentAttr = attrWords[index]
-            val currentExtraAttr = extraAttrWords[index]
-            val currentHyperlinkId = hyperlinkIds[index]
-            val currentTextHidden = isTextHidden(currentAttr, textBlinkVisible)
-            val currentHovered =
-                isHoveredHyperlink(
-                    currentHyperlinkId,
-                    row,
-                    column,
-                    hoveredHyperlinkId,
-                    hoveredHyperlinkStartRow,
-                    hoveredHyperlinkStartColumn,
-                    hoveredHyperlinkEndRow,
-                    hoveredHyperlinkEndColumn,
-                )
-            val currentForeground =
-                effectiveForeground(
-                    palette = palette,
-                    attr = currentAttr,
-                    hovered = currentHovered,
-                    hyperlinkActivationHover = hyperlinkActivationHover,
-                    hyperlinkActivationForeground = hyperlinkActivationForeground,
-                )
-            if (
-                currentTextHidden ||
-                !isFastAsciiCell(flags, codeWord) ||
-                currentForeground != foreground ||
-                terminalFontStyle(currentAttr) != fontStyle ||
-                decorationKey(currentAttr, currentExtraAttr) != decoration ||
-                currentHyperlinkId != hyperlinkId
-            ) {
-                break
-            }
+            if (!isFastAsciiCell(flagsPlane[index], codeWord) || !runStyle.matches(cache, palette, rowOffset, column)) break
 
             textRun.appendAscii(codeWord)
             column++
         }
 
-        g.font = fontCache.font(fontStyle)
-        g.color = colorCache.color(foreground)
-        drawAsciiRun(g, metrics, startColumn, baselineY, fontStyle, fontRenderContext)
-        decorationPainter.paint(g, palette, attr, extraAttr, foreground, startColumn, column, row, metrics)
-        paintHyperlinkDecoration(
-            g = g,
-            hyperlinkId = hyperlinkId,
-            hovered = hovered,
-            color = foreground,
-            startColumn = startColumn,
-            endColumn = column,
-            row = row,
-            metrics = metrics,
-        )
+        g.font = fontCache.font(runStyle.fontStyle)
+        g.color = colorCache.color(runStyle.foreground)
+        drawAsciiRun(g, metrics, startColumn, baselineY, runStyle.fontStyle, fontRenderContext)
+        decorationPainter.paintTextRun(g, palette, runStyle, startColumn, column, row, metrics)
         return column
     }
 
@@ -422,71 +322,26 @@ internal class TerminalTextPainter(
         column: Int,
         baselineY: Int,
         fontRenderContext: FontRenderContext,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
     ): Int {
-        val flagsPlane = cache.flags
-        val attrWords = cache.attrWords
-        val extraAttrWords = cache.extraAttrWords
-        val codeWords = cache.codeWords
         val clusterRefs = cache.clusterRefs
-        val index = cache.rowOffset(row) + column
-        val flags = flagsPlane[index]
-        val attr = attrWords[index]
-        if (isTextHidden(attr, textBlinkVisible)) return endColumnForHiddenCell(cache, flags, column)
+        val rowOffset = cache.rowOffset(row)
+        val index = rowOffset + column
+        val flags = cache.flags[index]
+        runStyle.begin(cache, palette, rowOffset, column)
+        if (runStyle.textHidden) return minOf(cache.columns, column + cellSpan(flags))
 
-        val extraAttr = extraAttrWords[index]
-        val hyperlinkId = hyperlinkIds[index]
-        val hovered =
-            isHoveredHyperlink(
-                hyperlinkId,
-                row,
-                column,
-                hoveredHyperlinkId,
-                hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn,
-            )
-        val codeWord = codeWords[index]
-        val foreground =
-            effectiveForeground(
-                palette = palette,
-                attr = attr,
-                codePoint = codeWord,
-                hovered = hovered,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        val fontStyle = terminalFontStyle(attr)
+        val codeWord = cache.codeWords[index]
         val endColumn = minOf(cache.columns, column + cellSpan(flags))
         val isPrimitive = flags and TerminalRenderCellFlags.CLUSTER == 0 && cellPrimitives.canPaint(codeWord)
 
         if (isPrimitive) {
-            g.color = colorCache.color(foreground)
+            g.color = colorCache.color(runStyle.foreground)
             cellPrimitives.paint(g, codeWord, column, row, metrics)
-            decorationPainter.paint(g, palette, attr, extraAttr, foreground, column, endColumn, row, metrics)
-            paintHyperlinkDecoration(
-                g = g,
-                hyperlinkId = hyperlinkId,
-                hovered = hovered,
-                color = foreground,
-                startColumn = column,
-                endColumn = endColumn,
-                row = row,
-                metrics = metrics,
-            )
+            decorationPainter.paintTextRun(g, palette, runStyle, column, endColumn, row, metrics)
         } else {
             val oldClip = g.clip
-            g.font = fontCache.font(fontStyle)
-            g.color = colorCache.color(foreground)
+            g.font = fontCache.font(runStyle.fontStyle)
+            g.color = colorCache.color(runStyle.foreground)
             try {
                 g.clipRect(
                     column * metrics.cellWidth,
@@ -517,7 +372,7 @@ internal class TerminalTextPainter(
                                 codepoints = cache.clusterCodepoints,
                                 offset = offset,
                                 length = length,
-                                fontStyle = fontStyle,
+                                fontStyle = runStyle.fontStyle,
                                 x = column * metrics.cellWidth,
                                 cellPixelWidth = metrics.cellWidth * (endColumn - column),
                                 baselineY = baselineY,
@@ -539,7 +394,7 @@ internal class TerminalTextPainter(
                     drawComplexCodePoint(
                         g = g,
                         codePoint = codeWord,
-                        fontStyle = fontStyle,
+                        fontStyle = runStyle.fontStyle,
                         x = column * metrics.cellWidth,
                         cellPixelWidth = metrics.cellWidth * (endColumn - column),
                         baselineY = baselineY,
@@ -547,81 +402,12 @@ internal class TerminalTextPainter(
                     )
                 }
 
-                decorationPainter.paint(g, palette, attr, extraAttr, foreground, column, endColumn, row, metrics)
-                paintHyperlinkDecoration(
-                    g = g,
-                    hyperlinkId = hyperlinkId,
-                    hovered = hovered,
-                    color = foreground,
-                    startColumn = column,
-                    endColumn = endColumn,
-                    row = row,
-                    metrics = metrics,
-                )
+                decorationPainter.paintTextRun(g, palette, runStyle, column, endColumn, row, metrics)
             } finally {
                 g.clip = oldClip
             }
         }
         return endColumn
-    }
-
-    private fun isHoveredHyperlink(
-        hyperlinkId: Int,
-        row: Int,
-        column: Int,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-    ): Boolean =
-        hyperlinkId != NO_HYPERLINK_ID &&
-            hyperlinkId == hoveredHyperlinkId &&
-            row >= hoveredHyperlinkStartRow &&
-            row <= hoveredHyperlinkEndRow &&
-            (row > hoveredHyperlinkStartRow || column >= hoveredHyperlinkStartColumn) &&
-            (row < hoveredHyperlinkEndRow || column < hoveredHyperlinkEndColumn)
-
-    private fun effectiveForeground(
-        palette: TerminalColorPalette,
-        attr: Long,
-        codePoint: Int = 0,
-        hovered: Boolean,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ): Int =
-        if (hovered && hyperlinkActivationHover) {
-            hyperlinkActivationForeground
-        } else {
-            SwingColors.foreground(palette, attr, codePoint)
-        }
-
-    private fun endColumnForHiddenCell(
-        cache: TerminalRenderCache,
-        flags: Int,
-        column: Int,
-    ): Int = minOf(cache.columns, column + cellSpan(flags))
-
-    private fun paintHyperlinkDecoration(
-        g: Graphics2D,
-        hyperlinkId: Int,
-        hovered: Boolean,
-        color: Int,
-        startColumn: Int,
-        endColumn: Int,
-        row: Int,
-        metrics: SwingMetrics,
-    ) {
-        if (hyperlinkId == NO_HYPERLINK_ID) return
-        decorationPainter.paintHyperlink(
-            g = g,
-            color = color,
-            startColumn = startColumn,
-            endColumn = endColumn,
-            row = row,
-            metrics = metrics,
-            hovered = hovered,
-        )
     }
 
     private fun drawAsciiRun(
@@ -724,18 +510,8 @@ internal class TerminalTextPainter(
         }
     }
 
-    private fun decorationKey(
-        attr: Long,
-        extraAttr: Long,
-    ): Long =
-        TerminalRenderAttrs.underlineStyle(attr).toLong() or
-            (if (TerminalRenderAttrs.isStrikethrough(attr)) STRIKETHROUGH_KEY else 0L) or
-            (extraAttr shl EXTRA_ATTR_KEY_SHIFT)
-
     private companion object {
         private const val INITIAL_TEXT_RUN_CAPACITY = 256
-        private const val STRIKETHROUGH_KEY = 1L shl 8
-        private const val EXTRA_ATTR_KEY_SHIFT = 9
         private const val NO_HYPERLINK_ID = 0
         private const val DEFAULT_HOVER_START_ROW = 0
         private const val DEFAULT_HOVER_END_ROW = Int.MAX_VALUE

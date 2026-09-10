@@ -39,6 +39,92 @@ import kotlin.test.assertTrue
  * according to the terminal's rigid column grid.
  */
 class TerminalTextPainterTest {
+    @ParameterizedTest
+    @ValueSource(strings = ["AAA", "ééé", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+    fun `hover underline stays within its span without an activation color override`(text: String) {
+        val fixture = fixture()
+        val cache = renderCache(TestRenderFrame.text(text))
+        cache.hyperlinkIds.fill(7)
+        try {
+            fixture.paintRow(
+                cache,
+                hoveredHyperlinkId = 7,
+                hoveredHyperlinkStartColumn = 1,
+                hoveredHyperlinkEndColumn = 2,
+                hoveredHyperlinkEndRow = 0,
+            )
+
+            val secondUnderlineY = fixture.metrics.underlineY + 1
+            for (column in 0..2) {
+                val x = column * fixture.metrics.cellWidth
+                assertEquals(TEST_RED, fixture.image.getRGB(x, fixture.metrics.underlineY))
+                assertEquals(if (column == 1) TEST_RED else 0, fixture.image.getRGB(x, secondUnderlineY))
+            }
+        } finally {
+            fixture.g.dispose()
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["AAA", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+    fun `reusing a painter across rows and hover phases matches a fresh painter`(text: String) {
+        val reused = fixture()
+        val cache =
+            renderCache(
+                TestRenderFrame(
+                    Array(2) {
+                        Array(3) { column ->
+                            TestCell(
+                                codeWord = text[column].code,
+                                flags = TerminalRenderCellFlags.CODEPOINT,
+                                attr = TerminalRenderAttrs.pack(blink = column == 1),
+                            )
+                        }
+                    },
+                ),
+            )
+        val discoveredHyperlinks = IntArray(cache.flags.size) { 7 }
+        try {
+            for (phase in 0..3) {
+                for (row in 0..1) {
+                    val fresh = fixture()
+                    try {
+                        reused.g.composite = AlphaComposite.Clear
+                        reused.g.fillRect(0, 0, reused.image.width, reused.image.height)
+                        reused.g.composite = AlphaComposite.SrcOver
+                        for (target in listOf(reused, fresh)) {
+                            target.paintRow(
+                                cache,
+                                row = row,
+                                textBlinkVisible = phase % 2 == 0,
+                                hyperlinkIds = if (phase < 3) discoveredHyperlinks else cache.hyperlinkIds,
+                                hoveredHyperlinkId = if (phase < 2) 7 else 0,
+                                hoveredHyperlinkStartRow = 0,
+                                hoveredHyperlinkStartColumn = 1,
+                                hoveredHyperlinkEndRow = 1,
+                                hoveredHyperlinkEndColumn = 2,
+                                hyperlinkActivationHover = phase == 0,
+                            )
+                        }
+                        for (y in 0 until reused.image.height) {
+                            for (x in 0 until reused.image.width) {
+                                assertEquals(
+                                    fresh.image.getRGB(x, y),
+                                    reused.image.getRGB(x, y),
+                                    "Stale row style at phase=$phase row=$row ($x,$y)",
+                                )
+                            }
+                        }
+                    } finally {
+                        fresh.g.dispose()
+                    }
+                }
+            }
+        } finally {
+            reused.g.dispose()
+        }
+    }
+
     @Nested
     inner class ConcealedTextRendering {
         @ParameterizedTest
@@ -1187,6 +1273,7 @@ class TerminalTextPainterTest {
             cache: TerminalRenderCache,
             row: Int = 0,
             textBlinkVisible: Boolean = true,
+            hyperlinkIds: IntArray = cache.hyperlinkIds,
             hoveredHyperlinkId: Int = 0,
             hoveredHyperlinkStartRow: Int = 0,
             hoveredHyperlinkStartColumn: Int = 0,
@@ -1205,6 +1292,7 @@ class TerminalTextPainterTest {
                 row = row,
                 fontRenderContext = g.fontRenderContext,
                 textBlinkVisible = textBlinkVisible,
+                hyperlinkIds = hyperlinkIds,
                 hoveredHyperlinkId = hoveredHyperlinkId,
                 hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
                 hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
