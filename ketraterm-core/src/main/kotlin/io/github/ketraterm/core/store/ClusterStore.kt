@@ -17,6 +17,7 @@ package io.github.ketraterm.core.store
 
 import io.github.ketraterm.core.model.TerminalConstants
 import io.github.ketraterm.core.store.ClusterStore.Companion.NO_FREE
+import java.util.*
 
 /**
  * A buffer-scoped arena allocator for multi-codepoint grapheme cluster payloads.
@@ -41,8 +42,11 @@ import io.github.ketraterm.core.store.ClusterStore.Companion.NO_FREE
  * ## Freelist
  *
  * Individual slots are returned via [free] and chained into an O(1) singly-linked
- * freelist. The next allocation that needs a slot pops the head of that list
- * before growing the slot table. Data bytes are not zeroed on free; they are
+ * freelist. Slots retain their data regions for their entire lifetime. Allocation
+ * reuses a sufficiently large slot or creates a new one; smaller free regions
+ * remain available. Capacities are exact for lengths 1–4 and rounded up to powers
+ * of two thereafter. Small allocations preserve the larger capacity classes.
+ * Data is not zeroed on free; it is
  * simply overwritten on the next [alloc]. Double-free is rejected: once a slot
  * has been returned to the freelist, a second [free] of the same live handle
  * throws [IllegalStateException] instead of silently corrupting allocator state.
@@ -105,7 +109,7 @@ internal class ClusterStore {
     private var slotCount = 0
 
     /** Heads of the O(1) segregated freelists. */
-    private val freeHeads = IntArray(4) { NO_FREE }
+    private val freeHeads = IntArray(33) { NO_FREE }
 
     // Public API — allocation
 
@@ -128,42 +132,26 @@ internal class ClusterStore {
         length: Int = codepoints.size,
     ): Int {
         require(length >= 1) { "cluster must have at least 1 codepoint, got $length" }
+        Objects.checkFromIndexSize(offset, length, codepoints.size)
 
         val bucket = bucketForCapacity(length)
         var slot = NO_FREE
 
-        // 1. Search preferred buckets (matching or slightly larger, but not Bucket 3 for small lengths)
-        if (bucket < 3) {
-            for (b in bucket..2) {
-                slot = popSlot(b)
-                if (slot != NO_FREE) break
-            }
-        } else {
-            slot = popSlot(3)
-        }
-
-        // 2. Fallback: search smaller buckets to reuse existing slots before allocating new ones
-        if (slot == NO_FREE) {
-            for (b in (bucket - 1) downTo 0) {
-                slot = popSlot(b)
-                if (slot != NO_FREE) break
-            }
+        val lastBucket = if (length <= 4) 3 else freeHeads.lastIndex
+        for (b in bucket..lastBucket) {
+            slot = popSlot(b)
+            if (slot != NO_FREE) break
         }
 
         if (slot == NO_FREE) {
+            val capacity = if (bucket < 4) bucket + 1 else (1L shl (bucket - 1)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val start = reserveData(capacity)
             slot = acquireNewSlot()
+            slotStarts[slot] = start
+            slotCapacities[slot] = capacity
         }
 
-        val start =
-            if (slotCapacities[slot] >= length) {
-                slotStarts[slot] // reuse existing data region
-            } else {
-                val newStart = reserveData(length)
-                slotCapacities[slot] = length
-                newStart
-            }
-        System.arraycopy(codepoints, offset, clusterData, start, length)
-        slotStarts[slot] = start
+        System.arraycopy(codepoints, offset, clusterData, slotStarts[slot], length)
         slotLengths[slot] = length
         isLive[slot] = true
         return encodeHandle(slot)
@@ -283,14 +271,8 @@ internal class ClusterStore {
 
     // Private helpers
 
-    /** Maps a physical capacity to one of the 4 size-classed buckets. */
-    private fun bucketForCapacity(capacity: Int): Int =
-        when {
-            capacity <= 2 -> 0
-            capacity == 3 -> 1
-            capacity == 4 -> 2
-            else -> 3
-        }
+    /** Exact classes for 1–4, then 8, 16, ... with a final Int.MAX_VALUE class. */
+    private fun bucketForCapacity(capacity: Int): Int = if (capacity <= 4) capacity - 1 else 33 - Integer.numberOfLeadingZeros(capacity - 1)
 
     /** Pops a slot index from a specific bucket, returning [NO_FREE] if empty. */
     private fun popSlot(bucket: Int): Int {
@@ -311,6 +293,7 @@ internal class ClusterStore {
 
     /** Reserves [length] positions in [clusterData] and returns the start index. */
     private fun reserveData(length: Int): Int {
+        if (length > Int.MAX_VALUE - dataSize) throw OutOfMemoryError("Cluster data exceeds maximum array size")
         if (dataSize + length > clusterData.size) growData(length)
         val start = dataSize
         dataSize += length
@@ -329,8 +312,7 @@ internal class ClusterStore {
     }
 
     private fun growData(needed: Int) {
-        var newCap = clusterData.size * 2
-        while (newCap < dataSize + needed) newCap *= 2
+        val newCap = maxOf(clusterData.size.toLong() * 2, (dataSize + needed).toLong()).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
         clusterData = clusterData.copyOf(newCap)
     }
 
