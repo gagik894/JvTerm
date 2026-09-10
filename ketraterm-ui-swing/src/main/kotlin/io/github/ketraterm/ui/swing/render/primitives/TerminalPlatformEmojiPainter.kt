@@ -48,7 +48,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!isDefaultEmojiPresentationCodePoint(codePoint) || !rasterizer.available) return false
+        if (!usesEmojiPresentation(codePoint) || !rasterizer.available) return false
         val text = String(Character.toChars(codePoint))
         return paintText(g, text, column, row, columnSpan, metrics)
     }
@@ -63,7 +63,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!containsEmojiPresentation(codepoints, offset, length) || !rasterizer.available) return false
+        if (!usesEmojiPresentation(codepoints, offset, length) || !rasterizer.available) return false
         val text = String(codepoints, offset, length)
         return paintText(g, text, column, row, columnSpan, metrics)
     }
@@ -100,44 +100,35 @@ internal class TerminalPlatformEmojiPainter(
         return true
     }
 
-    private fun containsEmojiPresentation(
+    /**
+     * Classifies native-emoji candidates without initializing the platform rasterizer.
+     * Joiners and presentation selectors require an emoji base; ordinary scripts use them too.
+     */
+    fun usesEmojiPresentation(
         codepoints: IntArray,
         offset: Int,
         length: Int,
     ): Boolean {
-        if (containsCodePoint(codepoints, offset, length, VARIATION_SELECTOR_15)) return false
-        if (containsCodePoint(codepoints, offset, length, VARIATION_SELECTOR_16) ||
-            containsCodePoint(codepoints, offset, length, ZERO_WIDTH_JOINER)
-        ) {
-            return true
-        }
-
+        var defaultPresentation = false
+        var explicitPresentation = false
+        var emojiBase = false
         var index = 0
         while (index < length) {
-            val codePoint = codepoints[offset + index]
-            if (isDefaultEmojiPresentationCodePoint(codePoint)) {
-                return true
+            when (val codePoint = codepoints[offset + index]) {
+                VARIATION_SELECTOR_15 -> return false
+                VARIATION_SELECTOR_16, ZERO_WIDTH_JOINER, COMBINING_ENCLOSING_KEYCAP -> explicitPresentation = true
+                else -> {
+                    defaultPresentation = defaultPresentation || usesEmojiPresentation(codePoint)
+                    emojiBase = emojiBase || Character.isEmoji(codePoint)
+                }
             }
             index++
         }
-        return false
+        return defaultPresentation || explicitPresentation && emojiBase
     }
 
-    private fun containsCodePoint(
-        codepoints: IntArray,
-        offset: Int,
-        length: Int,
-        needle: Int,
-    ): Boolean {
-        var index = 0
-        while (index < length) {
-            if (codepoints[offset + index] == needle) return true
-            index++
-        }
-        return false
-    }
-
-    private fun isDefaultEmojiPresentationCodePoint(codePoint: Int): Boolean =
+    /** Scalar counterpart of the cluster presentation policy, shared with text-run dispatch. */
+    fun usesEmojiPresentation(codePoint: Int): Boolean =
         codePoint in 0x1F000..0x1FAFF ||
             codePoint in 0x231A..0x231B ||
             codePoint in 0x23E9..0x23EC ||
@@ -184,5 +175,6 @@ internal class TerminalPlatformEmojiPainter(
         private const val VARIATION_SELECTOR_15 = 0xFE0E
         private const val VARIATION_SELECTOR_16 = 0xFE0F
         private const val ZERO_WIDTH_JOINER = 0x200D
+        private const val COMBINING_ENCLOSING_KEYCAP = 0x20E3
     }
 }

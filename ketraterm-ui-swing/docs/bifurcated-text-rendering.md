@@ -1,40 +1,72 @@
-# Bifurcated Text Rendering Pipeline & Font Fallbacks
+# Terminal text rendering and font fallback
 
-Text rendering is the primary CPU hotspot in terminal emulators. To achieve high frame rates and support modern Unicode features, `ketraterm-ui-swing` implements a bifurcated rendering engine.
+`TerminalTextPainter` consumes logical cells from the copied render cache. It uses
+`TerminalBidiLayout` to place them in the same visual columns as backgrounds,
+overlays, cursor geometry, and pointer hit testing. Bidi changes placement and
+shaping direction; it does not replace the cell's rendering policy.
 
----
+## Cell and run dispatch
 
-## 1. The Rendering Pathways
+| Content | Rendering path |
+| --- | --- |
+| Compatible LTR ASCII cells | One `drawChars` call when font advances match the grid; otherwise a cached glyph vector with explicit cell positions |
+| Contextual scripts and ordinary text in RTL runs | Cached, contextually shaped glyph vectors positioned by terminal-cell ownership |
+| Box drawing, blocks, and other supported geometric characters | Programmatic cell primitives |
+| Emoji presentation sequences | Native platform rasterizer when available, followed by Java2D fallback |
+| Other scalar characters and grapheme clusters | Bounded cached `TextLayout` fallback |
 
-```
-                            Cell Characters
-                                   │
-                     Is ASCII and identical styling?
-                     ├──► YES ──► [ASCII Fast Path]
-                     │            (drawChars / drawGlyphVector)
-                     │
-                     └──► NO ───► Is Box-Drawing or Block?
-                                   ├──► YES ──► [Pixel-Perfect Primitives]
-                                   │            (Programmatic paint, zero gaps)
-                                   │
-                                   └──► NO ───► [Complex Shaped Path]
-                                                (Shaped TextLayout / Fallbacks)
-```
+ASCII batching compares foreground, font style, visibility, decorations, and
+hyperlink state. Background runs are painted independently. The ASCII path does
+not invoke contextual shaping or font fallback searches.
 
-### A. The ASCII Fast Path
-* **Batching**: Contiguous columns containing standard ASCII characters (`0x20..0x7E`) that share identical visual attributes (foreground/background, bold, italic) are grouped into a single text run.
-* **Emission**: Drawn in a single operation using Java2D `Graphics2D.drawChars` or `drawGlyphVector`. This completely bypasses the heavy text-shaping and layout engines, optimizing rendering times for normal console outputs.
+Ordinary cells and block-cursor foreground share primitive, native-emoji, and
+fallback dispatch. A directional character elsewhere in a row therefore cannot
+disable a block primitive or native emoji. Emoji classification happens before
+access to the lazy native rasterizer.
 
-### B. Pixel-Perfect Primitives
-* **The Problem**: Font glyphs for box-drawing characters (`U+2500..U+257F`) and block elements (`U+2580..U+259F`) often suffer from anti-aliasing artifacts or rounding gaps at fractional scale factors, causing faint grid lines.
-* **The Solution**: The custom painters programmatically draw these elements using absolute pixel lines and fills inside the cell bounds, ensuring continuous lines and solid blocks at any high-DPI scaling factor.
+## Contextual shaping and terminal geometry
 
-### C. Complex Shaped & Emoji Path
-* **`TextLayout` Caching**: Multi-code-unit grapheme clusters (such as combining accents or flag emojis) are shaped using Java2D `TextLayout` objects. The shaped layouts are cached inside a bounded size cache to avoid repeating layout calculations.
+Shaping spans are constrained by direction, font style, Unicode script, and cell
+category. Foreground colors, decorations, hyperlink hover, and conceal do not
+break neighboring shaping context. They determine the visible paint spans over
+the resulting glyph vector.
 
----
+The run buffer records the logical terminal-cell owner of every UTF-16 unit,
+including surrogate pairs and combining sequences. `Font.layoutGlyphVector`
+performs contextual shaping. The shaped-vector cache maps glyph character indices
+back to those owners and positions complete glyph groups inside their assigned
+visual cell spans. Combining-mark offsets remain relative to their base, and
+ligatures retain the union of the cells they consume. Oversized groups are
+compressed within their span; the whole run is never fitted as one proportional
+line of text.
 
-## 2. Prioritized Font Fallbacks & Emojis
+Large positioned vectors also retain bounded glyph batches. Uniform paint spans
+draw the whole vector once; partial style spans and cursors submit only batches
+whose ink can intersect their clip. This avoids resubmitting a long contextual
+run for every differently styled cell. Batches preserve the original glyph codes,
+positions, and transforms and are built only when the shaped run enters the cache.
 
-* **Font Fallback Chain**: When the primary monospace font lacks a glyph for a specific codepoint, the engine walks a prioritized list of system fonts to locate a matching glyph.
-* **JetBrains Runtime (JBR) Emojis**: The font fallback pipeline detects if it is running on a JetBrains Runtime. It prioritizes system emoji font chains (like *Apple Color Emoji*, *Segoe UI Emoji*, or *Noto Color Emoji*) to render colorful, modern emojis rather than falling back to monochrome system symbols.
+The block cursor looks up the same positioned run and draws its foreground under
+the cursor-cell clip. It does not shape an isolated Arabic character or reconstruct
+the neighboring context from cursor colors. Concealed or hidden blinking cells
+still reject foreground painting.
+
+Shaping work is bounded, and segments advance only at terminal-cell boundaries.
+The scalar/cluster fallback retains its separate protection for oversized single
+clusters. Cached vectors are read-only after positioning. Cache identity includes
+text, cell ownership, cell span, font style, direction, and cell width; font-source,
+font-generation, and font-render-context changes invalidate the cache. Repeated
+lookups use reusable primitive buffers and a reusable lookup key.
+
+## Font resolution
+
+For ordinary text, `FontCache` tries the primary font, an optional host resolver,
+configured fallbacks, and then enabled system fallbacks. Emoji presentation has
+an earlier host/configured emoji-font preference. All resolved fonts inherit the
+configured size, and results are cached. Native color-emoji painting is a separate
+platform path; it does not depend on detecting JetBrains Runtime.
+
+These painters and caches belong to the EDT. Their scratch storage is reused and
+must not be accessed concurrently. Cache-hit allocation measurements describe the
+measured helper or paint path; they do not establish a zero-allocation contract
+for the entire Swing component and Java2D pipeline.

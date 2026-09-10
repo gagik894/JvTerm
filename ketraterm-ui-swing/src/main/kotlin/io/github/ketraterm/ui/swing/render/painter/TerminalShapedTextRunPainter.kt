@@ -21,401 +21,357 @@ import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.cache.FontCache
-import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache
+import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
+import io.github.ketraterm.ui.swing.render.primitives.TerminalCellPrimitivePainter
+import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 import java.awt.font.FontRenderContext
-import java.awt.font.TextLayout
-import java.text.Bidi
 
 /**
- * Paints row-shaped complex text spans that cannot be rendered correctly one
- * terminal cell at a time.
+ * Shapes compatible text with its neighboring context, then paints it at terminal-cell positions.
  *
- * This helper shapes direction- and script-compatible spans using the shared cell mapping. The
- * ordinary ASCII path remains in [TerminalTextPainter] so the common repaint
- * path does not pay for Bidi or script-run machinery.
+ * Font, script and direction delimit shaping spans. Foreground, decorations and visibility only
+ * delimit paint spans: changing one cell's presentation must not reshape its neighbors. The block
+ * cursor resolves the same bounded span and reuses its positioned glyph vector.
+ *
+ * Primitive and native-emoji cells retain [TerminalTextPainter]'s shared cell dispatch. Reusable
+ * UTF-16 and ownership arrays keep unchanged shaped-run lookups allocation-free.
  */
 internal class TerminalShapedTextRunPainter(
     private val colorCache: AwtColorCache,
     private val decorationPainter: TerminalDecorationPainter,
     private val fontCache: FontCache,
-    private val complexTextLayouts: TerminalComplexTextLayoutCache,
     private val runStyle: TerminalTextRunStyle,
+    private val cellPrimitives: TerminalCellPrimitivePainter,
+    private val platformEmojiPainter: TerminalPlatformEmojiPainter,
 ) {
-    private var segmentCodepoints = IntArray(INITIAL_TEXT_RUN_CAPACITY)
+    private val glyphVectors = TerminalShapedGlyphVectorCache()
+    private var chars = CharArray(INITIAL_TEXT_RUN_CAPACITY)
+    private var charColumns = IntArray(INITIAL_TEXT_RUN_CAPACITY)
 
-    fun paintBidiRow(
-        g: Graphics2D,
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        metrics: SwingMetrics,
-        row: Int,
-        fontRenderContext: FontRenderContext,
-        bidi: TerminalBidiLayout.Row,
-    ) {
-        val baselineY = row * metrics.cellHeight + metrics.baseline
-        var runStart = 0
-        while (runStart < cache.columns) {
-            val runLimit = bidi.runLimit(runStart)
-            var segmentStart = runStart
-            while (segmentStart < runLimit) {
-                runStyle.begin(cache, palette, cache.rowOffset(row), segmentStart)
-                val segmentLimit =
-                    bidiSegmentLimit(
-                        cache = cache,
-                        palette = palette,
-                        row = row,
-                        startColumn = segmentStart,
-                        runLimit = runLimit,
-                    )
-                val lastColumn = segmentLimit - 1
-                val lastOwner = visualCellRangeStart(cache.flags[cache.rowOffset(row) + lastColumn], lastColumn)
-                val segmentVisualStart = minOf(bidi.visualColumn(segmentStart), bidi.visualColumn(lastOwner))
-                paintShapedLogicalSegment(
-                    g = g,
-                    cache = cache,
-                    palette = palette,
-                    metrics = metrics,
-                    row = row,
-                    startColumn = segmentStart,
-                    endColumn = segmentLimit,
-                    visualStartColumn = segmentVisualStart,
-                    direction = if (bidi.isRtl(runStart)) Bidi.DIRECTION_RIGHT_TO_LEFT else Bidi.DIRECTION_LEFT_TO_RIGHT,
-                    baselineY = baselineY,
-                    fontRenderContext = fontRenderContext,
-                )
-                segmentStart = segmentLimit
-            }
-            runStart = runLimit
-        }
+    fun clear() {
+        glyphVectors.clear()
     }
 
-    fun paintComplexShapingRun(
-        g: Graphics2D,
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        metrics: SwingMetrics,
-        row: Int,
-        startColumn: Int,
-        baselineY: Int,
-        fontRenderContext: FontRenderContext,
-    ): Int {
-        runStyle.begin(cache, palette, cache.rowOffset(row), startColumn)
-        val endColumn =
-            complexShapingRunEnd(
-                cache = cache,
-                palette = palette,
-                row = row,
-                startColumn = startColumn,
-            )
-        paintShapedLogicalSegment(
-            g = g,
-            cache = cache,
-            palette = palette,
-            metrics = metrics,
-            row = row,
-            startColumn = startColumn,
-            endColumn = endColumn,
-            visualStartColumn = startColumn,
-            baselineY = baselineY,
-            fontRenderContext = fontRenderContext,
-        )
-        return endColumn
-    }
-
-    fun isComplexShapingCell(
+    /** Whether this cell can start a contextual span in its bidi direction. */
+    fun isShapingCell(
         cache: TerminalRenderCache,
         index: Int,
+        rtl: Boolean,
     ): Boolean {
         val flags = cache.flags[index]
         if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return false
         if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-            val clusterRef = cache.clusterRefs[index]
-            if (clusterRef == 0L) return false
-            val offset = cache.clusterOffset(clusterRef)
-            val end = offset + cache.clusterLength(clusterRef)
-            var clusterIndex = offset
-            while (clusterIndex < end) {
-                if (isComplexShapingCodePoint(cache.clusterCodepoints[clusterIndex])) return true
-                clusterIndex++
+            val ref = cache.clusterRefs[index]
+            if (ref == 0L) return false
+            val offset = cache.clusterOffset(ref)
+            val length = cache.clusterLength(ref)
+            if (length > MAX_RUN_CODEPOINTS || platformEmojiPainter.usesEmojiPresentation(cache.clusterCodepoints, offset, length)) {
+                return false
+            }
+            if (rtl) return true
+            var cp = offset
+            val end = offset + length
+            while (cp < end) {
+                if (isComplexShapingCodePoint(cache.clusterCodepoints[cp++])) return true
             }
             return false
         }
-        return isComplexShapingCodePoint(cache.codeWords[index])
+        val codePoint = cache.codeWords[index]
+        return !(cellPrimitives.canPaint(codePoint) || platformEmojiPainter.usesEmojiPresentation(codePoint)) && (rtl || isComplexShapingCodePoint(codePoint))
     }
 
-    private fun cellCategory(
-        cache: TerminalRenderCache,
-        index: Int,
-    ): Int {
-        val flags = cache.flags[index]
-        val codeWord = cache.codeWords[index]
-        return when {
-            isFastAsciiCell(flags, codeWord) -> 0
-            isComplexShapingCell(cache, index) -> 1
-            else -> 2
-        }
-    }
-
-    private fun bidiSegmentLimit(
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        row: Int,
-        startColumn: Int,
-        runLimit: Int,
-    ): Int {
-        val rowOffset = cache.rowOffset(row)
-        val category = cellCategory(cache, rowOffset + startColumn)
-        val script = scriptKeyForSegment(cache, rowOffset, startColumn, runLimit)
-        var column = minOf(runLimit, startColumn + cellSpan(cache.flags[rowOffset + startColumn]))
-        while (column < runLimit) {
-            if (cellCategory(cache, rowOffset + column) != category) break
-            if (!isCompatibleScriptCell(cache, rowOffset, column, runLimit, script)) break
-            if (!runStyle.matches(cache, palette, rowOffset, column)) break
-            column += minOf(cellSpan(cache.flags[rowOffset + column]), runLimit - column)
-        }
-        return column
-    }
-
-    private fun complexShapingRunEnd(
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        row: Int,
-        startColumn: Int,
-    ): Int {
-        val rowOffset = cache.rowOffset(row)
-        val script = scriptKeyForSegment(cache, rowOffset, startColumn, cache.columns)
-        var column = startColumn + 1
-        while (column < cache.columns) {
-            if (!isComplexShapingRunContinuation(cache, rowOffset, column)) break
-            if (!isCompatibleScriptCell(cache, rowOffset, column, cache.columns, script)) break
-            if (!runStyle.matches(cache, palette, rowOffset, column)) break
-            column++
-        }
-        return column
-    }
-
-    private fun isComplexShapingRunContinuation(
-        cache: TerminalRenderCache,
-        rowOffset: Int,
-        column: Int,
-    ): Boolean {
-        val index = rowOffset + column
-        if (isComplexShapingCell(cache, index)) return true
-        if (isAsciiSpaceCell(cache.flags[index], cache.codeWords[index])) {
-            val nextColumn = column + 1
-            return nextColumn < cache.columns && isComplexShapingCell(cache, rowOffset + nextColumn)
-        }
-        return false
-    }
-
-    private fun paintShapedLogicalSegment(
+    /** Paints one bounded contextual span and returns its next logical column. */
+    fun paintRun(
         g: Graphics2D,
         cache: TerminalRenderCache,
         palette: TerminalColorPalette,
         metrics: SwingMetrics,
         row: Int,
         startColumn: Int,
-        endColumn: Int,
-        visualStartColumn: Int,
-        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
-        baselineY: Int,
+        runLimit: Int,
         fontRenderContext: FontRenderContext,
-    ) {
-        if (runStyle.textHidden) return
+        bidi: TerminalBidiLayout.Row?,
+    ): Int {
+        val rowOffset = cache.rowOffset(row)
+        val rtl = bidi?.isRtl(startColumn) == true
+        val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
+        val shapedRun = positionedRun(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext)
+        val runVisualStart = visualStart(cache, rowOffset, startColumn, endColumn, bidi)
+        var column = startColumn
+        while (column < endColumn) {
+            runStyle.begin(cache, palette, rowOffset, column)
+            var styleLimit = minOf(endColumn, column + cellSpan(cache.flags[rowOffset + column]))
+            while (styleLimit < endColumn && runStyle.matches(cache, palette, rowOffset, styleLimit)) {
+                styleLimit += minOf(cellSpan(cache.flags[rowOffset + styleLimit]), endColumn - styleLimit)
+            }
+            if (!runStyle.textHidden) {
+                val styleVisualStart = visualStart(cache, rowOffset, column, styleLimit, bidi)
+                drawGlyphVector(
+                    g,
+                    shapedRun,
+                    metrics,
+                    row,
+                    runVisualStart,
+                    styleVisualStart,
+                    styleLimit - column,
+                    runStyle.foreground,
+                )
+                decorationPainter.paintTextRun(
+                    g,
+                    palette,
+                    runStyle,
+                    styleVisualStart,
+                    styleVisualStart + styleLimit - column,
+                    row,
+                    metrics,
+                )
+            }
+            column = styleLimit
+        }
+        return endColumn
+    }
 
-        val cellPixelWidth = metrics.cellWidth * (endColumn - startColumn)
-        val x = visualStartColumn * metrics.cellWidth
-        val length = fillSegmentCodepoints(cache, row, startColumn, endColumn)
-        if (length > 0) {
-            g.font = fontCache.font(runStyle.fontStyle)
-            g.color = colorCache.color(runStyle.foreground)
-            val oldClip = g.clip
-            try {
-                g.clipRect(x, row * metrics.cellHeight, cellPixelWidth, metrics.cellHeight)
-                val layout =
-                    complexTextLayouts.scriptRunLayout(
-                        segmentCodepoints,
-                        0,
-                        length,
-                        runStyle.fontStyle,
-                        fontRenderContext,
-                        fontCache,
-                        direction = direction,
+    /**
+     * Repaints the positioned contextual span containing [column], under the caller's cursor clip.
+     * Returns false when that cell belongs to the ordinary ASCII or specialized-cell path.
+     */
+    fun paintCellForeground(
+        g: Graphics2D,
+        cache: TerminalRenderCache,
+        metrics: SwingMetrics,
+        column: Int,
+        row: Int,
+        foreground: Int,
+        fontRenderContext: FontRenderContext,
+        bidi: TerminalBidiLayout.Row?,
+    ): Boolean {
+        val rowOffset = cache.rowOffset(row)
+        var startColumn = 0
+        while (startColumn <= column) {
+            val runLimit = bidi?.runLimit(startColumn) ?: cache.columns
+            if (runLimit <= column) {
+                startColumn = runLimit
+                continue
+            }
+            val rtl = bidi?.isRtl(startColumn) == true
+            while (startColumn <= column) {
+                val index = rowOffset + startColumn
+                if (!isShapingCell(cache, index, rtl)) {
+                    startColumn += minOf(cellSpan(cache.flags[index]), runLimit - startColumn)
+                    continue
+                }
+                val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
+                if (column < endColumn) {
+                    val shapedRun = positionedRun(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext)
+                    g.color = colorCache.color(foreground)
+                    val runVisualStart = visualStart(cache, rowOffset, startColumn, endColumn, bidi)
+                    val cellVisualStart = bidi?.visualColumn(column) ?: column
+                    val clipStart = (cellVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
+                    val span = minOf(cellSpan(cache.flags[rowOffset + column]), cache.columns - column)
+                    shapedRun.draw(
+                        g,
+                        (runVisualStart * metrics.cellWidth).toFloat(),
+                        (row * metrics.cellHeight + metrics.baseline).toFloat(),
+                        clipStart,
+                        clipStart + span * metrics.cellWidth,
                     )
-                drawFittedLayout(g, layout, x.toFloat(), baselineY.toFloat(), x + cellPixelWidth)
-            } finally {
-                g.clip = oldClip
+                    return true
+                }
+                startColumn = endColumn
             }
         }
+        return false
+    }
 
-        decorationPainter.paintTextRun(
-            g = g,
-            palette = palette,
-            style = runStyle,
-            startColumn = visualStartColumn,
-            endColumn = visualStartColumn + endColumn - startColumn,
-            row = row,
-            metrics = metrics,
+    private fun runEnd(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        startColumn: Int,
+        runLimit: Int,
+        rtl: Boolean,
+    ): Int {
+        val fontStyle = terminalFontStyle(cache.attrWords[rowOffset + startColumn])
+        var script = COMMON_SCRIPT
+        var codepoints = 0
+        var column = startColumn
+        while (column < runLimit) {
+            val index = rowOffset + column
+            if (!isShapingCell(cache, index, rtl) && !isShapingSpace(cache, rowOffset, column, runLimit, rtl)) break
+            if (terminalFontStyle(cache.attrWords[index]) != fontStyle) break
+            val currentScript = cellScript(cache, index)
+            if (currentScript != COMMON_SCRIPT && script != COMMON_SCRIPT && currentScript != script) break
+            val ref = cache.clusterRefs[index]
+            val length = if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) cache.clusterLength(ref) else 1
+            if (codepoints + length > MAX_RUN_CODEPOINTS) break
+            codepoints += length
+            if (currentScript != COMMON_SCRIPT) script = currentScript
+            column += minOf(cellSpan(cache.flags[index]), runLimit - column)
+        }
+        return column
+    }
+
+    private fun isShapingSpace(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        column: Int,
+        runLimit: Int,
+        rtl: Boolean,
+    ): Boolean =
+        cache.flags[rowOffset + column] == TerminalRenderCellFlags.CODEPOINT &&
+            cache.codeWords[rowOffset + column] == SPACE_CODE_POINT &&
+            column + 1 < runLimit &&
+            isShapingCell(cache, rowOffset + column + 1, rtl)
+
+    private fun positionedRun(
+        cache: TerminalRenderCache,
+        metrics: SwingMetrics,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+        rtl: Boolean,
+        fontRenderContext: FontRenderContext,
+    ): TerminalShapedGlyphVectorCache.Run {
+        val length = fillChars(cache, rowOffset, startColumn, endColumn)
+        return glyphVectors.run(
+            chars = chars,
+            length = length,
+            charColumns = charColumns,
+            columns = endColumn - startColumn,
+            style = terminalFontStyle(cache.attrWords[rowOffset + startColumn]),
+            cellWidth = metrics.cellWidth,
+            fontCache = fontCache,
+            fontRenderContext = fontRenderContext,
+            rtl = rtl,
         )
     }
 
-    private fun fillSegmentCodepoints(
-        cache: TerminalRenderCache,
+    private fun drawGlyphVector(
+        g: Graphics2D,
+        shapedRun: TerminalShapedGlyphVectorCache.Run,
+        metrics: SwingMetrics,
         row: Int,
+        runVisualStart: Int,
+        styleVisualStart: Int,
+        styleColumns: Int,
+        foreground: Int,
+    ) {
+        val oldClip = g.clip
+        try {
+            g.clipRect(styleVisualStart * metrics.cellWidth, row * metrics.cellHeight, styleColumns * metrics.cellWidth, metrics.cellHeight)
+            g.color = colorCache.color(foreground)
+            val clipStart = (styleVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
+            shapedRun.draw(
+                g,
+                (runVisualStart * metrics.cellWidth).toFloat(),
+                (row * metrics.cellHeight + metrics.baseline).toFloat(),
+                clipStart,
+                clipStart + styleColumns * metrics.cellWidth,
+            )
+        } finally {
+            g.clip = oldClip
+        }
+    }
+
+    private fun fillChars(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
         startColumn: Int,
         endColumn: Int,
     ): Int {
-        ensureSegmentCodepointCapacity((endColumn - startColumn) * MAX_CODEPOINTS_PER_CELL)
-        val rowOffset = cache.rowOffset(row)
         var length = 0
         var column = startColumn
         while (column < endColumn) {
             val index = rowOffset + column
             val flags = cache.flags[index]
-            if (flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) {
-                column++
-                continue
-            }
-            if (!hasDrawableText(flags)) {
-                segmentCodepoints[length++] = SPACE_CODE_POINT
-            } else if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                val clusterRef = cache.clusterRefs[index]
-                if (clusterRef == 0L) {
-                    segmentCodepoints[length++] = SPACE_CODE_POINT
-                } else {
-                    val offset = cache.clusterOffset(clusterRef)
-                    val clusterLength = cache.clusterLength(clusterRef)
-                    ensureSegmentCodepointCapacity(length + clusterLength)
-                    System.arraycopy(cache.clusterCodepoints, offset, segmentCodepoints, length, clusterLength)
-                    length += clusterLength
-                }
+            val ref = cache.clusterRefs[index]
+            if (flags and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) {
+                var cp = cache.clusterOffset(ref)
+                val end = cp + cache.clusterLength(ref)
+                while (cp < end) length = appendCodePoint(cache.clusterCodepoints[cp++], column - startColumn, length)
             } else {
-                segmentCodepoints[length++] = cache.codeWords[index]
+                length = appendCodePoint(cache.codeWords[index], column - startColumn, length)
             }
-            column++
+            column += minOf(cellSpan(flags), endColumn - column)
         }
         return length
     }
 
-    private fun scriptKeyForSegment(
+    private fun appendCodePoint(
+        codePoint: Int,
+        column: Int,
+        offset: Int,
+    ): Int {
+        if (offset + 2 > chars.size) {
+            val capacity = minOf(TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH, chars.size * 2)
+            chars = chars.copyOf(capacity)
+            charColumns = charColumns.copyOf(capacity)
+        }
+        val safeCodePoint = if (Character.isValidCodePoint(codePoint) && codePoint !in 0xD800..0xDFFF) codePoint else 0xFFFD
+        val charCount = Character.toChars(safeCodePoint, chars, offset)
+        charColumns[offset] = column
+        if (charCount == 2) charColumns[offset + 1] = column
+        return offset + charCount
+    }
+
+    private fun visualStart(
         cache: TerminalRenderCache,
         rowOffset: Int,
         startColumn: Int,
-        limitColumn: Int,
+        endColumn: Int,
+        bidi: TerminalBidiLayout.Row?,
     ): Int {
-        var column = startColumn
-        while (column < limitColumn) {
-            val script = cellScript(cache, rowOffset + column)
-            if (script != COMMON_SCRIPT) return script
-            column++
-        }
-        return COMMON_SCRIPT
-    }
-
-    private fun isCompatibleScriptCell(
-        cache: TerminalRenderCache,
-        rowOffset: Int,
-        column: Int,
-        limitColumn: Int,
-        script: Int,
-    ): Boolean {
-        val currentScript = cellScript(cache, rowOffset + column)
-        if (currentScript == COMMON_SCRIPT || currentScript == script) return true
-        if (script != COMMON_SCRIPT) return false
-        return currentScript == scriptKeyForSegment(cache, rowOffset, column, limitColumn)
+        if (bidi == null) return startColumn
+        val lastColumn = endColumn - 1
+        val lastOwner = visualCellRangeStart(cache.flags[rowOffset + lastColumn], lastColumn)
+        return minOf(bidi.visualColumn(startColumn), bidi.visualColumn(lastOwner))
     }
 
     private fun cellScript(
         cache: TerminalRenderCache,
         index: Int,
     ): Int {
-        val flags = cache.flags[index]
-        if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return COMMON_SCRIPT
-        if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-            val clusterRef = cache.clusterRefs[index]
-            if (clusterRef == 0L) return COMMON_SCRIPT
-            val offset = cache.clusterOffset(clusterRef)
-            val end = offset + cache.clusterLength(clusterRef)
-            var clusterIndex = offset
-            while (clusterIndex < end) {
-                val script = codePointScript(cache.clusterCodepoints[clusterIndex])
+        if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0) {
+            val ref = cache.clusterRefs[index]
+            if (ref == 0L) return COMMON_SCRIPT
+            var cp = cache.clusterOffset(ref)
+            val end = cp + cache.clusterLength(ref)
+            while (cp < end) {
+                val script = codePointScript(cache.clusterCodepoints[cp++])
                 if (script != COMMON_SCRIPT) return script
-                clusterIndex++
             }
             return COMMON_SCRIPT
         }
         return codePointScript(cache.codeWords[index])
     }
 
-    private fun ensureSegmentCodepointCapacity(required: Int) {
-        if (segmentCodepoints.size >= required) return
-        var capacity = segmentCodepoints.size
-        while (capacity < required) {
-            capacity *= 2
-        }
-        segmentCodepoints = segmentCodepoints.copyOf(capacity)
-    }
-
-    private fun isAsciiSpaceCell(
-        flags: Int,
-        codeWord: Int,
-    ): Boolean = flags == TerminalRenderCellFlags.CODEPOINT && codeWord == SPACE_CODE_POINT
-
-    private fun drawFittedLayout(
-        g: Graphics2D,
-        layout: TextLayout,
-        x: Float,
-        baselineY: Float,
-        spanEndX: Int,
-    ) {
-        val available = spanEndX - x
-        val advance = layout.advance
-        if (available <= 0f || advance <= 0f) return
-        if (advance <= available) {
-            layout.draw(g, x, baselineY)
-            return
-        }
-
-        val oldTransform = g.transform
-        try {
-            val scaleX = available / advance
-            g.translate(x.toDouble(), 0.0)
-            g.scale(scaleX.toDouble(), 1.0)
-            layout.draw(g, 0f, baselineY)
-        } finally {
-            g.transform = oldTransform
-        }
-    }
-
     private companion object {
         private const val INITIAL_TEXT_RUN_CAPACITY = 256
+        private const val MAX_RUN_CODEPOINTS = TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH / 2
         private const val SPACE_CODE_POINT = 0x20
-        private const val MAX_CODEPOINTS_PER_CELL = 4
         private const val COMMON_SCRIPT = 0
 
-        @JvmStatic
         private fun codePointScript(codePoint: Int): Int =
-            when (val script = Character.UnicodeScript.of(codePoint)) {
-                Character.UnicodeScript.COMMON,
-                Character.UnicodeScript.INHERITED,
-                Character.UnicodeScript.UNKNOWN,
-                -> COMMON_SCRIPT
+            if (!Character.isValidCodePoint(codePoint)) {
+                COMMON_SCRIPT
+            } else {
+                when (val script = Character.UnicodeScript.of(codePoint)) {
+                    Character.UnicodeScript.COMMON,
+                    Character.UnicodeScript.INHERITED,
+                    Character.UnicodeScript.UNKNOWN,
+                    -> COMMON_SCRIPT
 
-                else -> script.ordinal + 1
+                    else -> script.ordinal + 1
+                }
             }
 
-        @JvmStatic
         private fun isComplexShapingCodePoint(codePoint: Int): Boolean =
             codePoint in 0x0900..0x0DFF ||
                 codePoint in 0x0E00..0x0EFF ||
                 codePoint in 0x1200..0x139F ||
-                // Ethiopic & Supplement
                 codePoint in 0x2D80..0x2DDF ||
-                // Ethiopic Extended
                 codePoint in 0xAB00..0xAB2F ||
-                // Ethiopic Extended-A
                 codePoint in 0x1780..0x17FF ||
                 codePoint in 0x19E0..0x19FF ||
                 codePoint in 0x1A20..0x1AAF ||

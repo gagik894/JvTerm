@@ -50,7 +50,13 @@ class TerminalPlatformEmojiPainterTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = ["", "e\u0301", "\u05D0\u05D1", "\u6F22", "\u2764\uFE0E", "\uD83D\uDE00\uFE0E"])
+    @ValueSource(
+        strings = [
+            "", "e\u0301", "\u05D0\u05D1", "\u6F22", "\u2764\uFE0E", "\uD83D\uDE00\uFE0E",
+            "\u0628\u200D", "\u0915\u094D\u200D", "\u0628\uFE0F", "\u0915\uFE0F",
+            "\u200D", "\uFE0F", "A\u200D", "A\uFE0F", "A\u20E3", "#\uFE0E\u20E3",
+        ],
+    )
     fun `ordinary or text presentation cluster does not initialize native emoji rasterizer`(text: String) {
         var initializations = 0
         val painter =
@@ -114,20 +120,34 @@ class TerminalPlatformEmojiPainterTest {
         assertTrue(image.containsColor(TEST_RED))
     }
 
-    @Test
-    fun `variation selector 16 cluster is rasterized through platform hook`() {
+    @ParameterizedTest
+    @ValueSource(
+        strings = [
+            "\u2764\uFE0F", "\u00A9\uFE0F", "\u00AE\uFE0F", "1\uFE0F\u20E3", "#\u20E3",
+            "\uD83D\uDC69\u200D\uD83D\uDCBB", "\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08",
+        ],
+    )
+    fun `emoji sequences retain native dispatch and classification stays lazy`(text: String) {
+        var initializations = 0
         val rasterizer = FakeEmojiRasterizer()
-        val painter = TerminalPlatformEmojiPainter(rasterizer)
+        val painter =
+            TerminalPlatformEmojiPainter {
+                initializations++
+                rasterizer
+            }
         val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
         val g = image.createGraphics()
-        val codepoints = intArrayOf(0x2764, 0xFE0F)
+        val codepoints = text.codePoints().toArray()
         try {
+            assertTrue(painter.usesEmojiPresentation(codepoints, 0, codepoints.size))
+            assertEquals(0, initializations)
             assertTrue(painter.paintCluster(g, codepoints, 0, codepoints.size, 0, 0, 1, METRICS))
+            assertEquals(1, initializations)
         } finally {
             g.dispose()
         }
 
-        assertEquals(listOf("\u2764\uFE0F"), rasterizer.texts)
+        assertEquals(listOf(text), rasterizer.texts)
         assertTrue(image.containsColor(TEST_RED))
     }
 

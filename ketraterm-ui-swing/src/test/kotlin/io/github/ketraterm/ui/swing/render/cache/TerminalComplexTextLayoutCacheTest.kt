@@ -20,24 +20,8 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.awt.Font
 import java.awt.font.FontRenderContext
-import java.text.Bidi
 
 class TerminalComplexTextLayoutCacheTest {
-    @Test
-    fun `direction is retained in shaped layout cache identity`() {
-        val fonts = fontCache()
-        val cache = TerminalComplexTextLayoutCache()
-        val frc = FontRenderContext(null, false, false)
-        val text = intArrayOf('?'.code, '!'.code)
-        val ltr = cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_LEFT_TO_RIGHT)
-        val rtl = cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_RIGHT_TO_LEFT)
-        assertTrue(ltr.isLeftToRight)
-        assertFalse(rtl.isLeftToRight)
-        assertNotSame(ltr, rtl)
-        assertSame(ltr, cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_LEFT_TO_RIGHT))
-        assertSame(rtl, cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_RIGHT_TO_LEFT))
-    }
-
     @Test
     fun `constructor rejects non-positive capacities`() {
         assertThrows<IllegalArgumentException> {
@@ -45,9 +29,6 @@ class TerminalComplexTextLayoutCacheTest {
         }
         assertThrows<IllegalArgumentException> {
             TerminalComplexTextLayoutCache(clusterCapacityPerStyle = 0)
-        }
-        assertThrows<IllegalArgumentException> {
-            TerminalComplexTextLayoutCache(scriptRunCapacityPerStyle = 0)
         }
     }
 
@@ -390,45 +371,6 @@ class TerminalComplexTextLayoutCacheTest {
         val secondLayout = layoutCache.clusterLayout("Y".repeat(40), Font.PLAIN, frc, fontCache)
 
         assertNotSame(firstLayout, secondLayout)
-    }
-
-    @Test
-    fun `script run layout shapes beyond cluster structural limit`() {
-        val fontCache = fontCache()
-        val layoutCache = TerminalComplexTextLayoutCache(scriptRunCapacityPerStyle = 4)
-        val frc = FontRenderContext(null, false, false)
-        val run = IntArray(TerminalComplexTextLayoutCache.MAX_CLUSTER_LENGTH + 8) { 0x0928 }
-
-        val layout = layoutCache.scriptRunLayout(run, 0, run.size, Font.PLAIN, frc, fontCache)
-
-        assertEquals(run.size, layout.characterCount)
-        assertSame(layout, layoutCache.scriptRunLayout(run, 0, run.size, Font.PLAIN, frc, fontCache))
-    }
-
-    @Test
-    fun `script run layout is bounded independently from cluster layouts`() {
-        val fontCache = fontCache()
-        val layoutCache = TerminalComplexTextLayoutCache(scriptRunCapacityPerStyle = 4)
-        val frc = FontRenderContext(null, false, false)
-        val run = IntArray(TerminalComplexTextLayoutCache.MAX_SCRIPT_RUN_LENGTH + 1) { 0x0628 }
-
-        val layout = layoutCache.scriptRunLayout(run, 0, run.size, Font.PLAIN, frc, fontCache)
-
-        assertEquals(TerminalComplexTextLayoutCache.MAX_SCRIPT_RUN_LENGTH, layout.characterCount)
-    }
-
-    @Test
-    fun `script run cache capacity is independent from cluster cache capacity`() {
-        val fontCache = fontCache()
-        val layoutCache = TerminalComplexTextLayoutCache(clusterCapacityPerStyle = 1, scriptRunCapacityPerStyle = 2)
-        val frc = FontRenderContext(null, false, false)
-        val run = intArrayOf(0x0628, 0x062D)
-
-        val scriptRun = layoutCache.scriptRunLayout(run, 0, run.size, Font.PLAIN, frc, fontCache)
-        layoutCache.clusterLayout(intArrayOf(0x0E01, 0x0E34), 0, 2, Font.PLAIN, frc, fontCache)
-        layoutCache.clusterLayout(intArrayOf(0x0E02, 0x0E34), 0, 2, Font.PLAIN, frc, fontCache)
-
-        assertSame(scriptRun, layoutCache.scriptRunLayout(run, 0, run.size, Font.PLAIN, frc, fontCache))
     }
 
     private fun fontCache(): FontCache {

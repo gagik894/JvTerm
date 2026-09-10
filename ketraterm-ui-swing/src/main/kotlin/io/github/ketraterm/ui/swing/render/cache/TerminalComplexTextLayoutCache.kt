@@ -17,9 +17,7 @@ package io.github.ketraterm.ui.swing.render.cache
 
 import java.awt.Font
 import java.awt.font.FontRenderContext
-import java.awt.font.TextAttribute
 import java.awt.font.TextLayout
-import java.text.Bidi
 import java.util.*
 
 /**
@@ -27,8 +25,8 @@ import java.util.*
  *
  * Single code points and grapheme clusters use primitive-key LRUs so repeated
  * Unicode cells do not allocate lookup keys or transient strings on cache hits.
- * Script runs use a separate bounded LRU because they are row-level artifacts
- * rather than cell-level grapheme clusters.
+ * Contextual script runs use [TerminalShapedGlyphVectorCache], which retains
+ * their glyph-to-cell positioning as well as their shaping context.
  *
  * **Thread Safety:** Not thread-safe. This cache must only be accessed
  * from the Swing Event Dispatch Thread (EDT).
@@ -36,7 +34,6 @@ import java.util.*
 internal class TerminalComplexTextLayoutCache(
     codePointCapacity: Int = DEFAULT_CODE_POINT_CAPACITY,
     clusterCapacityPerStyle: Int = DEFAULT_CLUSTER_CAPACITY_PER_STYLE,
-    scriptRunCapacityPerStyle: Int = DEFAULT_SCRIPT_RUN_CAPACITY_PER_STYLE,
 ) {
     init {
         require(codePointCapacity > 0) {
@@ -45,19 +42,12 @@ internal class TerminalComplexTextLayoutCache(
         require(clusterCapacityPerStyle > 0) {
             "clusterCapacityPerStyle must be > 0, was $clusterCapacityPerStyle"
         }
-        require(scriptRunCapacityPerStyle > 0) {
-            "scriptRunCapacityPerStyle must be > 0, was $scriptRunCapacityPerStyle"
-        }
     }
 
     private val codePointLayouts = LongTextLayoutLru(codePointCapacity)
     private val clusterLayouts =
         Array(STYLE_COUNT) {
             ClusterTextLayoutLru(clusterCapacityPerStyle)
-        }
-    private val scriptRunLayouts =
-        Array(STYLE_COUNT * 3) {
-            ClusterTextLayoutLru(scriptRunCapacityPerStyle)
         }
     private var stringClusterScratch = IntArray(MAX_CLUSTER_LENGTH)
     private var sanitizedClusterScratch = IntArray(MAX_CLUSTER_LENGTH)
@@ -71,9 +61,6 @@ internal class TerminalComplexTextLayoutCache(
         fontRenderContext = null
         codePointLayouts.clear()
         for (cache in clusterLayouts) {
-            cache.clear()
-        }
-        for (cache in scriptRunLayouts) {
             cache.clear()
         }
     }
@@ -125,7 +112,7 @@ internal class TerminalComplexTextLayoutCache(
      * @param style The packed integer bitmask specifying the target font style (Bold/Italic variants).
      * @param fontRenderContext The active Java2D graphics context specifying scaling and anti-aliasing configurations.
      * @param fontCache The stateful primary and fallback font resolver for typography resolution.
-     * @return An immutable, shaped [TextLayout] strictly bound to terminal cell advances.
+     * @return An immutable, shaped [TextLayout]; callers fit it to the owning cell span.
      */
     fun clusterLayout(
         codepoints: IntArray,
@@ -189,49 +176,6 @@ internal class TerminalComplexTextLayoutCache(
         return clusterLayout(stringClusterScratch, 0, length, style, fontRenderContext, fontCache)
     }
 
-    /**
-     * Resolves a shaped layout for one script-level text run.
-     *
-     * Callers are expected to pass a logical run that has already been split by
-     * compatible terminal attributes, style, direction, and Unicode script. This
-     * gives Java2D's OpenType shaper the full context needed for Arabic joining,
-     * Brahmic reordering, and other run-level substitutions while keeping the
-     * ASCII renderer on its allocation-conscious fast path.
-     *
-     * Shaping is bounded to [MAX_SCRIPT_RUN_LENGTH] code points. Terminal rows
-     * are finite, but this cap prevents hostile oversized grid configurations
-     * from retaining unbounded shaped text in renderer-local caches.
-     *
-     * @param codepoints source Unicode scalar values for the run.
-     * @param offset first source code point to shape.
-     * @param length number of source code points to shape.
-     * @param style packed AWT font style bits.
-     * @param fontRenderContext active Java2D font render context.
-     * @param fontCache configured primary and fallback font resolver.
-     * @param direction resolved row direction, or the default LTR paragraph heuristic when unspecified.
-     * @return immutable [TextLayout] for the bounded script run; direction is part of cache identity.
-     */
-    fun scriptRunLayout(
-        codepoints: IntArray,
-        offset: Int,
-        length: Int,
-        style: Int,
-        fontRenderContext: FontRenderContext,
-        fontCache: FontCache,
-        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
-    ): TextLayout =
-        layoutForCodepointSlice(
-            codepoints = codepoints,
-            offset = offset,
-            length = length,
-            style = style,
-            fontRenderContext = fontRenderContext,
-            fontCache = fontCache,
-            maxLength = MAX_SCRIPT_RUN_LENGTH,
-            layouts = scriptRunLayouts,
-            direction = direction,
-        )
-
     private fun prepare(
         nextFontRenderContext: FontRenderContext,
         nextFontGeneration: Int,
@@ -244,75 +188,6 @@ internal class TerminalComplexTextLayoutCache(
         for (cache in clusterLayouts) {
             cache.clear()
         }
-        for (cache in scriptRunLayouts) {
-            cache.clear()
-        }
-    }
-
-    private fun layoutForCodepointSlice(
-        codepoints: IntArray,
-        offset: Int,
-        length: Int,
-        style: Int,
-        fontRenderContext: FontRenderContext,
-        fontCache: FontCache,
-        maxLength: Int,
-        layouts: Array<ClusterTextLayoutLru>,
-        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
-    ): TextLayout {
-        require(length >= 0) { "length must be >= 0, was $length" }
-        require(offset >= 0 && codepoints.size - offset >= length) {
-            "layout source has insufficient capacity: size=${codepoints.size}, offset=$offset, length=$length"
-        }
-        if (length == 0) {
-            return codePointLayout(REPLACEMENT_CODE_POINT, style, fontRenderContext, fontCache)
-        }
-        if (length == 1 && direction == Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT) {
-            return codePointLayout(codepoints[offset], style, fontRenderContext, fontCache)
-        }
-
-        fontCache.refreshSystemFallbackFonts()
-        prepare(fontRenderContext, fontCache.generation)
-
-        val shapedLength = minOf(length, maxLength)
-        val normalizedStyle = style and STYLE_MASK
-        val directionIndex =
-            when (direction) {
-                Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT -> 0
-                Bidi.DIRECTION_LEFT_TO_RIGHT -> 1
-                Bidi.DIRECTION_RIGHT_TO_LEFT -> 2
-                else -> error("Unsupported text run direction: $direction")
-            }
-        val styleLayouts = layouts[normalizedStyle + directionIndex * STYLE_COUNT]
-        val safeCodepoints =
-            if (hasOnlyUnicodeScalars(codepoints, offset, shapedLength)) {
-                codepoints
-            } else {
-                sanitizeCluster(codepoints, offset, shapedLength)
-            }
-        val safeOffset = if (safeCodepoints === codepoints) offset else 0
-
-        val hash = styleLayouts.contentHash(safeCodepoints, safeOffset, shapedLength)
-        val cached = styleLayouts.get(safeCodepoints, safeOffset, shapedLength, hash)
-        if (cached != null) return cached
-
-        val text = String(safeCodepoints, safeOffset, shapedLength)
-        val font = fontCache.fontForText(text, normalizedStyle)
-        val layout =
-            if (direction == Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT) {
-                TextLayout(text, font, fontRenderContext)
-            } else {
-                TextLayout(
-                    text,
-                    mapOf(
-                        TextAttribute.FONT to font,
-                        TextAttribute.RUN_DIRECTION to (direction == Bidi.DIRECTION_RIGHT_TO_LEFT),
-                    ),
-                    fontRenderContext,
-                )
-            }
-        styleLayouts.put(safeCodepoints, safeOffset, shapedLength, hash, layout)
-        return layout
     }
 
     private fun copyStringCodepoints(text: String): Int {
@@ -764,7 +639,6 @@ internal class TerminalComplexTextLayoutCache(
     companion object {
         private const val DEFAULT_CODE_POINT_CAPACITY = 4096
         private const val DEFAULT_CLUSTER_CAPACITY_PER_STYLE = 1024
-        private const val DEFAULT_SCRIPT_RUN_CAPACITY_PER_STYLE = 512
         private const val STYLE_COUNT = 4
         private const val STYLE_MASK = Font.BOLD or Font.ITALIC
         private const val EMPTY = -1
@@ -775,13 +649,6 @@ internal class TerminalComplexTextLayoutCache(
          * back to drawing the remainder as individual code points.
          */
         internal const val MAX_CLUSTER_LENGTH = 32
-
-        /**
-         * Maximum code points shaped as one script run. The renderer feeds
-         * ordinary terminal rows as a whole run while bounding cache retention
-         * and OpenType shaping work for hostile oversized grids.
-         */
-        internal const val MAX_SCRIPT_RUN_LENGTH = 2048
 
         private const val REPLACEMENT_CODE_POINT = 0xFFFD
 
