@@ -16,6 +16,7 @@
 package io.github.ketraterm.core.store
 
 import io.github.ketraterm.core.model.TerminalConstants
+import io.github.ketraterm.core.store.ClusterStore.Companion.LIVE_SLOT
 import io.github.ketraterm.core.store.ClusterStore.Companion.NO_FREE
 import java.util.*
 
@@ -67,6 +68,9 @@ internal class ClusterStore {
         /** Sentinel meaning "no next free slot". */
         private const val NO_FREE = -1
 
+        /** Marks a slot that owns a live payload instead of linking a free slot. */
+        private const val LIVE_SLOT = -2
+
         /**
          * Handle encoding bias.
          * handle = -(slot + 2)  →  slot = -(handle + 2)
@@ -87,13 +91,10 @@ internal class ClusterStore {
     private var slotCapacities = IntArray(INITIAL_SLOT_CAPACITY)
 
     /**
-     * Freelist linkage. For a live slot this value is unused.
+     * Freelist linkage, or [LIVE_SLOT] while the slot owns a live payload.
      * For a freed slot, stores the index of the next free slot, or [NO_FREE].
      */
     private var nextFree = IntArray(INITIAL_SLOT_CAPACITY) { NO_FREE }
-
-    /** `true` iff the slot currently owns a live cluster payload. */
-    private var isLive = BooleanArray(INITIAL_SLOT_CAPACITY)
 
     // Flat codepoint pool
 
@@ -153,7 +154,7 @@ internal class ClusterStore {
 
         System.arraycopy(codepoints, offset, clusterData, slotStarts[slot], length)
         slotLengths[slot] = length
-        isLive[slot] = true
+        nextFree[slot] = LIVE_SLOT
         return encodeHandle(slot)
     }
 
@@ -168,10 +169,9 @@ internal class ClusterStore {
     fun free(handle: Int) {
         if (handle > TerminalConstants.CLUSTER_HANDLE_MAX) return // EMPTY, codepoint, or SPACER
         val slot = decodeSlot(handle)
-        if (!isLive[slot]) {
+        if (nextFree[slot] != LIVE_SLOT) {
             throw IllegalStateException("Cluster handle $handle was freed more than once")
         }
-        isLive[slot] = false
 
         val bucket = bucketForCapacity(slotCapacities[slot])
         nextFree[slot] = freeHeads[bucket]
@@ -279,7 +279,6 @@ internal class ClusterStore {
         val slot = freeHeads[bucket]
         if (slot != NO_FREE) {
             freeHeads[bucket] = nextFree[slot]
-            nextFree[slot] = NO_FREE
             return slot
         }
         return NO_FREE
@@ -306,7 +305,6 @@ internal class ClusterStore {
         slotLengths = slotLengths.copyOf(newCap)
         slotCapacities = slotCapacities.copyOf(newCap)
         val grown = nextFree.copyOf(newCap)
-        isLive = isLive.copyOf(newCap)
         for (i in slotCount until newCap) grown[i] = NO_FREE
         nextFree = grown
     }

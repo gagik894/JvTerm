@@ -247,6 +247,32 @@ class ClusterStoreTest {
         }
 
         @Test
+        fun `double free of head and tail after growth preserves reuse and live payloads`() {
+            val store = ClusterStore()
+            val handles = IntArray(130) { store.alloc(intArrayOf(it, it + 1)) }
+            val tail = handles.first()
+            val head = handles.last()
+            store.free(tail)
+            store.free(head)
+
+            assertThrows(IllegalStateException::class.java) { store.free(tail) }
+            assertThrows(IllegalStateException::class.java) { store.free(head) }
+
+            assertEquals(head, store.alloc(intArrayOf(500, 501)))
+            assertEquals(tail, store.alloc(intArrayOf(600, 601)))
+            assertCluster(store, head, intArrayOf(500, 501))
+            assertCluster(store, tail, intArrayOf(600, 601))
+            for (i in 1 until handles.lastIndex) {
+                assertCluster(store, handles[i], intArrayOf(i, i + 1))
+            }
+
+            assertDoesNotThrow {
+                store.free(head)
+                store.free(tail)
+            }
+        }
+
+        @Test
         fun `free preserves all other live handles`() {
             val store = ClusterStore()
             val h0 = store.alloc(intArrayOf(10, 11))
