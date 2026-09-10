@@ -21,23 +21,15 @@ import io.github.ketraterm.completion.spec.findNextCommandSpec
 import io.github.ketraterm.completion.spec.findOptionSpec
 
 /** Semantic state produced by one pass over tokens following a known command. */
-internal data class CommandLineSemanticState(
+internal class CommandLineSemanticState(
     val commandPath: List<TerminalCommandSpec>,
-    val optionNames: List<String>,
-    val arguments: List<TerminalCommandArgumentShape>,
+    val positionalArgumentCount: Int,
     val usedOptionExclusiveGroupIds: Set<String>,
     val optionsTerminated: Boolean,
     val pendingOptionValue: TerminalOptionSpec?,
-) {
-    val positionalArgumentCount: Int
-        get() =
-            arguments.count {
-                it.kind == TerminalCommandArgumentKind.POSITIONAL ||
-                    it.kind == TerminalCommandArgumentKind.OPTION_TERMINATED_POSITIONAL
-            }
-}
+)
 
-/** Analyzes a known command path once, retaining the state needed by completion and learning. */
+/** Analyzes a known command path once, retaining the state needed by completion. */
 internal fun analyzeCommandTokens(
     tokens: List<TerminalCommandLineToken>,
     startIndex: Int,
@@ -45,10 +37,9 @@ internal fun analyzeCommandTokens(
     rootSpec: TerminalCommandSpec,
 ): CommandLineSemanticState {
     val commandPath = ArrayList<TerminalCommandSpec>(TERMINAL_COMMAND_LIST_CAPACITY)
-    val optionNames = ArrayList<String>(TERMINAL_COMMAND_LIST_CAPACITY)
-    val arguments = ArrayList<TerminalCommandArgumentShape>(TERMINAL_COMMAND_LIST_CAPACITY)
     var usedExclusiveGroupIds: LinkedHashSet<String>? = null
     var pendingOptionValue: TerminalOptionSpec? = null
+    var positionalArgumentCount = 0
     var acceptingSubcommands = true
     var optionsTerminated = false
     commandPath += rootSpec
@@ -63,16 +54,8 @@ internal fun analyzeCommandTokens(
             continue
         }
 
-        val valueOption = pendingOptionValue
         when {
-            valueOption != null -> {
-                arguments +=
-                    TerminalCommandArgumentShape(
-                        TerminalCommandArgumentKind.OPTION_VALUE,
-                        normalizeTerminalCommandToken(valueOption.names.first()),
-                    )
-                pendingOptionValue = null
-            }
+            pendingOptionValue != null -> pendingOptionValue = null
 
             normalized == TERMINAL_COMMAND_OPTION_TERMINATOR -> {
                 acceptingSubcommands = false
@@ -80,8 +63,6 @@ internal fun analyzeCommandTokens(
             }
 
             !optionsTerminated && normalized.isTerminalOptionToken() -> {
-                val optionName = normalized.substringBefore(OPTION_VALUE_SEPARATOR)
-                optionNames += optionName
                 val option = findOptionSpec(commandPath, token)
                 if (option != null) {
                     if (option.exclusiveGroupIds.isNotEmpty()) {
@@ -101,23 +82,19 @@ internal fun analyzeCommandTokens(
                 if (next != null) {
                     commandPath += next
                 } else {
-                    arguments += TerminalCommandArgumentShape(TerminalCommandArgumentKind.POSITIONAL)
+                    positionalArgumentCount++
                     acceptingSubcommands = false
                 }
             }
 
-            optionsTerminated ->
-                arguments += TerminalCommandArgumentShape(TerminalCommandArgumentKind.OPTION_TERMINATED_POSITIONAL)
-
-            else -> arguments += TerminalCommandArgumentShape(TerminalCommandArgumentKind.POSITIONAL)
+            else -> positionalArgumentCount++
         }
         tokenIndex++
     }
 
     return CommandLineSemanticState(
         commandPath = commandPath,
-        optionNames = optionNames,
-        arguments = arguments,
+        positionalArgumentCount = positionalArgumentCount,
         usedOptionExclusiveGroupIds = usedExclusiveGroupIds ?: emptySet(),
         optionsTerminated = optionsTerminated,
         pendingOptionValue = pendingOptionValue,

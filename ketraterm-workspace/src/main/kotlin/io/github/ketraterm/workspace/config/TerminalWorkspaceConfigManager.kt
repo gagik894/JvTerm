@@ -49,7 +49,7 @@ class TerminalWorkspaceConfigManager(
     fun load(): TerminalConfig {
         if (!Files.exists(configPath)) {
             val defaultConfig = TerminalConfig()
-            save(defaultConfig)
+            saveDefaults(defaultConfig)
             return defaultConfig
         }
 
@@ -133,8 +133,6 @@ class TerminalWorkspaceConfigManager(
                     ?: default.acceptSelectedSuggestionWithEnter
             val persistentSuggestionLearningEnabled =
                 behavior[SUGGESTION_LEARNING_PERSISTENCE_KEY]?.toBooleanStrictOrNull()
-                    ?: behavior["persistent_suggestion_learning_enabled"]?.toBooleanStrictOrNull()
-                    ?: behavior["persistent_command_history_enabled"]?.toBooleanStrictOrNull()
                     ?: default.persistentSuggestionLearningEnabled
             val scrollOnOutput =
                 behavior["scroll_on_output"]?.toBooleanStrictOrNull()
@@ -205,6 +203,7 @@ class TerminalWorkspaceConfigManager(
                 shellRequestResizeWindow = shellRequestResizeWindow,
                 shellRequestWindowManipulation = shellRequestWindowManipulation,
                 desktopNotificationsEnabled = desktopNotificationsEnabled,
+                smartSuggestionsEnabled = behavior["smart_suggestions_enabled"]?.toBooleanStrictOrNull() ?: default.smartSuggestionsEnabled,
                 shellSuggestionsEnabled = shellSuggestionsEnabled,
                 acceptSelectedSuggestionWithEnter = acceptSelectedSuggestionWithEnter,
                 persistentSuggestionLearningEnabled = persistentSuggestionLearningEnabled,
@@ -216,38 +215,51 @@ class TerminalWorkspaceConfigManager(
                 titleRemotePermission = titleRemotePermission,
                 scrollOnOutput = scrollOnOutput,
             )
-        } catch (e: Exception) {
+        } catch (failure: IOException) {
+            System.err.println("Using default configuration; could not read $configPath: ${failure.message}")
+            TerminalConfig()
+        } catch (_: IllegalArgumentException) {
             try {
                 val backupPath = configPath.resolveSibling("${configPath.fileName}.broken")
                 Files.move(configPath, backupPath, StandardCopyOption.REPLACE_EXISTING)
                 System.err.println("Configuration file was malformed and has been backed up to $backupPath")
             } catch (ioe: IOException) {
                 System.err.println("Failed to back up malformed configuration file: ${ioe.message}")
+                return TerminalConfig()
             }
             val defaultConfig = TerminalConfig()
-            save(defaultConfig)
+            saveDefaults(defaultConfig)
             defaultConfig
         }
     }
 
     /**
-     * Saves the provided configuration to the TOML file.
+     * Atomically replaces the configuration file with one complete TOML snapshot.
      *
-     * Creates any missing parent directories before writing. Writes the values
-     * mapped onto a documented TOML template for power user readability.
+     * Creates missing parent directories and stages the replacement beside the destination.
+     * If writing or replacing fails, the previous file stays intact and the failure propagates.
+     * The filesystem must support atomic replacement; there is no destructive fallback.
      *
-     * @param config the configuration to save.
+     * @throws IOException if the snapshot cannot be persisted.
      */
     fun save(config: TerminalConfig) {
+        val destination = configPath.toAbsolutePath()
+        val parent = destination.parent
+        Files.createDirectories(parent)
+        val temporary = Files.createTempFile(parent, ".${destination.fileName}.", ".tmp")
         try {
-            val parent = configPath.parent
-            if (parent != null && !Files.exists(parent)) {
-                Files.createDirectories(parent)
-            }
-            val toml = generateToml(config)
-            Files.writeString(configPath, toml)
-        } catch (e: IOException) {
-            System.err.println("Failed to save configuration to $configPath: ${e.message}")
+            Files.writeString(temporary, generateToml(config))
+            Files.move(temporary, destination, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
+    }
+
+    private fun saveDefaults(config: TerminalConfig) {
+        try {
+            save(config)
+        } catch (failure: IOException) {
+            System.err.println("Using default configuration; could not save $configPath: ${failure.message}")
         }
     }
 
@@ -307,6 +319,7 @@ class TerminalWorkspaceConfigManager(
         # Whether to enable desktop notifications when the terminal receives OSC 9 or OSC 777 sequences
         desktop_notifications_enabled = ${config.desktopNotificationsEnabled}
         # Whether host-provided shell suggestions may appear in the terminal UI
+        smart_suggestions_enabled = ${config.smartSuggestionsEnabled}
         shell_suggestions_enabled = ${config.shellSuggestionsEnabled}
         # Whether Enter accepts an already-selected suggestion; with no selection Enter reaches the shell
         accept_selected_suggestion_with_enter = ${config.acceptSelectedSuggestionWithEnter}

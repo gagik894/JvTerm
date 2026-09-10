@@ -18,6 +18,7 @@ package io.github.ketraterm.completion.spec
 import io.github.ketraterm.completion.api.*
 import io.github.ketraterm.completion.model.TerminalArgumentSpec
 import io.github.ketraterm.completion.model.TerminalCommandSpec
+import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.completion.model.TerminalOptionSpec
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
@@ -111,6 +112,28 @@ class SpecCompletionEngineTest {
     fun `option terminator prevents option values from completing`() =
         runBlocking {
             assertTrue(engine().complete(request("gradle -- --console r")).isEmpty())
+        }
+
+    @Test
+    fun `options are scoped to their active subcommand path`() =
+        runBlocking {
+            val engine =
+                TerminalCompletionEngines.fromSources(
+                    sources = emptyList(),
+                    commandSpecs = TerminalCommandSpecs.defaults(),
+                )
+
+            // commit defines --amend, so git commit --am completes to --amend
+            val commitCandidates = engine.complete(request("git commit --am"))
+            assertEquals(listOf("--amend"), commitCandidates.map { it.replacementText })
+
+            // switch does NOT define --amend, so git switch --am returns empty
+            val switchCandidates = engine.complete(request("git switch --am"))
+            assertTrue(switchCandidates.isEmpty())
+
+            // Root options like --help are accessible under subcommands
+            val switchHelp = engine.complete(request("git switch --h"))
+            assertEquals(listOf("--help"), switchHelp.map { it.replacementText })
         }
 
     @Test
@@ -346,9 +369,67 @@ class SpecCompletionEngineTest {
             val awsCandidates = engine.complete(request("aws s"))
             assertEquals(listOf("s3", "sts"), awsCandidates.map { it.replacementText })
 
-            // Test ketra matching
-            val ketraCandidates = engine.complete(request("ketra --prof"))
-            assertEquals(listOf("--profile"), ketraCandidates.map { it.replacementText })
+            // Test pnpm, yarn, bun matching
+            val pnpmCandidates = engine.complete(request("pnpm i"))
+            assertEquals(listOf("install"), pnpmCandidates.map { it.replacementText })
+
+            val yarnCandidates = engine.complete(request("yarn a"))
+            assertEquals(listOf("add"), yarnCandidates.map { it.replacementText })
+
+            val bunCandidates = engine.complete(request("bun d"))
+            assertEquals(listOf("dev"), bunCandidates.map { it.replacementText })
+
+            // Test docker-compose matching
+            val composeCandidates = engine.complete(request("docker-compose u"))
+            assertEquals(listOf("up"), composeCandidates.map { it.replacementText })
+
+            // Test git commit flags
+            val gitCommitFlags = engine.complete(request("git commit --am"))
+            assertEquals(listOf("--amend"), gitCommitFlags.map { it.replacementText })
+
+            // Test kubectl resources
+            val kubeGetResources = engine.complete(request("kubectl get po"))
+            assertEquals(listOf("pods"), kubeGetResources.map { it.replacementText })
+
+            // Test cargo flags
+            val cargoFlags = engine.complete(request("cargo --rel"))
+            assertEquals(listOf("--release"), cargoFlags.map { it.replacementText })
+
+            // Test Gradle universal tasks & flags
+            val gradleTasks = engine.complete(request("gradle cle"))
+            assertEquals(listOf("clean"), gradleTasks.map { it.replacementText })
+
+            val gradleConfigCache = engine.complete(request("gradle --config"))
+            assertEquals(
+                listOf(
+                    "--configuration-cache",
+                    "--configuration-cache-problems",
+                    "--no-configuration-cache",
+                ),
+                gradleConfigCache.map {
+                    it.replacementText
+                },
+            )
+
+            // Test kotlin / kotlinc flags
+            val kotlincFlags = engine.complete(request("kotlinc -jvm"))
+            assertEquals(listOf("-jvm-target"), kotlincFlags.map { it.replacementText })
+
+            val kotlinCandidates = engine.complete(request("kotlin ru"))
+            assertEquals(listOf("run"), kotlinCandidates.map { it.replacementText })
+
+            // Test adb subcommands
+            val adbCandidates = engine.complete(request("adb dev"))
+            assertEquals(listOf("devices"), adbCandidates.map { it.replacementText })
+        }
+
+    @Test
+    fun `subcommand query matches and populates matchedRanges`() =
+        runBlocking {
+            val candidates = engine().complete(request("git c"))
+            assertEquals(listOf("commit", "checkout"), candidates.map { it.replacementText })
+            val commit = candidates.first { it.replacementText == "commit" }
+            kotlin.test.assertContentEquals(intArrayOf(0, 1), commit.matchedRanges.copyPackedOffsets())
         }
 
     private fun engine(): TerminalCompletionEngine {

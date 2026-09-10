@@ -15,11 +15,10 @@
  */
 package io.github.ketraterm.completion.persistence
 
-import io.github.ketraterm.completion.api.TerminalCompletionPersistencePolicy
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
-import io.github.ketraterm.completion.model.TerminalCommandShapeStats
-import io.github.ketraterm.completion.model.TerminalCompletionFeedbackStats
+import io.github.ketraterm.completion.api.TerminalCompletionReplayPolicy
+import io.github.ketraterm.completion.model.TerminalCommandReplay
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
+import io.github.ketraterm.completion.model.TerminalCompletionRankingStats
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.*
@@ -32,71 +31,68 @@ internal sealed interface CompletionLearningFileLoadOutcome {
 
     /** The file was valid and decoded to [snapshot]. */
     data class Loaded(
-        val snapshot: TerminalCommandCompletionStatsSnapshot,
+        val snapshot: TerminalCompletionLearningSnapshot,
     ) : CompletionLearningFileLoadOutcome
 
     /** The file exists but has an unsupported format or exceeds a hard input bound. */
     data object Rejected : CompletionLearningFileLoadOutcome
 
     /** The file could not be inspected or read. */
-    data object Failed : CompletionLearningFileLoadOutcome
+    data class Failed(
+        val cause: Exception,
+    ) : CompletionLearningFileLoadOutcome
 }
 
-/** Bounded local-file implementation used only by the suspending repository. */
+/** Fixed-path snapshot operations used by the persistence coordinator. */
+internal interface CompletionLearningSnapshotFileStore {
+    /** Reads and validates one bounded snapshot. */
+    fun loadSnapshot(): CompletionLearningFileLoadOutcome
+
+    /** Atomically replaces the file with one bounded, sanitized [snapshot]. */
+    fun persist(snapshot: TerminalCompletionLearningSnapshot)
+}
+
+/** Bounded local-file implementation used by the persistence coordinator. */
 internal class CompletionLearningFileStore(
     private val path: Path,
-    private val onFailure: (Throwable) -> Unit = {},
     private val openInput: (Path) -> InputStream = { Files.newInputStream(it) },
     private val createTemporaryFile: (Path, String, String) -> Path = Files::createTempFile,
-) {
-    fun loadSnapshot(): CompletionLearningFileLoadOutcome =
+) : CompletionLearningSnapshotFileStore {
+    override fun loadSnapshot(): CompletionLearningFileLoadOutcome =
         try {
             val attributes = Files.readAttributes(path, BasicFileAttributes::class.java)
             if (!attributes.isRegularFile) {
                 CompletionLearningFileLoadOutcome.Rejected
             } else {
-                val lines = readBoundedLines()
-                if (lines == null || lines.firstOrNull() != CURRENT_HEADER) {
+                val decoded = readBoundedLines()?.let(CompletionLearningSnapshotCodec::decode)
+                val snapshot = decoded?.sanitizeReplay()
+                if (snapshot == null || !snapshotFitsBounds(snapshot)) {
                     CompletionLearningFileLoadOutcome.Rejected
                 } else {
-                    CompletionLearningFileLoadOutcome.Loaded(
-                        boundedSnapshot(
-                            TerminalCompletionPersistencePolicy.sanitizeSnapshot(
-                                CompletionLearningSnapshotCodec.decode(lines),
-                            ),
-                        ),
-                    )
+                    CompletionLearningFileLoadOutcome.Loaded(snapshot)
                 }
             }
         } catch (_: NoSuchFileException) {
             CompletionLearningFileLoadOutcome.Missing
         } catch (failure: Exception) {
-            failed(failure)
+            CompletionLearningFileLoadOutcome.Failed(failure)
         }
 
-    fun persist(snapshot: TerminalCommandCompletionStatsSnapshot) {
-        writeSnapshot(boundedSnapshot(TerminalCompletionPersistencePolicy.sanitizeSnapshot(snapshot)))
-    }
-
-    private fun writeSnapshot(snapshot: TerminalCommandCompletionStatsSnapshot) {
-        runCatching {
-            val lines = CompletionLearningSnapshotCodec.encode(snapshot)
-            requireEncodedBounds(lines)
-            val absolutePath = path.toAbsolutePath().normalize()
-            val parent = requireNotNull(absolutePath.parent) { "persistence path must have a parent: $path" }
-            Files.createDirectories(parent)
-            val temporary = createTemporaryFile(parent, ".${absolutePath.fileName}.", ".tmp")
-            try {
-                Files.newBufferedWriter(temporary, StandardCharsets.UTF_8).use { writer ->
-                    for (line in lines) {
-                        writer.appendLine(line)
-                    }
-                }
-                replaceAtomically(temporary, absolutePath)
-            } finally {
-                Files.deleteIfExists(temporary)
+    override fun persist(snapshot: TerminalCompletionLearningSnapshot) {
+        val lines = CompletionLearningSnapshotCodec.encode(boundedSnapshot(snapshot.sanitizeReplay()))
+        requireEncodedBounds(lines)
+        val absolutePath = path.toAbsolutePath().normalize()
+        val parent = requireNotNull(absolutePath.parent) { "persistence path must have a parent: $path" }
+        Files.createDirectories(parent)
+        val temporary = createTemporaryFile(parent, ".${absolutePath.fileName}.", ".tmp")
+        try {
+            Files.newBufferedWriter(temporary, StandardCharsets.UTF_8).use { writer ->
+                for (line in lines) writer.appendLine(line)
             }
-        }.onFailure(onFailure)
+            replaceAtomically(temporary, absolutePath)
+        } finally {
+            Files.deleteIfExists(temporary)
+        }
     }
 
     private fun requireEncodedBounds(lines: List<String>) {
@@ -126,10 +122,7 @@ internal class CompletionLearningFileStore(
     }
 
     private fun readBoundedLines(): List<String>? {
-        val bytes =
-            openInput(path).use { input ->
-                input.readNBytes(MAX_FILE_BYTES + 1)
-            }
+        val bytes = openInput(path).use { input -> input.readNBytes(MAX_FILE_BYTES + 1) }
         if (bytes.size > MAX_FILE_BYTES) return null
 
         val lines = ArrayList<String>(minOf(MAX_FILE_LINES, DEFAULT_LINE_CAPACITY))
@@ -155,53 +148,59 @@ internal class CompletionLearningFileStore(
         return true
     }
 
-    private fun failed(failure: Throwable): CompletionLearningFileLoadOutcome {
-        onFailure(failure)
-        return CompletionLearningFileLoadOutcome.Failed
-    }
-
-    private fun boundedSnapshot(snapshot: TerminalCommandCompletionStatsSnapshot): TerminalCommandCompletionStatsSnapshot =
-        TerminalCommandCompletionStatsSnapshot(
-            commandStats = boundedRows(snapshot.commandStats, ::commandRowSize),
-            shapeStats = boundedRows(snapshot.shapeStats, ::shapeRowSize),
-            feedbackStats = boundedRows(snapshot.feedbackStats, ::feedbackRowSize),
-        )
-
-    private fun <T> boundedRows(
-        rows: List<T>,
-        rowSize: (T) -> Int?,
-    ): List<T> {
-        val retained = ArrayList<T>(minOf(rows.size, MAX_ROWS_PER_FAMILY))
-        var retainedBytes = 0
-        for (row in rows) {
-            val size = rowSize(row) ?: continue
-            if (retainedBytes + size + MAX_NEWLINE_BYTES > MAX_ENCODED_BYTES_PER_FAMILY) continue
-            retained += row
-            retainedBytes += size + MAX_NEWLINE_BYTES
-            if (retained.size == MAX_ROWS_PER_FAMILY) break
+    private fun snapshotFitsBounds(snapshot: TerminalCompletionLearningSnapshot): Boolean {
+        if (snapshot.rankingStats.size > MAX_RANKING_ROWS || snapshot.replayCommands.size > MAX_REPLAY_ROWS) return false
+        val rankingKeys = snapshot.rankingStats.mapTo(HashSet(snapshot.rankingStats.size)) { it.rowKey() }
+        var rankingBytes = 0
+        for (row in snapshot.rankingStats) {
+            val rowSize = rankingRowSize(row) ?: return false
+            rankingBytes += rowSize + MAX_NEWLINE_BYTES
+            if (rankingBytes > MAX_RANKING_BYTES) return false
         }
-        return retained
+        var replayBytes = 0
+        for (row in snapshot.replayCommands) {
+            if (row.rowKey() !in rankingKeys) return false
+            val rowSize = replayRowSize(row) ?: return false
+            replayBytes += rowSize + MAX_NEWLINE_BYTES
+            if (replayBytes > MAX_REPLAY_BYTES) return false
+        }
+        return true
     }
 
-    private fun commandRowSize(row: TerminalCommandCompletionStats): Int? =
-        encodedRowSize(row.commandLine, row.profileId, row.workingDirectoryUri) {
-            CompletionLearningSnapshotCodec.encodeCommandRow(row)
+    private fun boundedSnapshot(snapshot: TerminalCompletionLearningSnapshot): TerminalCompletionLearningSnapshot {
+        val rankingStats = ArrayList<TerminalCompletionRankingStats>(minOf(snapshot.rankingStats.size, MAX_RANKING_ROWS))
+        val rankingKeys = HashSet<PersistedLearningRowKey>()
+        var rankingBytes = 0
+        for (row in snapshot.rankingStats) {
+            val size = rankingRowSize(row) ?: continue
+            if (rankingBytes + size + MAX_NEWLINE_BYTES > MAX_RANKING_BYTES) continue
+            rankingStats += row
+            rankingKeys += row.rowKey()
+            rankingBytes += size + MAX_NEWLINE_BYTES
+            if (rankingStats.size == MAX_RANKING_ROWS) break
         }
 
-    private fun shapeRowSize(row: TerminalCommandShapeStats): Int? {
-        if (row.shape.subcommands.size > MAX_SHAPE_TOKENS || row.shape.optionNames.size > MAX_SHAPE_TOKENS) return null
-        return encodedRowSize(
-            row.shape.executable,
-            row.profileId,
-            row.workingDirectoryUri,
-            *row.shape.subcommands.toTypedArray(),
-            *row.shape.optionNames.toTypedArray(),
-        ) { CompletionLearningSnapshotCodec.encodeShapeRow(row) }
+        val replayCommands = ArrayList<TerminalCommandReplay>(minOf(snapshot.replayCommands.size, MAX_REPLAY_ROWS))
+        var replayBytes = 0
+        for (row in snapshot.replayCommands) {
+            if (row.rowKey() !in rankingKeys) continue
+            val size = replayRowSize(row) ?: continue
+            if (replayBytes + size + MAX_NEWLINE_BYTES > MAX_REPLAY_BYTES) continue
+            replayCommands += row
+            replayBytes += size + MAX_NEWLINE_BYTES
+            if (replayCommands.size == MAX_REPLAY_ROWS) break
+        }
+        return TerminalCompletionLearningSnapshot(rankingStats, replayCommands)
     }
 
-    private fun feedbackRowSize(row: TerminalCompletionFeedbackStats): Int? =
-        encodedRowSize(row.source, row.profileId, row.workingDirectoryUri) {
-            CompletionLearningSnapshotCodec.encodeFeedbackRow(row)
+    private fun rankingRowSize(row: TerminalCompletionRankingStats): Int? =
+        encodedRowSize(row.identityDigest, row.profileId, row.workingDirectoryUri) {
+            CompletionLearningSnapshotCodec.encodeRankingRow(row)
+        }
+
+    private fun replayRowSize(row: TerminalCommandReplay): Int? =
+        encodedRowSize(row.identityDigest, row.commandLine, row.profileId, row.workingDirectoryUri) {
+            CompletionLearningSnapshotCodec.encodeReplayRow(row)
         }
 
     private inline fun encodedRowSize(
@@ -223,20 +222,44 @@ internal class CompletionLearningFileStore(
         return true
     }
 
+    private fun TerminalCompletionLearningSnapshot.sanitizeReplay(): TerminalCompletionLearningSnapshot {
+        val successfulKeys =
+            rankingStats
+                .asSequence()
+                .filter { it.successCount > 0 }
+                .mapTo(HashSet()) { it.rowKey() }
+        val retained =
+            replayCommands.filter {
+                it.rowKey() in successfulKeys && TerminalCompletionReplayPolicy.allowsPlaintext(it.commandLine)
+            }
+        return if (retained.size == replayCommands.size) this else copy(replayCommands = retained)
+    }
+
+    private data class PersistedLearningRowKey(
+        val identityDigest: String,
+        val profileId: String?,
+        val workingDirectoryUri: String?,
+    )
+
+    private fun TerminalCompletionRankingStats.rowKey(): PersistedLearningRowKey =
+        PersistedLearningRowKey(identityDigest, profileId, workingDirectoryUri)
+
+    private fun TerminalCommandReplay.rowKey(): PersistedLearningRowKey =
+        PersistedLearningRowKey(identityDigest, profileId, workingDirectoryUri)
+
     private companion object {
-        private const val MAX_ROWS_PER_FAMILY = 2_048
-        private const val MAX_FILE_BYTES = 4 * 1024 * 1024
-        private const val MAX_FILE_LINES = 1 + 3 * MAX_ROWS_PER_FAMILY
+        private const val MAX_RANKING_ROWS = 2_048
+        private const val MAX_REPLAY_ROWS = 2_048
+        private const val MAX_RANKING_BYTES = 1_000_000
+        private const val MAX_REPLAY_BYTES = 1_000_000
+        private const val MAX_FILE_BYTES = MAX_RANKING_BYTES + MAX_REPLAY_BYTES + 256
+        private const val MAX_FILE_LINES = 1 + MAX_RANKING_ROWS + MAX_REPLAY_ROWS
         private const val MAX_LINE_BYTES = 16 * 1024
         private const val MAX_NEWLINE_BYTES = 2
-        private const val MAX_ENCODED_BYTES_PER_FAMILY = 1_000_000
         private const val MAX_ROW_RAW_CHARS = 8 * 1024
         private const val MAX_TEXT_CHARS = 4 * 1024
-        private const val MAX_SHAPE_TOKENS = 128
         private const val DEFAULT_LINE_CAPACITY = 256
         private const val NEWLINE_BYTE: Byte = 0x0A
         private const val CARRIAGE_RETURN_BYTE: Byte = 0x0D
-        private val CURRENT_HEADER =
-            CompletionLearningSnapshotCodec.encode(TerminalCommandCompletionStatsSnapshot()).single()
     }
 }

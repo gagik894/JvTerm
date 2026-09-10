@@ -23,18 +23,21 @@ import org.junit.Test
 
 class IntellijCompletionSourceRequestTest {
     @Test
-    fun `Git status loader uses the request working directory`() =
+    fun `Git status loader uses the request working directory and active prefix`() =
         runBlocking {
             var requestedDirectory: String? = null
+            var requestedPrefix: String? = null
             val source =
-                intellijGitStatusPathCompletionSource { workingDirectoryUri ->
+                intellijGitStatusPathCompletionSource { workingDirectoryUri, prefix ->
                     requestedDirectory = workingDirectoryUri
+                    requestedPrefix = prefix
                     listOf(TerminalFuzzyPathEntry("src/Changed.kt", isDirectory = false))
                 }
 
-            val candidates = engine(source).complete(request("git add "))
+            val candidates = engine(source).complete(request("git add Chan"))
 
             assertEquals(WORKING_DIRECTORY, requestedDirectory)
+            assertEquals("Chan", requestedPrefix)
             assertTrue(candidates.any { it.replacementText == "src/Changed.kt" })
         }
 

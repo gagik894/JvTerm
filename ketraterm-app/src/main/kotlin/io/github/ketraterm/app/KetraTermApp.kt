@@ -51,7 +51,7 @@ private object KetraTermApp {
         // for the first tab (profile.workingDirectory is null for all built-in
         // profiles, so this only replaces the null default).
         val initialWorkingDirectory =
-            settings.startDirectory
+            settings.config.startDirectory
                 .takeIf { it.isNotBlank() }
                 ?.let { runCatching { Path.of(it) }.getOrNull() }
         val initialProfile =
@@ -65,7 +65,7 @@ private object KetraTermApp {
                 }
             } else {
                 profileRegistry.configuredProfile(
-                    shellPath = settings.shellPath,
+                    shellPath = settings.config.shellPath,
                     workingDirectory = initialWorkingDirectory,
                 )
             }

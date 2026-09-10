@@ -195,6 +195,10 @@ data class TerminalCompletionValueDomain(
         @JvmField
         val GIT_BRANCH: TerminalCompletionValueDomain = TerminalCompletionValueDomain("git.branch")
 
+        /** Git commit object identifier. */
+        @JvmField
+        val GIT_COMMIT: TerminalCompletionValueDomain = TerminalCompletionValueDomain("git.commit")
+
         /** Docker CLI context name. */
         @JvmField
         val DOCKER_CONTEXT: TerminalCompletionValueDomain = TerminalCompletionValueDomain("docker.context")

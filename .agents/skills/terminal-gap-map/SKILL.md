@@ -1,39 +1,25 @@
 ---
 name: terminal-gap-map
-description: Terminal feature and gap-map maintenance guidance. Use when documenting missing parser/core/host/input/policy/host support, closing TODOs, classifying modern terminal features, or deciding whether a protocol belongs in scope.
+description: Use when the task explicitly classifies, adds, closes, or rewrites entries in the terminal feature map or feature gap map. Do not invoke for ordinary implementation work whose scope status is unchanged.
 ---
 
-# Terminal Gap Map
+# Terminal Feature and Gap Maps
 
-Use this skill when updating `docs/terminal-feature-map.md` or `docs/terminal-feature-gap-map.md`, or deciding how
-to classify terminal support.
+The only capability-status sources are
+`docs/terminal-feature-map.md` and
+`docs/terminal-feature-gap-map.md`. Read the relevant sections before editing.
+Never reproduce their inventories or ownership taxonomy in skills or
+`AGENTS.md` files.
 
-## Rules
+## Maintenance rules
 
-- Keep gaps explicit. Missing support should be documented, not hidden behind
-  silent no-ops.
-- Mark ownership with `TODO(parser)`, `TODO(core)`, `TODO(host)`,
-  `TODO(input)`, `TODO(host)`, or `TODO(policy)`.
-- Move items to `DONE(...)` only when the claimed scope has implementation and
+- Use the exact ownership marker already defined by the gap map.
+- Keep one authoritative entry per capability; consolidate overlaps.
+- Mark work done only when the claimed slice has implementation and meaningful
   tests.
-- Keep non-goals visible so future agents do not build obsolete or risky legacy
-  surface by accident.
-
-## Target
-
-The target is a modern, secure, state-of-the-art terminal pipeline, not literal
-full xterm.
-
-Prioritize:
-
-- UTF-8, graphemes, and core-owned width.
-- CSI cursor/edit/erase/scroll/modes.
-- SGR 16/256/RGB and common attributes.
-- OSC title and hyperlinks.
-- bracketed paste and SGR mouse.
-- alternate screen.
-- terminal input encoding.
-- generated Unicode tables.
-
-Policy-gate risky response/host-affecting features such as OSC 52 clipboard,
-DCS query responses, window manipulation, and desktop notifications.
+- Describe partial support precisely rather than promoting the whole feature.
+- Keep policy-gated and intentional non-goals explicit.
+- When status moves, update the feature and gap maps together so they cannot
+  contradict each other.
+- Do not add speculative backlog items without a concrete product or
+  compatibility rationale.

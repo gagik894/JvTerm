@@ -17,12 +17,16 @@ package io.github.ketraterm.intellij.services
 
 import io.github.ketraterm.completion.api.*
 import io.github.ketraterm.completion.host.TerminalDirectoryScanner
+import io.github.ketraterm.completion.model.TerminalCommandSpec
 import io.github.ketraterm.completion.model.TerminalCompletionDomainValue
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
-import io.github.ketraterm.completion.persistence.TerminalCompletionLearningRepository
+import io.github.ketraterm.completion.persistence.TerminalCompletionLearningCoordinator
 import io.github.ketraterm.session.TerminalShellIntegrationCommandLifecycle
 import io.github.ketraterm.session.TerminalShellIntegrationCommandMetadata
+import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedback
+import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedbackKind
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -32,12 +36,37 @@ import java.nio.file.Path
 
 class IntellijCompletionRegistryTest {
     @Test
+    fun `reset removes shared completion learning`() =
+        runBlocking {
+            val learningStore = TerminalCompletionLearningStore()
+            learningStore.recordCommandResult("git status", true, "bash", "file:///repo", 1L)
+            val registry =
+                IntellijCompletionRegistry(
+                    learningStore = learningStore,
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
+
+            registry.resetLearning()
+
+            assertTrue(learningStore.snapshot().rankingStats.isEmpty())
+            assertTrue(learningStore.snapshot().replayCommands.isEmpty())
+            registry.closeAndFlush()
+        }
+
+    @Test
     fun `directory completion suspends until the scanner returns real values`() =
         runBlocking {
             var scans = 0
-            val registry = IntellijCompletionRegistry(coroutineScope = this)
-            val session =
-                registry.openSession(
+            val registry =
+                IntellijCompletionRegistry(
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
+            val resources =
+                registry.createResources(
                     context(
                         scanner =
                             TerminalDirectoryScanner { _, _ ->
@@ -47,12 +76,11 @@ class IntellijCompletionRegistryTest {
                     ),
                 )
 
-            val suggestions = session.provider.suggestions(request("cd s")).last()
+            val suggestions = resources.provider.suggestions(request("cd s")).last()
 
             assertEquals(1, scans)
             assertEquals("src/", suggestions.first { it.source == "path" }.replacementText)
-            session.close()
-            registry.close()
+            registry.closeAndFlush()
         }
 
     @Test
@@ -63,29 +91,38 @@ class IntellijCompletionRegistryTest {
                 TerminalCompletionSources.valueDomain(
                     sourceId = "test-branch",
                     domain = TerminalCompletionValueDomain.GIT_BRANCH,
-                    valuesProvider = {
+                    valuesProvider = { _, _ ->
                         loads++
                         listOf(TerminalCompletionDomainValue("main"))
                     },
                 )
-            val registry = IntellijCompletionRegistry(coroutineScope = this)
-            val session = registry.openSession(context(additionalSources = listOf(TerminalCompletionSourceEntry(source, 20))))
+            val registry =
+                IntellijCompletionRegistry(
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
+            val resources =
+                registry.createResources(context(additionalSources = listOf(TerminalCompletionSourceEntry(source, 20))))
 
-            session.provider.suggestions(request("git switch m")).last()
+            resources.provider.suggestions(request("git switch m")).last()
 
             assertEquals(1, loads)
-            session.close()
-            registry.close()
+            registry.closeAndFlush()
         }
 
     @Test
-    fun `successful commands feed session mru`() =
+    fun `successful commands feed shared learning`() =
         runBlocking {
-            val registry = IntellijCompletionRegistry(coroutineScope = this)
-            val first = registry.openSession(context(sessionId = "first"))
-            val second = registry.openSession(context(sessionId = "second"))
+            val registry =
+                IntellijCompletionRegistry(
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
+            val first = registry.createResources(context())
+            val second = registry.createResources(context())
             registry.recordFinishedCommand(
-                "first",
                 "bash",
                 TerminalShellIntegrationCommandMetadata(
                     recordId = 1,
@@ -102,55 +139,80 @@ class IntellijCompletionRegistryTest {
                 first.provider
                     .suggestions(request("git s"))
                     .last()
-                    .any { it.source == "mru" },
+                    .any { it.source == "learned" },
             )
-            first.close()
-            second.close()
-            registry.close()
+            assertTrue(
+                second.provider
+                    .suggestions(request("git s"))
+                    .last()
+                    .any { it.source == "learned" },
+            )
+            registry.closeAndFlush()
         }
 
     @Test
-    fun `closing a replaced session cannot remove its replacement`() =
+    fun `suggestion feedback keeps the working directory captured by its request`() =
         runBlocking {
-            val registry = IntellijCompletionRegistry(specs = emptyList(), coroutineScope = this)
-            val previous = registry.openSession(context(sessionId = "session"))
-            val replacement = registry.openSession(context(sessionId = "session"))
+            val learningStore = TerminalCompletionLearningStore()
+            val registry =
+                IntellijCompletionRegistry(
+                    specs =
+                        listOf(
+                            TerminalCommandSpec(
+                                name = "git",
+                                subcommands = listOf(TerminalCommandSpec("status")),
+                            ),
+                        ),
+                    learningStore = learningStore,
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
+            var workingDirectoryUri = "file:///repo-a"
+            val resources =
+                registry.createResources(
+                    context(workingDirectoryUriProvider = { workingDirectoryUri }),
+                )
+            val request = request("git s")
+            val suggestion =
+                resources.provider
+                    .suggestions(request)
+                    .last()
+                    .first { it.replacementText == "status" }
 
-            previous.close()
-            registry.recordFinishedCommand(
-                "session",
-                "bash",
-                TerminalShellIntegrationCommandMetadata(
-                    recordId = 1,
-                    commandText = "git status",
-                    lifecycle = TerminalShellIntegrationCommandLifecycle.SUCCEEDED,
-                    workingDirectoryUri = "file:///repo",
-                    exitCode = 0,
-                    startedAtEpochMillis = 1L,
-                    finishedAtEpochMillis = 2L,
+            workingDirectoryUri = "file:///repo-b"
+            resources.feedbackHandler.onSuggestionFeedback(
+                SwingShellSuggestionFeedback(
+                    kind = SwingShellSuggestionFeedbackKind.ACCEPTED,
+                    suggestion = suggestion,
+                    index = 0,
+                    request = request,
                 ),
             )
 
-            assertEquals(
-                listOf("git status"),
-                replacement.provider
-                    .suggestions(request("git"))
-                    .last()
-                    .map { it.replacementText },
-            )
-            replacement.close()
-            registry.close()
+            val snapshot = learningStore.snapshot()
+            assertTrue(snapshot.replayCommands.isEmpty())
+            val ranking = snapshot.rankingStats.single()
+            assertEquals("bash", ranking.profileId)
+            assertEquals("file:///repo-a/", ranking.workingDirectoryUri)
+            assertEquals(1, ranking.acceptedCount)
+            registry.closeAndFlush()
         }
 
     @Test
     fun `closed registry rejects new sessions`(): Unit =
         runBlocking {
-            val registry = IntellijCompletionRegistry(coroutineScope = this)
+            val registry =
+                IntellijCompletionRegistry(
+                    persistencePath = memoryOnlyPath(),
+                    persistenceEnabled = false,
+                    coroutineScope = this,
+                )
 
-            registry.close()
-            registry.close()
+            registry.closeAndFlush()
+            registry.closeAndFlush()
 
-            assertThrows(IllegalStateException::class.java) { registry.openSession(context()) }
+            assertThrows(IllegalStateException::class.java) { registry.createResources(context()) }
         }
 
     @Test
@@ -159,17 +221,17 @@ class IntellijCompletionRegistryTest {
             val path =
                 Files
                     .createTempDirectory("intellij-completion-registry")
-                    .resolve(TerminalCompletionLearningRepository.currentFileName())
+                    .resolve(TerminalCompletionLearningCoordinator.currentFileName())
             val learningStore = TerminalCompletionLearningStore()
             val registry =
                 IntellijCompletionRegistry(
-                    statsSource = learningStore,
-                    learningRepository = TerminalCompletionLearningRepository(learningStore, path),
+                    learningStore = learningStore,
+                    persistencePath = path,
+                    persistenceEnabled = true,
                     coroutineScope = this,
                 )
 
             registry.recordFinishedCommand(
-                sessionId = "session",
                 profileId = "bash",
                 metadata =
                     TerminalShellIntegrationCommandMetadata(
@@ -185,19 +247,37 @@ class IntellijCompletionRegistryTest {
 
             registry.closeAndFlush()
 
-            val reloaded = TerminalCompletionLearningStore()
-            TerminalCompletionLearningRepository(reloaded, path).initialize()
-            assertEquals(listOf("git status"), reloaded.snapshot().commandStats.map { it.commandLine })
+            assertEquals(listOf("git status"), learningStore.snapshot().replayCommands.map { it.commandLine })
+            assertEquals(listOf("git status"), persistedSnapshot(path).replayCommands.map { it.commandLine })
         }
 
+    private suspend fun persistedSnapshot(path: Path) =
+        coroutineScope {
+            val learning = TerminalCompletionLearningStore()
+            val coordinator =
+                TerminalCompletionLearningCoordinator(
+                    learningStore = learning,
+                    coroutineScope = this,
+                    persistencePath = path,
+                    persistenceEnabled = true,
+                    onPersistenceLoadFailure = {},
+                )
+            coordinator.closeAndFlush()
+            learning.snapshot()
+        }
+
+    private fun memoryOnlyPath(): Path =
+        Files
+            .createTempDirectory("intellij-completion-memory")
+            .resolve(TerminalCompletionLearningCoordinator.currentFileName())
+
     private fun context(
-        sessionId: String = "session",
         additionalSources: List<TerminalCompletionSourceEntry> = emptyList(),
         scanner: TerminalDirectoryScanner = TerminalDirectoryScanner { _: Path, _: String -> emptyList() },
-    ) = IntellijCompletionSessionContext(
-        sessionId = sessionId,
+        workingDirectoryUriProvider: () -> String? = { "file:///repo" },
+    ) = IntellijCompletionContext(
         profileId = "bash",
-        workingDirectoryUriProvider = { "file:///repo" },
+        workingDirectoryUriProvider = workingDirectoryUriProvider,
         shellCapabilities = TerminalShellCapabilities.POSIX,
         additionalSources = additionalSources,
         directoryScanner = scanner,

@@ -1,48 +1,25 @@
 ---
 name: terminal-test-suite
-description: Test design guidance for this terminal emulator. Use when adding, reviewing, hardening, or refactoring tests across parser, core, host, Unicode, ANSI protocols, mode handling, SGR/OSC/DCS, or terminal feature work.
+description: Use when the primary task is designing, reviewing, hardening, or refactoring terminal tests or test infrastructure. Do not invoke merely because an implementation change requires routine accompanying tests.
 ---
 
-# Terminal Test Suite
+# Terminal Test Design
 
-Use this skill when adding or reviewing tests.
+Read the root and owning module guide. This skill supplements their validation
+rules for test-focused work.
 
-## Principle
+## Review rules
 
-Tests must assert real terminal semantics. They must fail when implementation is
-incorrect. Never rewrite tests to document wrong current behavior.
+- Assert public terminal semantics or a named internal invariant.
+- Keep expected events, bytes, cells, and state transitions visible in the test.
+- Use fixtures for setup and recording, not to hide the expectation.
+- Prefer the narrowest deterministic layer that proves the contract.
+- Add a full byte-stream or parser-to-core test only when the behavior crosses
+  that boundary.
+- Replace vague `doesNotThrow` coverage with observable outcomes.
+- Do not preserve a known bug by weakening or restating assertions.
+- Keep hostile, boundary, recovery, and lifecycle cases proportional to the
+  contract under review.
 
-## Structure
-
-- Use nested test classes for large protocol areas.
-- Prefer explicit event assertions over vague `doesNotThrow` coverage.
-- Use fixtures for setup only; keep semantic expectations visible.
-- Add full-path tests for user-observable parser behavior.
-- Use public APIs for core behavior unless testing a narrow internal invariant.
-
-## Coverage Checklist
-
-Cover:
-
-- normal paths.
-- omitted/default parameters.
-- malformed input and recovery.
-- overflow and max-capacity behavior.
-- hostile sequences.
-- boundary values.
-- chunking around structural bytes.
-- state reset and cleanup after flush/abort/end-of-input.
-
-## Useful Layers
-
-- generated table/signature tests.
-- small pure helper tests.
-- FSM matrix tests.
-- action engine tests.
-- command dispatcher recording-sink tests.
-- parser full byte-stream tests.
-- core public API and invariant tests.
-- parser-to-core host tests.
-
-DRY is good only while expectations remain readable. A little repetition is
-better than hiding the behavior under test.
+Refactor repetition only when the resulting tests remain easier to understand
+and failures still identify the broken semantic rule.

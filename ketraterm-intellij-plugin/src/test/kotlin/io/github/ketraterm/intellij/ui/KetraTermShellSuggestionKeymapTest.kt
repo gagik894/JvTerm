@@ -57,7 +57,6 @@ class KetraTermShellSuggestionKeymapTest {
             SwingShellSuggestionAction.SELECT_LAST,
             action(source, KeyEvent.VK_END),
         )
-        assertNull(action(source, KeyEvent.VK_DOWN, InputEvent.CTRL_DOWN_MASK))
     }
 
     @Test

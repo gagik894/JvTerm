@@ -18,6 +18,131 @@ package io.github.ketraterm.ui.swing.suggestion
 import javax.swing.JComponent
 
 /**
+ * Immutable viewport published to one shell-suggestion view.
+ *
+ * The controller retains the complete ranking and sends each renderer only a
+ * bounded window. Absolute viewport metadata lets custom-painted and native
+ * list implementations expose overflow consistently without duplicating
+ * controller state.
+ *
+ * @property visibleSuggestions ordered suggestions in the current viewport.
+ * @property selectedIndex selected index relative to [visibleSuggestions], or
+ * `-1` when the popup is passive or selection is outside this viewport.
+ * @property viewportStartIndex absolute rank of the first visible suggestion.
+ * @property totalSuggestionCount total suggestions retained by the controller.
+ */
+class SwingShellSuggestionViewSnapshot private constructor(
+    visibleSuggestions: List<SwingShellSuggestion>,
+    val selectedIndex: Int,
+    val viewportStartIndex: Int,
+    val totalSuggestionCount: Int,
+) {
+    /** Defensively copied visible suggestion window. */
+    val visibleSuggestions: List<SwingShellSuggestion> = visibleSuggestions.toList()
+
+    /** Whether ranked suggestions precede this viewport. */
+    val hasSuggestionsBefore: Boolean
+        get() = viewportStartIndex > 0
+
+    /** Whether ranked suggestions follow this viewport. */
+    val hasSuggestionsAfter: Boolean
+        get() = viewportStartIndex + visibleSuggestions.size < totalSuggestionCount
+
+    /** Absolute rank of the selected suggestion, or `-1` when none is selected. */
+    val absoluteSelectedIndex: Int
+        get() = if (selectedIndex < 0) -1 else viewportStartIndex + selectedIndex
+
+    /** Selected visible suggestion, or `null` when the viewport is passive. */
+    val selectedSuggestion: SwingShellSuggestion?
+        get() = visibleSuggestions.getOrNull(selectedIndex)
+
+    init {
+        require(this.visibleSuggestions.size <= MAX_VISIBLE_SUGGESTIONS) {
+            "visibleSuggestions must contain at most $MAX_VISIBLE_SUGGESTIONS items, was ${this.visibleSuggestions.size}"
+        }
+        require(selectedIndex == NO_SELECTION || selectedIndex in this.visibleSuggestions.indices) {
+            "selectedIndex must be -1 or address visibleSuggestions, was $selectedIndex"
+        }
+        require(viewportStartIndex >= 0) { "viewportStartIndex must be >= 0, was $viewportStartIndex" }
+        require(totalSuggestionCount >= 0) {
+            "totalSuggestionCount must be >= 0, was $totalSuggestionCount"
+        }
+        require(viewportStartIndex + this.visibleSuggestions.size <= totalSuggestionCount) {
+            "visible viewport [$viewportStartIndex, ${viewportStartIndex + this.visibleSuggestions.size}) " +
+                "exceeds totalSuggestionCount $totalSuggestionCount"
+        }
+        if (this.visibleSuggestions.isEmpty()) {
+            require(viewportStartIndex == 0 && totalSuggestionCount == 0) {
+                "an empty viewport must use zero start and total counts"
+            }
+        }
+    }
+
+    override fun equals(other: Any?): Boolean =
+        this === other ||
+            other is SwingShellSuggestionViewSnapshot &&
+            visibleSuggestions == other.visibleSuggestions &&
+            selectedIndex == other.selectedIndex &&
+            viewportStartIndex == other.viewportStartIndex &&
+            totalSuggestionCount == other.totalSuggestionCount
+
+    override fun hashCode(): Int {
+        var result = visibleSuggestions.hashCode()
+        result = 31 * result + selectedIndex
+        result = 31 * result + viewportStartIndex
+        result = 31 * result + totalSuggestionCount
+        return result
+    }
+
+    override fun toString(): String =
+        "SwingShellSuggestionViewSnapshot(" +
+            "visibleSuggestions=$visibleSuggestions, " +
+            "selectedIndex=$selectedIndex, " +
+            "viewportStartIndex=$viewportStartIndex, " +
+            "totalSuggestionCount=$totalSuggestionCount)"
+
+    companion object {
+        /** Maximum number of completion rows rendered at once by any host view. */
+        const val MAX_VISIBLE_SUGGESTIONS: Int = 8
+
+        /** Shared empty hidden-view snapshot. */
+        @JvmField
+        val EMPTY: SwingShellSuggestionViewSnapshot =
+            SwingShellSuggestionViewSnapshot(
+                visibleSuggestions = emptyList(),
+                selectedIndex = NO_SELECTION,
+                viewportStartIndex = 0,
+                totalSuggestionCount = 0,
+            )
+
+        /**
+         * Creates a validated immutable suggestion viewport.
+         *
+         * @param visibleSuggestions bounded ordered suggestion window.
+         * @param selectedIndex selected local index, or `-1`.
+         * @param viewportStartIndex absolute rank of the first visible item.
+         * @param totalSuggestionCount total retained ranked suggestions.
+         * @return a defensive immutable viewport snapshot.
+         */
+        @JvmStatic
+        fun create(
+            visibleSuggestions: List<SwingShellSuggestion>,
+            selectedIndex: Int,
+            viewportStartIndex: Int,
+            totalSuggestionCount: Int,
+        ): SwingShellSuggestionViewSnapshot =
+            SwingShellSuggestionViewSnapshot(
+                visibleSuggestions = visibleSuggestions,
+                selectedIndex = selectedIndex,
+                viewportStartIndex = viewportStartIndex,
+                totalSuggestionCount = totalSuggestionCount,
+            )
+
+        private const val NO_SELECTION = -1
+    }
+}
+
+/**
  * Host-pluggable visual surface for shell suggestions.
  *
  * The reusable suggestion controller owns navigation, acceptance, dismissal,
@@ -33,15 +158,16 @@ interface SwingShellSuggestionView {
     val component: JComponent
 
     /**
-     * Replaces the visual suggestion snapshot and selection.
+     * Replaces the complete immutable visual viewport on the Swing Event
+     * Dispatch Thread.
      *
-     * @param suggestions ordered, bounded suggestions to display.
-     * @param selectedIndex selected item index, or `-1` for no selection.
+     * Implementations may retain [snapshot] because it owns a defensive copy
+     * of its visible suggestions. They must not reinterpret provider ids or
+     * candidate kinds; all renderer semantics are already resolved.
+     *
+     * @param snapshot authoritative bounded presentation state.
      */
-    fun update(
-        suggestions: List<SwingShellSuggestion>,
-        selectedIndex: Int,
-    )
+    fun update(snapshot: SwingShellSuggestionViewSnapshot)
 
     /**
      * Releases host-specific presentation resources.
@@ -72,6 +198,14 @@ interface SwingShellSuggestionViewListener {
      * @param index zero-based index in the current visual snapshot.
      */
     fun onSuggestionClicked(index: Int)
+
+    /**
+     * Requests relative keyboard-style navigation after a pointer-wheel gesture.
+     *
+     * @param delta negative for earlier suggestions and positive for later
+     * suggestions. A zero delta is ignored.
+     */
+    fun onSuggestionScrollRequested(delta: Int) = Unit
 }
 
 /**
@@ -95,6 +229,6 @@ fun interface SwingShellSuggestionViewFactory {
          */
         @JvmField
         val DEFAULT: SwingShellSuggestionViewFactory =
-            SwingShellSuggestionViewFactory { listener -> SwingShellSuggestionPopup(listener) }
+            SwingShellSuggestionViewFactory { listener -> SwingCompletionPopupView(listener) }
     }
 }

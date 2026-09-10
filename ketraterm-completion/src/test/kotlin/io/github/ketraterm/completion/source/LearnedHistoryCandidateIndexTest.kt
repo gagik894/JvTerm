@@ -17,8 +17,11 @@ package io.github.ketraterm.completion.source
 
 import io.github.ketraterm.completion.api.TerminalShellSyntax
 import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
+import io.github.ketraterm.completion.internal.CompletionLearningContextKey
+import io.github.ketraterm.completion.internal.CompletionLearningIndexCache
+import io.github.ketraterm.completion.testing.TestCommandLearning
+import io.github.ketraterm.completion.testing.commandLearning
+import io.github.ketraterm.completion.testing.learningSnapshot
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -28,24 +31,61 @@ class LearnedHistoryCandidateIndexTest {
     fun `lookup selects prior-token context and active prefix without scanning unrelated commands`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
                             positive("git switch main"),
                             positive("git switch maintenance"),
                             positive("git checkout main"),
                             positive("gradle assemble"),
-                            TerminalCommandCompletionStats(commandLine = "git switch malformed"),
+                            commandLearning(commandLine = "git switch malformed"),
                         ),
                 )
-            val index = LearnedHistoryCandidateIndex.build(snapshot, TerminalShellSyntax.POSIX)
+            val index = CompletionLearningIndexCache().indexesFor(snapshot, TerminalShellSyntax.POSIX).history
             val requestLine = TerminalCommandLineTokenizer.parse("git switch ma", "git switch ma".length, TerminalShellSyntax.POSIX)
 
-            val matches = index.matching(requestLine)
+            val matches = index.matching(requestLine, CompletionLearningContextKey.of(null, null))
 
-            assertEquals(listOf("git switch main", "git switch maintenance"), matches.map { it.stats.commandLine })
+            assertEquals(listOf("git switch main", "git switch maintenance"), matches.map { it.replay.commandLine })
         }
 
-    private fun positive(commandLine: String): TerminalCommandCompletionStats =
-        TerminalCommandCompletionStats(commandLine = commandLine, successCount = 1)
+    @Test
+    fun `lookup partitions every command by exact canonical learning context`() {
+        val snapshot =
+            learningSnapshot(
+                rows =
+                    listOf(
+                        positive("tool scoped", profileId = "bash", workingDirectoryUri = "file:///repo"),
+                        positive("tool unknown"),
+                    ),
+            )
+        val index = CompletionLearningIndexCache().indexesFor(snapshot, TerminalShellSyntax.POSIX).history
+        val requestLine = TerminalCommandLineTokenizer.parse("tool ", "tool ".length, TerminalShellSyntax.POSIX)
+
+        fun matches(
+            profileId: String?,
+            workingDirectoryUri: String?,
+        ): List<String> =
+            index
+                .matching(requestLine, CompletionLearningContextKey.of(profileId, workingDirectoryUri))
+                .map { it.replay.commandLine }
+
+        assertEquals(listOf("tool scoped"), matches("bash", "file:///repo/"))
+        assertEquals(emptyList(), matches("pwsh", "file:///repo"))
+        assertEquals(emptyList(), matches("bash", "file:///other"))
+        assertEquals(emptyList(), matches("bash", null))
+        assertEquals(listOf("tool unknown"), matches(null, null))
+    }
+
+    private fun positive(
+        commandLine: String,
+        profileId: String? = null,
+        workingDirectoryUri: String? = null,
+    ): TestCommandLearning =
+        commandLearning(
+            commandLine = commandLine,
+            profileId = profileId,
+            workingDirectoryUri = workingDirectoryUri,
+            successCount = 1,
+        )
 }

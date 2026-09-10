@@ -114,7 +114,7 @@ internal class IntellijGradleTaskLoader(
      * Loads the imported Gradle tasks visible to a terminal working directory.
      *
      * @param workingDirectoryUri local `file` URI used to relativize `-p` project directories.
-     * @return at most 4,096 deterministic task entries, or an empty list when the
+     * @return a visit-bounded deterministic task snapshot, or an empty list when the
      * project is disposed, the directory is unavailable, or no Gradle model is imported.
      */
     suspend fun load(workingDirectoryUri: String?): List<TerminalGradleTask> {
@@ -122,7 +122,7 @@ internal class IntellijGradleTaskLoader(
         cancellationContext.ensureActive()
         val workingDirectory = TerminalLocalFileUriResolver.resolve(workingDirectoryUri) ?: return emptyList()
         return readPort.read { modelRoots ->
-            val retained = BoundedSnapshotCollector(MAX_RETAINED_TASKS, TASK_ORDER)
+            val retained = ArrayList<TerminalGradleTask>(INITIAL_TASK_CAPACITY)
             var visitedTasks = 0
             val checkpoint = {
                 cancellationContext.ensureActive()
@@ -140,11 +140,12 @@ internal class IntellijGradleTaskLoader(
                     visitedTasks++
                     val moduleId = pendingNode.moduleId
                     val entry = if (moduleId == null) null else task.toCompletionTask(workingDirectory, moduleId)
-                    if (entry != null) retained.add(entry)
+                    if (entry != null) retained += entry
                 }
                 visitedTasks < MAX_VISITED_TASKS
             }
-            retained.toSortedList()
+            retained.sortWith(TASK_ORDER)
+            retained
         }
     }
 
@@ -175,7 +176,7 @@ internal class IntellijGradleTaskLoader(
     private companion object {
         private const val MAX_VISITED_MODEL_NODES = 16_384
         private const val MAX_VISITED_TASKS = 8_192
-        private const val MAX_RETAINED_TASKS = 4_096
+        private const val INITIAL_TASK_CAPACITY = 256
         private val TASK_ORDER =
             compareBy<TerminalGradleTask, String>(String.CASE_INSENSITIVE_ORDER) { it.path }
                 .thenBy { it.path }
@@ -225,5 +226,5 @@ internal object IntellijGradleTaskPath {
 internal fun intellijGradleTaskCompletionSource(loader: suspend (String?) -> List<TerminalGradleTask>) =
     TerminalCompletionSources.gradleTask(
         sourceId = "intellij-gradle-task",
-        tasksProvider = { request -> loader(request.workingDirectoryUri) },
+        tasksProvider = { request, _ -> loader(request.workingDirectoryUri) },
     )

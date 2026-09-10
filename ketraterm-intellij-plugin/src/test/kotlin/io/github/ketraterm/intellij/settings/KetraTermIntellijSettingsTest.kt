@@ -15,6 +15,7 @@
  */
 package io.github.ketraterm.intellij.settings
 
+import com.intellij.openapi.progress.ProcessCanceledException
 import io.github.ketraterm.host.TerminalClipboardOrigin
 import io.github.ketraterm.host.TerminalClipboardPermission
 import io.github.ketraterm.host.TerminalTitleOrigin
@@ -25,11 +26,104 @@ import io.github.ketraterm.workspace.config.TerminalConfig
 import org.junit.Assert.*
 import org.junit.Test
 import java.awt.Insets
+import java.util.concurrent.CancellationException
 
 /**
  * Tests IntelliJ settings persistence mapping without opening an IDE window.
  */
 class KetraTermIntellijSettingsTest {
+    @Test
+    fun `platform load and UI updates publish normalized state before notifying listeners`() {
+        val service = KetraTermIntellijSettings()
+        val observed = mutableListOf<KetraTermIntellijSettings.State>()
+        service.addChangeListener { observed += service.state }
+        val loaded = service.state.copy(themeId = " NORD ", fontSize = Int.MAX_VALUE, smartSuggestionsEnabled = true)
+
+        service.loadState(loaded)
+        assertEquals(1, observed.size)
+        assertEquals("nord", observed.single().themeId)
+        assertEquals(TerminalConfig.FONT_SIZE_MAX, observed.single().fontSize)
+        assertTrue(observed.single().smartSuggestionsEnabled)
+        assertEquals(0L, service.stateModificationCount)
+
+        service.replaceState(service.state.copy(smartSuggestionsEnabled = false))
+        assertEquals(2, observed.size)
+        assertFalse(observed.last().smartSuggestionsEnabled)
+        assertEquals(1L, service.stateModificationCount)
+    }
+
+    @Test
+    fun `equivalent loaded and applied states do not notify or mark settings modified`() {
+        val service = KetraTermIntellijSettings()
+        service.loadState(service.state.copy(themeId = "nord"))
+        var changes = 0
+        service.addChangeListener { changes++ }
+
+        service.loadState(service.state.copy(themeId = " NORD "))
+        service.replaceState(service.state.copy(themeId = "NORD"))
+
+        assertEquals(0, changes)
+        assertEquals(0L, service.stateModificationCount)
+    }
+
+    @Test
+    fun `listener failure does not prevent later consumers from observing committed state`() {
+        val service = KetraTermIntellijSettings()
+        val firstFailure = IllegalStateException("pane refresh failed")
+        val secondFailure = IllegalArgumentException("policy refresh failed")
+        var observed = false
+        service.addChangeListener { throw firstFailure }
+        service.addChangeListener { throw firstFailure }
+        service.addChangeListener { throw secondFailure }
+        service.addChangeListener { observed = service.state.smartSuggestionsEnabled }
+
+        val actual =
+            assertThrows(IllegalStateException::class.java) {
+                service.loadState(service.state.copy(smartSuggestionsEnabled = true))
+            }
+
+        assertSame(firstFailure, actual)
+        assertEquals(listOf(secondFailure), actual.suppressed.toList())
+        assertTrue(observed)
+        assertTrue(service.state.smartSuggestionsEnabled)
+    }
+
+    @Test
+    fun `listener cancellation remains visible after other consumers are notified`() {
+        for (cancellation in listOf(CancellationException("settings caller cancelled"), ProcessCanceledException())) {
+            val service = KetraTermIntellijSettings()
+            val failure = IllegalStateException("pane refresh failed")
+            var observed = false
+            service.addChangeListener { throw failure }
+            service.addChangeListener { throw cancellation }
+            service.addChangeListener { throw cancellation }
+            service.addChangeListener { observed = service.state.smartSuggestionsEnabled }
+
+            val actual =
+                assertThrows(CancellationException::class.java) {
+                    service.replaceState(service.state.copy(smartSuggestionsEnabled = true))
+                }
+
+            assertSame(cancellation, actual)
+            assertEquals(listOf(failure), actual.suppressed.toList())
+            assertTrue(observed)
+        }
+    }
+
+    @Test
+    fun `smart suggestions default off and map independently from automatic popup`() {
+        val defaults = KetraTermIntellijSettings.State(themeId = "nord")
+        assertFalse(defaults.smartSuggestionsEnabled)
+        assertTrue(defaults.shellSuggestionsEnabled)
+        val mapped =
+            KetraTermIntellijSettingsMapper.toSwingSettings(
+                defaults.copy(smartSuggestionsEnabled = true, shellSuggestionsEnabled = false),
+            )
+        assertTrue(mapped.smartSuggestionsEnabled)
+        assertFalse(mapped.shellSuggestionsEnabled)
+        assertFalse(KetraTermIntellijSettingsMapper.toSwingSettings(defaults).smartSuggestionsEnabled)
+    }
+
     @Test
     fun `default theme id follows IntelliJ`() {
         val state = KetraTermIntellijSettings.State()
@@ -152,18 +246,19 @@ class KetraTermIntellijSettingsTest {
 
     @Test
     fun `clamps hostile persisted dimensions before creating Swing settings`() {
-        val settings =
-            KetraTermIntellijSettingsMapper.toSwingSettings(
-                KetraTermIntellijSettings.State(
-                    themeId = "nord",
-                    columns = Int.MAX_VALUE,
-                    rows = Int.MIN_VALUE,
-                    fontSize = Int.MAX_VALUE,
-                    cursorBlinkMillis = -1,
-                    scrollbackLines = Int.MAX_VALUE,
-                    lineHeight = Float.NaN,
-                ),
-            )
+        val service = KetraTermIntellijSettings()
+        service.loadState(
+            KetraTermIntellijSettings.State(
+                themeId = "nord",
+                columns = Int.MAX_VALUE,
+                rows = Int.MIN_VALUE,
+                fontSize = Int.MAX_VALUE,
+                cursorBlinkMillis = -1,
+                scrollbackLines = Int.MAX_VALUE,
+                lineHeight = Float.NaN,
+            ),
+        )
+        val settings = service.current()
 
         assertEquals(TerminalConfig.COLUMNS_MAX, settings.columns)
         assertEquals(TerminalConfig.ROWS_MIN, settings.rows)
@@ -257,14 +352,13 @@ class KetraTermIntellijSettingsTest {
                 " JVM_OPTS =-Xmx1g\nNO_EQUALS\n=missing\nEMPTY=\nPATH=C:\\Tools=StillValue",
             )
 
-        assertEquals(
+        val expected =
             mapOf(
                 "JVM_OPTS" to "-Xmx1g",
                 "EMPTY" to "",
                 "PATH" to "C:\\Tools=StillValue",
-            ),
-            environment,
-        )
+            )
+        assertEquals(expected, environment)
     }
 
     @Test

@@ -18,6 +18,8 @@ package io.github.ketraterm.intellij.services
 import com.intellij.openapi.application.readAction
 import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.guessProjectDir
+import com.intellij.openapi.vfs.VirtualFileManager
 import git4idea.repo.GitRepository
 import git4idea.repo.GitRepositoryManager
 import io.github.ketraterm.completion.host.TerminalLocalFileUriResolver
@@ -25,22 +27,11 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import java.nio.file.Path
 
-/** Selects the deepest Git repository containing a terminal working directory. */
-internal fun selectIntellijGitRepository(
-    repositories: List<GitRepository>,
-    workingDirectory: Path,
-): GitRepository? =
-    repositories
-        .asSequence()
-        .take(MAX_VISITED_REPOSITORIES)
-        .filter { repository -> workingDirectory.startsWith(repository.root.toNioPath()) }
-        .maxByOrNull { repository -> repository.root.path.length }
-
 /**
- * Resolves one local terminal directory and reads its deepest containing Git repository.
+ * Resolves one local terminal directory and reads its containing Git repository.
  *
- * URI validation, project disposal, read-action ownership, and nested-repository
- * selection are centralized here so every Git completion loader follows the same policy.
+ * Uses IntelliJ's [GitRepositoryManager.getRepositoryForFileQuick] to resolve the active
+ * repository (including submodules, worktrees, and nested roots) under a read action.
  */
 internal suspend fun <T> readIntellijGitRepository(
     project: Project,
@@ -52,17 +43,16 @@ internal suspend fun <T> readIntellijGitRepository(
     if (project.isDisposed) return null
     val workingDirectory =
         TerminalLocalFileUriResolver.resolve(workingDirectoryUri)
-            ?: project.basePath?.let { runCatching { Path.of(it) }.getOrNull() }
+            ?: project.guessProjectDir()?.toNioPath()
             ?: return null
     return readAction {
         cancellationContext.ensureActive()
         ProgressManager.checkCanceled()
         if (project.isDisposed) return@readAction null
+        val vFile = VirtualFileManager.getInstance().findFileByNioPath(workingDirectory) ?: return@readAction null
         val repository =
-            selectIntellijGitRepository(GitRepositoryManager.getInstance(project).repositories, workingDirectory)
+            GitRepositoryManager.getInstance(project).getRepositoryForFileQuick(vFile)
                 ?: return@readAction null
         reader(repository, workingDirectory)
     }
 }
-
-private const val MAX_VISITED_REPOSITORIES = 1_024

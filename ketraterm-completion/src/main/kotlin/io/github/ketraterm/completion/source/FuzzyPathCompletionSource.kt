@@ -29,7 +29,8 @@ import io.github.ketraterm.completion.internal.BoundedCompletionCandidateCollect
  */
 internal class FuzzyPathCompletionSource(
     private val sourceId: String,
-    private val entriesProvider: TerminalFuzzyPathProvider,
+    private val entriesProvider:
+        suspend (TerminalCompletionRequest, TerminalCompletionContext) -> List<TerminalFuzzyPathEntry>,
     private val requiresNonEmptyPrefix: Boolean,
     private val allowedCommandNames: Set<String>,
 ) : TerminalCompletionSource {
@@ -38,6 +39,7 @@ internal class FuzzyPathCompletionSource(
         context: TerminalCompletionContext,
         limit: Int,
     ): List<TerminalCompletionCandidate> {
+        require(limit > 0) { "limit must be > 0, was $limit" }
         if (allowedCommandNames.isNotEmpty() && context.currentCommand?.name !in allowedCommandNames) {
             return emptyList()
         }
@@ -51,11 +53,11 @@ internal class FuzzyPathCompletionSource(
         val pathSeparator = if (prefix.contains('\\')) '\\' else '/'
         val candidates = BoundedCompletionCandidateCollector(limit)
         var orderIndex = 0
-        for (entry in entriesProvider.entries(request, prefix)) {
-            if (!context.expectedPathKind.acceptsPathEntry(entry.isDirectory)) continue
-            if (!context.expectedHiddenPathPolicy.acceptsPath(entry.path, prefix)) continue
-            val rawPath = if (pathSeparator == '\\') entry.path.replace('/', '\\') else entry.path
-            val rawReplacement = if (entry.isDirectory) rawPath + pathSeparator else rawPath
+        for ((path, isDirectory, detail) in entriesProvider(request, context)) {
+            if (!context.expectedPathKind.acceptsPathEntry(isDirectory)) continue
+            if (!context.expectedHiddenPathPolicy.acceptsPath(path, prefix)) continue
+            val rawPath = if (pathSeparator == '\\') path.replace('/', '\\') else path
+            val rawReplacement = if (isDirectory) rawPath + pathSeparator else rawPath
             if (!ShellReplacementText.canEncode(rawReplacement, context.activeTokenQuote, request.shellCapabilities.quoting)) {
                 continue
             }
@@ -72,8 +74,8 @@ internal class FuzzyPathCompletionSource(
                     replacementText = replacementText,
                     replacementStartOffset = context.replacementStartOffset,
                     replacementEndOffset = context.replacementEndOffset,
-                    displayText = entry.path + if (entry.isDirectory) "/" else "",
-                    detail = entry.detail ?: if (entry.isDirectory) "project directory" else "project file",
+                    displayText = path + if (isDirectory) "/" else "",
+                    detail = detail ?: if (isDirectory) "project directory" else "project file",
                     source = sourceId,
                     kind = TerminalCompletionCandidateKind.PATH,
                     score = candidateScore,
@@ -85,63 +87,5 @@ internal class FuzzyPathCompletionSource(
 
     private companion object {
         private const val FUZZY_PATH_BASE_SCORE = 200
-    }
-}
-
-/** Matches one bounded path result for hosts without a queryable index. */
-internal class BoundedFuzzyPathProvider(
-    private val entriesProvider: suspend (TerminalCompletionRequest) -> List<TerminalFuzzyPathEntry>,
-) : TerminalFuzzyPathProvider {
-    override suspend fun entries(
-        request: TerminalCompletionRequest,
-        prefix: String,
-    ): List<TerminalFuzzyPathEntry> =
-        entriesProvider(request)
-            .mapNotNull { entry -> fuzzyScore(entry.path, prefix)?.let { score -> ScoredEntry(entry, score) } }
-            .sortedWith(ENTRY_ORDER)
-            .map(ScoredEntry::entry)
-
-    private fun fuzzyScore(
-        path: String,
-        prefix: String,
-    ): Int? {
-        val fileNameStart = path.lastIndexOf('/') + 1
-        return when {
-            path.regionMatches(fileNameStart, prefix, 0, prefix.length, ignoreCase = true) -> 4_000 - path.length
-            path.startsWith(prefix, ignoreCase = true) -> 3_000 - path.length
-            else -> subsequenceScore(path, prefix, fileNameStart)?.plus(2_000) ?: subsequenceScore(path, prefix)
-        }
-    }
-
-    private fun subsequenceScore(
-        value: String,
-        query: String,
-        startIndex: Int = 0,
-    ): Int? {
-        var valueIndex = startIndex
-        var queryIndex = 0
-        var gaps = 0
-        var previousMatch = startIndex - 1
-        while (valueIndex < value.length && queryIndex < query.length) {
-            if (value[valueIndex].equals(query[queryIndex], ignoreCase = true)) {
-                gaps += valueIndex - previousMatch - 1
-                previousMatch = valueIndex
-                queryIndex++
-            }
-            valueIndex++
-        }
-        return if (queryIndex == query.length) 1_000 - gaps * 3 - value.length else null
-    }
-
-    private data class ScoredEntry(
-        val entry: TerminalFuzzyPathEntry,
-        val score: Int,
-    )
-
-    private companion object {
-        private val ENTRY_ORDER =
-            compareByDescending<ScoredEntry> { it.score }
-                .thenBy(String.CASE_INSENSITIVE_ORDER) { it.entry.path }
-                .thenBy { it.entry.path }
     }
 }

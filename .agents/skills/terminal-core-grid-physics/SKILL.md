@@ -1,46 +1,38 @@
 ---
-name: ketraterm-core-grid-physics
-description: Core terminal grid/state guidance for this repository. Use when changing ketraterm-core grid mutation, cursor movement, scrollback, resize/reflow, clusters, tab stops, margins, modes, width policy, pen attributes, or TerminalBuffer behavior.
+name: terminal-core-grid-physics
+description: Use for core grid-mutation physics involving wide or clustered cells, wrapping, scrolling, resize/reflow, margins, tab stops, or width policy. Do not invoke for unrelated core APIs.
 ---
 
 # Terminal Core Grid Physics
 
-Use this skill when touching `ketraterm-core`.
-
-## Boundary
-
-Core owns grid mutation, cursor physics, scrollback, tab stops, modes, pen
-attributes, cluster storage, and width policy. It must not parse escape
-sequences, decode UTF-8, segment graphemes, encode input, or render UI.
-
-## Data Rules
-
-- Keep grid storage flat and primitive.
-- Avoid object-per-cell designs.
-- Avoid allocation in mutation hot paths.
-- Store complex clusters in bounded lifecycle stores tied to screen/history.
-- Width calculation belongs in core and must be mode/policy-aware.
+Read the root and `ketraterm-core/AGENTS.md` first. This skill adds a mutation
+invariant checklist; it does not define feature-support status.
 
 ## Invariants
 
-Every mutation must preserve:
+Every affected mutation must preserve:
 
-- no orphaned wide spacers.
-- no stale cluster handles after erase, overwrite, scroll, resize, or eviction.
-- no corrupted leaders after partial overwrite.
-- correct wrapping and pending-wrap state.
-- correct margin and origin-mode behavior.
+- complete leader/spacer spans for wide cells.
+- valid cluster handles across overwrite, erase, scroll, resize, and eviction.
+- wrapping and pending-wrap state.
+- cursor, margin, and origin-mode bounds.
+- primary/alternate screen and scrollback ownership.
 
-## Test Checklist
+Width remains a core policy decision. Parser may assemble graphemes but cannot
+assign cell width.
 
-Cover wide cells and clusters in:
+## Implementation checks
 
-- overwrite, erase, insert/delete, scroll, resize, and wrap.
-- primary and alternate screen transitions.
-- scrollback retention and ED 3 clearing.
-- tab stops and margins.
-- mode snapshots.
-- pen attribute reset and storage.
+- Keep cell storage primitive and flat; avoid object-per-cell designs.
+- Clear the complete previous span before partially overwriting wide or
+  clustered content.
+- Reuse storage in mutation hot paths unless the operation inherently stores a
+  cluster or resizes.
+- Preserve bounded cluster lifecycles tied to screen/history retention.
 
-If an attribute or operation is unsupported, document it as a core gap. Do not
-let host fake it.
+## Verification
+
+Exercise the changed operation with narrow, wide, combining, and clustered
+content where applicable. Include boundary columns, margins, wrap transitions,
+scrollback, alternate screen, and resize/reflow interactions relevant to the
+change. Use canonical feature/gap maps only when capability status changes.

@@ -16,6 +16,7 @@
 package io.github.ketraterm.intellij.services
 
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.project.guessProjectDir
 import io.github.ketraterm.intellij.settings.KetraTermIntellijSettings
 import io.github.ketraterm.intellij.settings.KetraTermIntellijSettingsNormalizer
 import io.github.ketraterm.workspace.TerminalProfile
@@ -38,26 +39,25 @@ internal object KetraTermDefaultProfileFactory {
     fun defaultProfile(
         project: Project,
         settings: KetraTermIntellijSettings.State = KetraTermIntellijSettings.getInstance().state,
-    ): TerminalProfile = defaultProfile(project.basePath, settings)
+    ): TerminalProfile = defaultProfile(project.guessProjectDir()?.path ?: project.basePath, settings)
 
     /**
      * Creates a default profile for a nullable project path.
      *
      * @param basePath project base path, or `null` when the IDE has no local project path.
-     * @param settings persisted IntelliJ terminal settings.
+     * @param settings normalized IntelliJ terminal settings.
      * @return local terminal launch profile.
      */
     fun defaultProfile(
         basePath: String?,
         settings: KetraTermIntellijSettings.State = KetraTermIntellijSettings.State(),
     ): TerminalProfile {
-        val normalized = KetraTermIntellijSettingsNormalizer.normalize(settings)
-        val workingDirectory = workingDirectory(basePath, normalized.startDirectory)
+        val workingDirectory = workingDirectory(basePath, settings.startDirectory)
         return TerminalProfileRegistry()
-            .configuredProfile(normalized.shellPath, workingDirectory)
+            .configuredProfile(settings.shellPath, workingDirectory)
             .copy(
-                displayName = normalized.defaultTabName,
-                environment = KetraTermIntellijSettingsNormalizer.parseEnvironmentVariables(normalized.environmentVariables),
+                displayName = settings.defaultTabName,
+                environment = KetraTermIntellijSettingsNormalizer.parseEnvironmentVariables(settings.environmentVariables),
             )
     }
 
@@ -66,34 +66,32 @@ internal object KetraTermDefaultProfileFactory {
      *
      * @param project current IntelliJ project.
      * @param profile selected discovered shell profile.
-     * @param settings persisted IntelliJ terminal settings.
+     * @param settings normalized IntelliJ terminal settings.
      * @return launch profile with IDE working directory and environment settings applied.
      */
     fun profileForSelectedShell(
         project: Project,
         profile: TerminalProfile,
         settings: KetraTermIntellijSettings.State = KetraTermIntellijSettings.getInstance().state,
-    ): TerminalProfile = profileForSelectedShell(project.basePath, profile, settings)
+    ): TerminalProfile = profileForSelectedShell(project.guessProjectDir()?.path ?: project.basePath, profile, settings)
 
     /**
      * Applies IntelliJ launch settings to a selected shell profile.
      *
      * @param basePath project base path, or `null` when the IDE has no local project path.
      * @param profile selected discovered shell profile.
-     * @param settings persisted IntelliJ terminal settings.
+     * @param settings normalized IntelliJ terminal settings.
      * @return launch profile with IDE working directory and environment settings applied.
      */
     fun profileForSelectedShell(
         basePath: String?,
         profile: TerminalProfile,
         settings: KetraTermIntellijSettings.State = KetraTermIntellijSettings.State(),
-    ): TerminalProfile {
-        val normalized = KetraTermIntellijSettingsNormalizer.normalize(settings)
-        return profile.copy(
-            workingDirectory = workingDirectory(basePath, normalized.startDirectory),
-            environment = KetraTermIntellijSettingsNormalizer.parseEnvironmentVariables(normalized.environmentVariables),
+    ): TerminalProfile =
+        profile.copy(
+            workingDirectory = workingDirectory(basePath, settings.startDirectory),
+            environment = KetraTermIntellijSettingsNormalizer.parseEnvironmentVariables(settings.environmentVariables),
         )
-    }
 
     private fun workingDirectory(
         basePath: String?,

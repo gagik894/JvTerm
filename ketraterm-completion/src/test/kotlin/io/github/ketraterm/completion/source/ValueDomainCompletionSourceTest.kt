@@ -23,6 +23,7 @@ import io.github.ketraterm.completion.model.TerminalCompletionDomainValue
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -32,7 +33,7 @@ class ValueDomainCompletionSourceTest {
         TerminalCompletionSources.valueDomain(
             domain = TerminalCompletionValueDomain.GIT_BRANCH,
             sourceId = "intellij-git",
-            valuesProvider = {
+            valuesProvider = { _, _ ->
                 listOf(
                     TerminalCompletionDomainValue("feature/terminal", detail = "local branch"),
                     TerminalCompletionDomainValue("fix/render"),
@@ -71,7 +72,7 @@ class ValueDomainCompletionSourceTest {
                 TerminalCompletionSources.valueDomain(
                     domain = TerminalCompletionValueDomain.GIT_BRANCH,
                     sourceId = "intellij-git-remote-branch",
-                    valuesProvider = { listOf(TerminalCompletionDomainValue("origin/feature/terminal")) },
+                    valuesProvider = { _, _ -> listOf(TerminalCompletionDomainValue("origin/feature/terminal")) },
                     allowedCommandNames = setOf("checkout", "merge", "rebase"),
                 )
 
@@ -90,7 +91,7 @@ class ValueDomainCompletionSourceTest {
                 TerminalCompletionSources.valueDomain(
                     domain = TerminalCompletionValueDomain.GIT_BRANCH,
                     sourceId = "git",
-                    valuesProvider = { listOf(TerminalCompletionDomainValue("release\$next")) },
+                    valuesProvider = { _, _ -> listOf(TerminalCompletionDomainValue("release\$next")) },
                 )
 
             assertEquals("release\\\$next", specialSource.complete(request("git switch rel")).single().replacementText)
@@ -106,6 +107,86 @@ class ValueDomainCompletionSourceTest {
     fun `does not return an already complete value`() =
         runBlocking {
             assertTrue(source.complete(request("git switch feature/terminal")).isEmpty())
+        }
+
+    @Test
+    fun `custom display labels receive display-relative match ranges`() =
+        runBlocking {
+            val customDisplaySource =
+                TerminalCompletionSources.valueDomain(
+                    domain = TerminalCompletionValueDomain.GIT_BRANCH,
+                    sourceId = "git",
+                    valuesProvider = { _, _ ->
+                        listOf(TerminalCompletionDomainValue(value = "f-branch", displayText = "Feature Branch"))
+                    },
+                )
+
+            val candidate = customDisplaySource.complete(request("git switch fb")).single()
+
+            assertEquals("Feature Branch", candidate.displayText)
+            assertContentEquals(intArrayOf(0, 1, 8, 9), candidate.matchedRanges.copyPackedOffsets())
+        }
+
+    @Test
+    fun `custom display labels without a display match remain eligible without highlight ranges`() =
+        runBlocking {
+            val customDisplaySource =
+                TerminalCompletionSources.valueDomain(
+                    domain = TerminalCompletionValueDomain.GIT_BRANCH,
+                    sourceId = "git",
+                    valuesProvider = { _, _ ->
+                        listOf(TerminalCompletionDomainValue(value = "feature-branch", displayText = "Release candidate"))
+                    },
+                )
+
+            val candidate = customDisplaySource.complete(request("git switch fb")).single()
+
+            assertEquals("feature-branch", candidate.replacementText)
+            assertTrue(candidate.matchedRanges.isEmpty())
+        }
+
+    @Test
+    fun `passes semantic context without truncating the provider snapshot`() =
+        runBlocking {
+            var requestedPrefix: String? = null
+            val boundedSource =
+                TerminalCompletionSources.valueDomain(
+                    domain = TerminalCompletionValueDomain.GIT_BRANCH,
+                    sourceId = "git",
+                    valuesProvider = { _, context ->
+                        requestedPrefix = context.activePrefix
+                        buildList {
+                            repeat(300) { index -> add(TerminalCompletionDomainValue("other-$index")) }
+                            add(TerminalCompletionDomainValue("feature/needle"))
+                        }
+                    },
+                )
+
+            val candidates = boundedSource.complete(request("git switch feature/n"))
+
+            assertEquals("feature/n", requestedPrefix)
+            assertEquals(listOf("feature/needle"), candidates.map { it.replacementText })
+        }
+
+    @Test
+    fun `retains a higher-ranked late value within the final candidate bound`() =
+        runBlocking {
+            val boundedSource =
+                TerminalCompletionSources.valueDomain(
+                    domain = TerminalCompletionValueDomain.GIT_BRANCH,
+                    sourceId = "git",
+                    valuesProvider = { _, _ ->
+                        buildList {
+                            repeat(300) { index -> add(TerminalCompletionDomainValue("feature/branch-$index")) }
+                            add(TerminalCompletionDomainValue("feature/priority", scoreAdjustment = 1_000))
+                        }
+                    },
+                )
+
+            val candidates = boundedSource.complete(request("git switch feature/"))
+
+            assertEquals(256, candidates.size)
+            assertTrue(candidates.any { it.replacementText == "feature/priority" })
         }
 
     private fun request(

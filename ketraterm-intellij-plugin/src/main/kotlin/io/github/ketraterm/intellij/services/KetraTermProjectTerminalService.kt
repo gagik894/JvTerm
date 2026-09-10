@@ -19,6 +19,8 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.editor.colors.EditorColorsListener
+import com.intellij.openapi.editor.colors.EditorColorsManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.wm.ToolWindow
@@ -38,7 +40,6 @@ import io.github.ketraterm.protocol.ShellIntegrationEvent
 import io.github.ketraterm.protocol.ShellIntegrationMarker
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.workspace.*
-import kotlinx.coroutines.CoroutineScope
 import java.awt.BorderLayout
 import java.awt.Component
 import java.util.concurrent.atomic.AtomicInteger
@@ -57,7 +58,6 @@ import javax.swing.SwingUtilities
 @Service(Service.Level.PROJECT)
 class KetraTermProjectTerminalService(
     private val project: Project,
-    private val coroutineScope: CoroutineScope,
 ) : Disposable {
     private val contentsByTabId = LinkedHashMap<String, Content>()
     private val pendingTabsById = LinkedHashMap<String, PendingTerminalTab>()
@@ -73,6 +73,14 @@ class KetraTermProjectTerminalService(
 
     init {
         KetraTermIntellijSettings.getInstance().addChangeListener(settingsChangedListener)
+        ApplicationManager.getApplication().messageBus.connect(this).subscribe(
+            EditorColorsManager.TOPIC,
+            EditorColorsListener {
+                if (KetraTermIntellijSettings.getInstance().state.themeId == KetraTermIntellijSettings.DEFAULT_THEME_ID) {
+                    reloadOpenTerminalSettings()
+                }
+            },
+        )
     }
 
     /**
@@ -306,7 +314,6 @@ class KetraTermProjectTerminalService(
             KetraTermTerminalPane.create(
                 project = project,
                 tab = workspaceTab,
-                completionScope = coroutineScope,
                 hostActions =
                     KetraTermTerminalPaneHostActions(
                         openNewTabAction = ::openDefaultTabFromContextMenu,
@@ -457,10 +464,14 @@ class KetraTermProjectTerminalService(
             tab: TerminalWorkspaceTab,
             event: ShellIntegrationEvent,
         ) {
-            if (event.marker != ShellIntegrationMarker.COMMAND_FINISHED) return
+            if (!KetraTermIntellijSettings.getInstance().state.smartSuggestionsEnabled ||
+                event.marker != ShellIntegrationMarker.COMMAND_FINISHED
+            ) {
+                return
+            }
             val state = tab.session.shellIntegrationState
             val metadata = state.commandMetadata(state.latestCommandRecordId()) ?: return
-            KetraTermCompletionService.getInstance().recordFinishedCommand(tab, metadata)
+            KetraTermCompletionService.getInstanceIfCreated()?.recordFinishedCommand(tab, metadata)
         }
 
         override fun bell(tab: TerminalWorkspaceTab) {

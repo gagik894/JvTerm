@@ -26,24 +26,8 @@ import javax.swing.KeyStroke
 /** Resolves shell-suggestion actions from IntelliJ's active user keymap. */
 internal object KetraTermShellSuggestionKeymap : SwingShellSuggestionKeymap {
     override fun actionFor(event: KeyEvent): SwingShellSuggestionAction? {
+        SwingShellSuggestionKeymap.STANDARD.actionFor(event)?.let { return it }
         val modifiers = event.modifiersEx and RELEVANT_MODIFIERS
-        when (event.keyCode) {
-            KeyEvent.VK_ENTER -> return if (modifiers == 0) SwingShellSuggestionAction.ACCEPT_SELECTED else null
-            KeyEvent.VK_DOWN -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_NEXT else null
-            KeyEvent.VK_UP -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_PREVIOUS else null
-            KeyEvent.VK_HOME -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_FIRST else null
-            KeyEvent.VK_END -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_LAST else null
-            KeyEvent.VK_PAGE_DOWN -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_NEXT_PAGE else null
-            KeyEvent.VK_PAGE_UP -> return if (modifiers == 0) SwingShellSuggestionAction.SELECT_PREVIOUS_PAGE else null
-            KeyEvent.VK_ESCAPE -> return if (modifiers == 0) SwingShellSuggestionAction.DISMISS else null
-        }
-        if (event.keyCode == KeyEvent.VK_TAB) {
-            return when (modifiers) {
-                0 -> SwingShellSuggestionAction.ACCEPT
-                InputEvent.SHIFT_DOWN_MASK -> SwingShellSuggestionAction.SELECT_PREVIOUS
-                else -> null
-            }
-        }
         val keyStroke = KeyStroke.getKeyStroke(event.keyCode, modifiers)
         val actionIds = KeymapManager.getInstance().activeKeymap.getActionIds(keyStroke)
         return actionFor(actionIds)

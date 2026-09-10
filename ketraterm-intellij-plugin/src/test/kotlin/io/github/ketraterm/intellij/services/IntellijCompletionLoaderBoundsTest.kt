@@ -28,7 +28,7 @@ class IntellijCompletionLoaderBoundsTest {
     val temporaryFolder = TemporaryFolder()
 
     @Test
-    fun `Git reference loader enforces its visit and retention bounds`() =
+    fun `Git reference loader owns an input budget independent of popup results`() =
         runBlocking {
             val localBranches = CountingStringIterable(valueAt = { index -> "local-$index" })
             val loader =
@@ -47,7 +47,7 @@ class IntellijCompletionLoaderBoundsTest {
 
             val snapshot = loader.load("file:///repo")
 
-            assertEquals(2_048, snapshot.localBranches.size)
+            assertEquals(8_192, snapshot.localBranches.size)
             assertEquals(8_192, localBranches.nextCalls)
         }
 
@@ -78,7 +78,45 @@ class IntellijCompletionLoaderBoundsTest {
         }
 
     @Test
-    fun `Git status loader shares one exact visit bound across both status groups`() =
+    fun `Git commit loader owns its recent-history budget`() =
+        runBlocking {
+            val commits = CountingGitCommitIterable()
+            val loader =
+                IntellijGitCommitCompletionLoader(
+                    GitCommitReadPort { _, limit ->
+                        assertEquals(50, limit)
+                        commits
+                    },
+                )
+
+            val values = loader.load("file:///repo")
+
+            assertEquals(50, values.size)
+            assertEquals(50, commits.nextCalls)
+            assertEquals(commitHash(0), values.first().value)
+            assertEquals(commitHash(49), values.last().value)
+        }
+
+    @Test
+    fun `Git commit loader stops projection when its request is cancelled`() =
+        runBlocking {
+            lateinit var loading: Deferred<List<io.github.ketraterm.completion.model.TerminalCompletionDomainValue>>
+            val commits =
+                CountingGitCommitIterable { count ->
+                    if (count == 4) loading.cancel(CancellationException("obsolete Git commit completion"))
+                }
+            val loader = IntellijGitCommitCompletionLoader(GitCommitReadPort { _, _ -> commits })
+            loading = async(start = CoroutineStart.LAZY) { loader.load("file:///repo") }
+
+            loading.start()
+            val failure = runCatching { loading.await() }.exceptionOrNull()
+
+            assertTrue(failure is CancellationException)
+            assertEquals(4, commits.nextCalls)
+        }
+
+    @Test
+    fun `Git status loader owns one visit budget across both groups`() =
         runBlocking {
             val repositoryRoot = temporaryFolder.newFolder("git-status-loader").toPath()
             val changed =
@@ -104,11 +142,39 @@ class IntellijCompletionLoaderBoundsTest {
                     },
                 )
 
-            val entries = loader.load(repositoryRoot.toUri().toString())
+            val entries = loader.load(repositoryRoot.toUri().toString(), prefix = "")
 
-            assertEquals(2_048, entries.size)
+            assertEquals(8_192, entries.size)
             assertEquals(3, changed.nextCalls)
             assertEquals(8_189, unversioned.nextCalls)
+        }
+
+    @Test
+    fun `Git status loader matches during discovery without a candidate cap`() =
+        runBlocking {
+            val repositoryRoot = temporaryFolder.newFolder("git-status-query").toPath()
+            val changedPaths =
+                buildList {
+                    repeat(300) { index -> add(repositoryRoot.resolve("other-$index.kt").toString()) }
+                    add(repositoryRoot.resolve("src/NeedleTarget.kt").toString())
+                }
+            val loader =
+                IntellijGitStatusPathLoader(
+                    GitStatusReadPort { _, collector ->
+                        collector(
+                            GitStatusReadModel(
+                                repositoryRoot = repositoryRoot,
+                                workingDirectory = repositoryRoot,
+                                changedPathValues = changedPaths,
+                                unversionedPathValues = emptyList(),
+                            ),
+                        )
+                    },
+                )
+
+            val entries = loader.load(repositoryRoot.toUri().toString(), prefix = "Needle")
+
+            assertEquals(listOf("src/NeedleTarget.kt"), entries.map { it.path })
         }
 
     @Test
@@ -129,7 +195,7 @@ class IntellijCompletionLoaderBoundsTest {
                         collector(GitStatusReadModel(repositoryRoot, repositoryRoot, changed, emptyList()))
                     },
                 )
-            loading = async(start = CoroutineStart.LAZY) { loader.load(repositoryRoot.toUri().toString()) }
+            loading = async(start = CoroutineStart.LAZY) { loader.load(repositoryRoot.toUri().toString(), prefix = "") }
 
             loading.start()
             val failure = runCatching { loading.await() }.exceptionOrNull()
@@ -139,7 +205,7 @@ class IntellijCompletionLoaderBoundsTest {
         }
 
     @Test
-    fun `Gradle task loader enforces task and retention bounds on a hostile model`() =
+    fun `Gradle task loader owns an imported-model task budget`() =
         runBlocking {
             val projectDirectory = temporaryFolder.newFolder("gradle-loader").toPath()
             val tasks = CountingGradleTaskNodes(projectDirectory.toString())
@@ -148,7 +214,7 @@ class IntellijCompletionLoaderBoundsTest {
 
             val entries = loader.load(projectDirectory.toUri().toString())
 
-            assertEquals(4_096, entries.size)
+            assertEquals(8_192, entries.size)
             assertEquals(8_192, tasks.nextCalls)
         }
 
@@ -196,6 +262,29 @@ class IntellijCompletionLoaderBoundsTest {
             }
     }
 
+    private class CountingGitCommitIterable(
+        private val afterNext: (Int) -> Unit = {},
+    ) : Iterable<GitCommitReadModel> {
+        var nextCalls: Int = 0
+            private set
+
+        override fun iterator(): Iterator<GitCommitReadModel> =
+            object : Iterator<GitCommitReadModel> {
+                override fun hasNext(): Boolean = true
+
+                override fun next(): GitCommitReadModel {
+                    val index = nextCalls++
+                    afterNext(nextCalls)
+                    val hash = commitHash(index)
+                    return GitCommitReadModel(
+                        fullHash = hash,
+                        shortHash = hash.take(7),
+                        subject = "commit $index",
+                    )
+                }
+            }
+    }
+
     private class CountingGradleTaskNodes(
         private val linkedProjectPath: String,
         private val afterNext: (Int) -> Unit = {},
@@ -222,4 +311,8 @@ class IntellijCompletionLoaderBoundsTest {
         override val task: GradleTaskReadModel? = null,
         override val children: Iterable<GradleModelNode> = emptyList(),
     ) : GradleModelNode
+
+    private companion object {
+        private fun commitHash(index: Int): String = index.toString(16).padStart(40, '0')
+    }
 }

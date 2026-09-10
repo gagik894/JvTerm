@@ -126,7 +126,7 @@ internal class IntellijGitCompletionLoader(
         cancellationContext: CoroutineContext,
         toValue: (String) -> TerminalCompletionDomainValue?,
     ): List<TerminalCompletionDomainValue> {
-        val retained = BoundedSnapshotCollector(MAX_VALUES_PER_GROUP, VALUE_ORDER)
+        val retained = ArrayList<TerminalCompletionDomainValue>(INITIAL_VALUE_CAPACITY)
         val visitBudget =
             BoundedVisitBudget(MAX_VISITED_VALUES_PER_GROUP) {
                 cancellationContext.ensureActive()
@@ -134,13 +134,15 @@ internal class IntellijGitCompletionLoader(
             }
         visitBudget.visit(values) { value ->
             toValue(value)?.let(retained::add)
+            true
         }
-        return retained.toSortedList()
+        retained.sortWith(VALUE_ORDER)
+        return retained
     }
 
     private companion object {
         private const val MAX_VISITED_VALUES_PER_GROUP = 8_192
-        private const val MAX_VALUES_PER_GROUP = 2_048
+        private const val INITIAL_VALUE_CAPACITY = 64
         private const val LOCAL_SCORE_ADJUSTMENT = 2
         private const val REMOTE_SCORE_ADJUSTMENT = 1
         private val VALUE_ORDER =

@@ -45,7 +45,7 @@ internal class TerminalPaneShortcutController(
             override fun mousePressed(event: MouseEvent) {
                 if (event.isConsumed) return
                 if (!SwingUtilities.isMiddleMouseButton(event)) return
-                if (!settings.pasteOnMiddleClick) return
+                if (!settings.config.pasteOnMiddleClick) return
                 if (!pane.terminal.pasteClipboardText()) return
                 event.consume()
             }
@@ -115,9 +115,9 @@ internal object TerminalPaneActionRegistry {
     ): Boolean =
         when (action) {
             SwingTerminalHostAction.COPY_SELECTION -> target.hasSelection()
+            SwingTerminalHostAction.REQUEST_SUGGESTIONS -> target.suggestionsEnabled()
             SwingTerminalHostAction.PASTE_CLIPBOARD,
             SwingTerminalHostAction.OPEN_SEARCH,
-            SwingTerminalHostAction.REQUEST_SUGGESTIONS,
             SwingTerminalHostAction.SELECT_ALL,
             SwingTerminalHostAction.CLEAR_SCREEN,
             SwingTerminalHostAction.SCROLL_PAGE_UP,
@@ -142,8 +142,12 @@ internal object TerminalPaneActionRegistry {
             SwingTerminalHostAction.SELECT_ALL -> target.selectAll()
             SwingTerminalHostAction.CLEAR_SCREEN -> target.clearScreen()
             SwingTerminalHostAction.REQUEST_SUGGESTIONS -> {
-                target.requestShellSuggestions()
-                true
+                if (target.suggestionsEnabled()) {
+                    target.requestShellSuggestions()
+                    true
+                } else {
+                    false
+                }
             }
             SwingTerminalHostAction.OPEN_SEARCH -> {
                 target.openSearch()
@@ -164,6 +168,9 @@ internal object TerminalPaneActionRegistry {
  * Minimal standalone terminal-pane action target.
  */
 internal interface TerminalPaneActionTarget {
+    /** Whether the master feature is available for this pane. */
+    fun suggestionsEnabled(): Boolean
+
     /**
      * Returns whether terminal text is currently selected.
      */

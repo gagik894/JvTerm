@@ -37,9 +37,7 @@ import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.transport.checkBounds
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.*
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
@@ -100,17 +98,9 @@ class TerminalSession(
         )
     private val mutableState = MutableStateFlow<TerminalSessionState>(TerminalSessionState.Created)
     private val mutableRenderGeneration = MutableStateFlow(NO_RENDER_GENERATION)
-    private val mutableActiveShellCommandLineRevision = MutableStateFlow(NO_SHELL_COMMAND_LINE_REVISION)
 
     private var activeShellCommandLineProvider: (() -> TerminalShellCommandLineSnapshot?)? = null
     private var activeShellCommandLineContextProvider: ((LongArray) -> Long)? = null
-    private val shellCommandLineContextScratch = LongArray(SHELL_COMMAND_LINE_CONTEXT_LONGS)
-    private val shellCommandLineFingerprintScratch = LongArray(TERMINAL_SHELL_COMMAND_FINGERPRINT_LONGS)
-    private val lastShellCommandLineFingerprint = LongArray(TERMINAL_SHELL_COMMAND_FINGERPRINT_LONGS)
-    private val shellCommandLineFingerprintExtractor = ShellIntegrationCommandTextExtractor()
-    private var lastShellCommandLineFingerprintAvailable = false
-    private var lastShellCommandLineCursorRow = 0
-    private var lastShellCommandLineCursorColumn = 0
 
     /** Lifecycle state retained for current and future collectors. */
     val state: StateFlow<TerminalSessionState> = mutableState.asStateFlow()
@@ -122,18 +112,36 @@ class TerminalSession(
     val renderGeneration: StateFlow<Long> = mutableRenderGeneration.asStateFlow()
 
     /**
-     * Allocation-free revision of the authoritative active shell command line.
+     * Revision of the active shell command line, tracked only while collected.
      *
-     * The value changes only when the command text, cursor anchor, or snapshot
-     * availability changes. Ordinary render publications, theme changes, and
-     * unrelated terminal output leave it unchanged. Consumers should debounce
-     * this primitive signal and call [activeShellCommandLine] only when they
-     * actually need an immutable command snapshot.
+     * Collectors share one tracker running on the session worker dispatcher,
+     * independently of render publication. Tracking buffers are allocated on
+     * subscription and released when the last collector leaves. Merely reading
+     * [StateFlow.value] does not start tracking.
      *
-     * The initial value is `-1` until the first active OSC 133 command line is
-     * observed. As a [StateFlow], intermediate revisions may be conflated.
+     * The value is `-1` before an active OSC 133 command line is observed and
+     * resets to `-1` when tracking stops. A new subscription samples the latest
+     * published live frame without waiting for more terminal output.
+     *
+     * Nonnegative values identify render generations where command text, cursor
+     * anchor, or snapshot availability changed. Treat them as opaque revisions;
+     * intermediate changes may be conflated. Consumers should debounce this
+     * signal and call [activeShellCommandLine] when they need a command snapshot.
+     * Session closure cancels tracking; collectors own their collection lifetime.
      */
-    val activeShellCommandLineRevision: StateFlow<Long> = mutableActiveShellCommandLineRevision.asStateFlow()
+    val activeShellCommandLineRevision: StateFlow<Long> by lazy {
+        flow {
+            val contextProvider = activeShellCommandLineContextProvider ?: return@flow
+            val tracker = ShellCommandLineRevisionTracker(contextProvider)
+            renderGeneration.collect { generation ->
+                if (generation >= 0L && tracker.update()) emit(generation)
+            }
+        }.stateIn(
+            scope = sessionScope,
+            started = SharingStarted.WhileSubscribed(replayExpirationMillis = 0),
+            initialValue = NO_SHELL_COMMAND_LINE_REVISION,
+        )
+    }
 
     internal val isCoroutineScopeActive: Boolean
         get() = sessionJob.isActive
@@ -517,7 +525,6 @@ class TerminalSession(
 
             try {
                 renderPublisher.updateAndPublish(this, offset, rows)
-                if (offset == 0) updateActiveShellCommandLineRevision()
                 publishedGeneration = generation
                 currentCoroutineContext().ensureActive()
                 mutableRenderGeneration.value = generation
@@ -538,131 +545,144 @@ class TerminalSession(
         }
     }
 
-    private fun updateActiveShellCommandLineRevision() {
-        val contextProvider = activeShellCommandLineContextProvider ?: return
-        val contextRevision =
-            synchronized(mutationLock) {
-                contextProvider(shellCommandLineContextScratch)
-            }
-        val promptEndLineId = shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_LINE_ID_INDEX]
-        val promptEndColumn = shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_COLUMN_INDEX].toInt()
-        val active = shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_ACTIVE_INDEX] != 0L
+    private inner class ShellCommandLineRevisionTracker(
+        private val contextProvider: (LongArray) -> Long,
+    ) {
+        private val contextScratch = LongArray(SHELL_COMMAND_LINE_CONTEXT_LONGS)
+        private val fingerprintScratch = LongArray(TERMINAL_SHELL_COMMAND_FINGERPRINT_LONGS)
+        private val previousFingerprint = LongArray(TERMINAL_SHELL_COMMAND_FINGERPRINT_LONGS)
+        private val extractor = ShellIntegrationCommandTextExtractor()
+        private var previousFingerprintAvailable = false
+        private var previousCursorRow = 0
+        private var previousCursorColumn = 0
 
-        var status = TerminalShellCommandFingerprintStatus.INVALID
-        var cursorRow = 0
-        var cursorColumn = 0
-        var historySize = 0
-        var liveRows = 0
-        if (active) {
-            renderPublisher.readCurrent { frame ->
-                historySize = frame.historySize
-                liveRows = frame.rows
-                cursorRow = frame.cursorRow
-                cursorColumn = frame.cursorColumn
-                status =
-                    shellCommandLineFingerprintExtractor.fingerprint(
-                        cache = frame,
-                        promptEndLineId = promptEndLineId,
-                        promptEndColumn = promptEndColumn,
-                        cursorRow = cursorRow,
-                        cursorColumn = cursorColumn,
-                        destination = shellCommandLineFingerprintScratch,
-                    )
-            }
-
-            if (status == TerminalShellCommandFingerprintStatus.MISSING_START_LINE && historySize > 0) {
-                val historyRows = minOf(historySize, MAX_SHELL_INTEGRATION_COMMAND_ROWS)
+        fun update(): Boolean {
+            val contextRevision =
                 synchronized(mutationLock) {
-                    if (
-                        !shellCommandLineContextMatches(
-                            contextProvider,
-                            contextRevision,
-                            promptEndLineId,
-                            promptEndColumn,
-                            expectedActive = true,
-                        )
-                    ) {
-                        return
+                    contextProvider(contextScratch)
+                }
+            val promptEndLineId = contextScratch[SHELL_COMMAND_LINE_CONTEXT_LINE_ID_INDEX]
+            val promptEndColumn = contextScratch[SHELL_COMMAND_LINE_CONTEXT_COLUMN_INDEX].toInt()
+            val active = contextScratch[SHELL_COMMAND_LINE_CONTEXT_ACTIVE_INDEX] != 0L
+
+            var status = TerminalShellCommandFingerprintStatus.INVALID
+            var cursorRow = 0
+            var cursorColumn = 0
+            var historySize = 0
+            var liveRows = 0
+            var liveViewport = true
+            if (active) {
+                renderPublisher.readCurrent { frame ->
+                    if (frame.scrollbackOffset != 0) {
+                        liveViewport = false
+                        return@readCurrent
                     }
-                    renderReader.readRenderFrame(
-                        scrollbackOffset = historyRows,
-                        viewportRows = liveRows + historyRows,
-                    ) { frame ->
-                        cursorRow = frame.cursor.row
-                        cursorColumn = frame.cursor.column
-                        status =
-                            shellCommandLineFingerprintExtractor.fingerprint(
-                                frame = frame,
-                                promptEndLineId = promptEndLineId,
-                                promptEndColumn = promptEndColumn,
-                                cursorRow = cursorRow,
-                                cursorColumn = cursorColumn,
-                                destination = shellCommandLineFingerprintScratch,
+                    historySize = frame.historySize
+                    liveRows = frame.rows
+                    cursorRow = frame.cursorRow
+                    cursorColumn = frame.cursorColumn
+                    status =
+                        extractor.fingerprint(
+                            cache = frame,
+                            promptEndLineId = promptEndLineId,
+                            promptEndColumn = promptEndColumn,
+                            cursorRow = cursorRow,
+                            cursorColumn = cursorColumn,
+                            destination = fingerprintScratch,
+                        )
+                }
+
+                if (!liveViewport) return false
+
+                if (status == TerminalShellCommandFingerprintStatus.MISSING_START_LINE && historySize > 0) {
+                    val historyRows = minOf(historySize, MAX_SHELL_INTEGRATION_COMMAND_ROWS)
+                    synchronized(mutationLock) {
+                        if (
+                            !contextMatches(
+                                contextRevision,
+                                promptEndLineId,
+                                promptEndColumn,
+                                expectedActive = true,
                             )
+                        ) {
+                            return false
+                        }
+                        renderReader.readRenderFrame(
+                            scrollbackOffset = historyRows,
+                            viewportRows = liveRows + historyRows,
+                        ) { frame ->
+                            cursorRow = frame.cursor.row
+                            cursorColumn = frame.cursor.column
+                            status =
+                                extractor.fingerprint(
+                                    frame = frame,
+                                    promptEndLineId = promptEndLineId,
+                                    promptEndColumn = promptEndColumn,
+                                    cursorRow = cursorRow,
+                                    cursorColumn = cursorColumn,
+                                    destination = fingerprintScratch,
+                                )
+                        }
                     }
                 }
             }
-        }
 
-        synchronized(mutationLock) {
-            if (
-                !shellCommandLineContextMatches(
-                    contextProvider,
-                    contextRevision,
-                    promptEndLineId,
-                    promptEndColumn,
-                    expectedActive = active,
-                )
-            ) {
-                return
+            synchronized(mutationLock) {
+                if (
+                    !contextMatches(
+                        contextRevision,
+                        promptEndLineId,
+                        promptEndColumn,
+                        expectedActive = active,
+                    )
+                ) {
+                    return false
+                }
             }
+            return recordFingerprint(
+                available = active && status == TerminalShellCommandFingerprintStatus.COMPLETE,
+                cursorRow = cursorRow,
+                cursorColumn = cursorColumn,
+            )
         }
-        publishActiveShellCommandLineFingerprint(
-            available = active && status == TerminalShellCommandFingerprintStatus.COMPLETE,
-            cursorRow = cursorRow,
-            cursorColumn = cursorColumn,
-        )
-    }
 
-    private fun shellCommandLineContextMatches(
-        contextProvider: (LongArray) -> Long,
-        expectedRevision: Long,
-        expectedLineId: Long,
-        expectedColumn: Int,
-        expectedActive: Boolean,
-    ): Boolean {
-        val revision = contextProvider(shellCommandLineContextScratch)
-        return revision == expectedRevision &&
-            shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_LINE_ID_INDEX] == expectedLineId &&
-            shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_COLUMN_INDEX].toInt() == expectedColumn &&
-            (shellCommandLineContextScratch[SHELL_COMMAND_LINE_CONTEXT_ACTIVE_INDEX] != 0L) == expectedActive
-    }
+        private fun contextMatches(
+            expectedRevision: Long,
+            expectedLineId: Long,
+            expectedColumn: Int,
+            expectedActive: Boolean,
+        ): Boolean {
+            val revision = contextProvider(contextScratch)
+            return revision == expectedRevision &&
+                contextScratch[SHELL_COMMAND_LINE_CONTEXT_LINE_ID_INDEX] == expectedLineId &&
+                contextScratch[SHELL_COMMAND_LINE_CONTEXT_COLUMN_INDEX].toInt() == expectedColumn &&
+                (contextScratch[SHELL_COMMAND_LINE_CONTEXT_ACTIVE_INDEX] != 0L) == expectedActive
+        }
 
-    private fun publishActiveShellCommandLineFingerprint(
-        available: Boolean,
-        cursorRow: Int,
-        cursorColumn: Int,
-    ) {
-        val changed =
-            if (!available) {
-                lastShellCommandLineFingerprintAvailable
-            } else {
-                !lastShellCommandLineFingerprintAvailable ||
-                    lastShellCommandLineCursorRow != cursorRow ||
-                    lastShellCommandLineCursorColumn != cursorColumn ||
-                    !lastShellCommandLineFingerprint.contentEquals(shellCommandLineFingerprintScratch)
+        private fun recordFingerprint(
+            available: Boolean,
+            cursorRow: Int,
+            cursorColumn: Int,
+        ): Boolean {
+            val changed =
+                if (!available) {
+                    previousFingerprintAvailable
+                } else {
+                    !previousFingerprintAvailable ||
+                        previousCursorRow != cursorRow ||
+                        previousCursorColumn != cursorColumn ||
+                        !previousFingerprint.contentEquals(fingerprintScratch)
+                }
+            if (!changed) return false
+
+            previousFingerprintAvailable = available
+            if (available) {
+                fingerprintScratch.copyInto(previousFingerprint)
+                previousCursorRow = cursorRow
+                previousCursorColumn = cursorColumn
             }
-        if (!changed) return
-
-        lastShellCommandLineFingerprintAvailable = available
-        if (available) {
-            shellCommandLineFingerprintScratch.copyInto(lastShellCommandLineFingerprint)
-            lastShellCommandLineCursorRow = cursorRow
-            lastShellCommandLineCursorColumn = cursorColumn
+            return true
         }
-        val previous = mutableActiveShellCommandLineRevision.value
-        mutableActiveShellCommandLineRevision.value =
-            if (previous == Long.MAX_VALUE) FIRST_SHELL_COMMAND_LINE_REVISION else previous + 1L
     }
 
     /**
@@ -812,7 +832,6 @@ class TerminalSession(
         private const val RESPONSE_BUFFER_SIZE: Int = 1024
         private const val NO_RENDER_GENERATION: Long = -1L
         private const val NO_SHELL_COMMAND_LINE_REVISION: Long = -1L
-        private const val FIRST_SHELL_COMMAND_LINE_REVISION: Long = 0L
         internal const val RENDER_PUBLICATION_INTERVAL_MS: Long = 16L
         private const val SYNCHRONIZED_OUTPUT_TIMEOUT_MS: Long = 100L
 

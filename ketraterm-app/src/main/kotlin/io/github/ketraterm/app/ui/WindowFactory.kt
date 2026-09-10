@@ -74,9 +74,9 @@ internal class WindowFactory(
         // Settings dialog take effect on the very next new tab without a restart.
         val defaultProfileProvider: () -> TerminalProfile = {
             profileRegistry.configuredProfile(
-                shellPath = settings.shellPath,
+                shellPath = settings.config.shellPath,
                 workingDirectory =
-                    settings.startDirectory
+                    settings.config.startDirectory
                         .takeIf { it.isNotBlank() }
                         ?.let { runCatching { Path.of(it) }.getOrNull() },
             )
@@ -185,9 +185,11 @@ internal class WindowFactory(
                 background = Chrome.popupBackground
                 foreground = Chrome.textPrimary
                 addActionListener {
-                    SettingsDialog(frame, settings, profileRegistry) {
-                        tabManager.reloadAllPanes()
-                    }.isVisible = true
+                    SettingsDialog(
+                        parent = frame,
+                        settings = settings,
+                        profileRegistry = profileRegistry,
+                    ).isVisible = true
                 }
             }
         popup.add(settingsItem)

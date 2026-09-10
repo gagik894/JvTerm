@@ -10,3 +10,5 @@ KetraTerm
 ketraterm-app.jar
 --main-class
 io.github.ketraterm.app.KetraTermAppKt
+--java-options
+--enable-native-access=ALL-UNNAMED

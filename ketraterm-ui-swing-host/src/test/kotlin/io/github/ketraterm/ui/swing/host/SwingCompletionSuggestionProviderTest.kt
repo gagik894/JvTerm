@@ -16,19 +16,24 @@
 package io.github.ketraterm.ui.swing.host
 
 import io.github.ketraterm.completion.api.*
+import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionAccentRole
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertTrue
+import kotlin.test.*
 
 class SwingCompletionSuggestionProviderTest {
     @Test
     fun `forwards live host context and adapts candidates`() =
         runBlocking {
             lateinit var captured: TerminalCompletionRequest
+            val requestContext =
+                SwingCompletionContext(
+                    profileId = "bash",
+                    workingDirectoryUri = "file:///repo",
+                    shellCapabilities = TerminalShellCapabilities.POSIX,
+                )
             val provider =
                 SwingCompletionSuggestionProvider(
                     engine =
@@ -44,17 +49,16 @@ class SwingCompletionSuggestionProviderTest {
                                         kind = TerminalCompletionCandidateKind.SUBCOMMAND,
                                         displayText = "status",
                                         detail = "show status",
+                                        matchedRanges =
+                                            TerminalCompletionMatchRanges.fromPackedOffsets(
+                                                "status",
+                                                intArrayOf(0, 2),
+                                            ),
                                     ),
                                 ),
                             )
                         },
-                    contextProvider = {
-                        SwingCompletionContext(
-                            profileId = "bash",
-                            workingDirectoryUri = "file:///repo",
-                            shellCapabilities = TerminalShellCapabilities.POSIX,
-                        )
-                    },
+                    contextProvider = { requestContext },
                 )
 
             val suggestions = provider.suggestions(request("git ste", cursorOffset = 6)).last()
@@ -67,6 +71,70 @@ class SwingCompletionSuggestionProviderTest {
             assertEquals(7, suggestions.single().replacementEndOffset)
             assertEquals("show status", suggestions.single().detail)
             assertEquals("SUBCOMMAND", suggestions.single().kind)
+            assertEquals("Built-in", suggestions.single().sourceDisplayText)
+            assertSame(requestContext, suggestions.single().interactionContext)
+            assertContentEquals(intArrayOf(0, 2), suggestions.single().matchedRanges.copyPackedOffsets())
+        }
+
+    @Test
+    fun `maps provider identifiers once into bounded renderer-neutral labels`() =
+        runBlocking {
+            val sources =
+                listOf(
+                    "spec",
+                    "learned",
+                    "observed",
+                    "intellij-git-branch",
+                    "intellij-gradle-task",
+                    "intellij-project-file",
+                    "path",
+                    "intellij-git-status-path",
+                    "intellij-custom_source",
+                    "legitimate-provider",
+                    "pathology",
+                    "custom-${"x".repeat(500)}",
+                )
+            val provider =
+                SwingCompletionSuggestionProvider(
+                    TerminalCompletionEngine {
+                        flowOf(
+                            sources.map { source ->
+                                TerminalCompletionCandidate(
+                                    replacementText = source,
+                                    replacementStartOffset = 0,
+                                    replacementEndOffset = 0,
+                                    source = source,
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
+                                )
+                            },
+                        )
+                    },
+                )
+
+            val suggestions = provider.suggestions(request("x", cursorOffset = 1)).last()
+            val labels = suggestions.map { it.sourceDisplayText }
+
+            assertEquals(
+                listOf(
+                    "Built-in",
+                    "Learned",
+                    "Learned",
+                    "Git",
+                    "Gradle",
+                    "Project",
+                    "Path",
+                    "Git",
+                    "Custom source",
+                    "Legitimate provider",
+                    "Pathology",
+                ),
+                labels.dropLast(1),
+            )
+            assertTrue(labels.last().startsWith("Custom "))
+            assertTrue(labels.last().endsWith("…"))
+            assertTrue(labels.last().length <= 128)
+            assertEquals(SwingShellSuggestionAccentRole.HISTORY, suggestions[1].accentRole)
+            assertEquals(SwingShellSuggestionAccentRole.HISTORY, suggestions[2].accentRole)
         }
 
     @Test

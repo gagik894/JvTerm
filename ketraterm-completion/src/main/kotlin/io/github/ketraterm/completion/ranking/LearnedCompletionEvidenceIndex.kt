@@ -15,24 +15,35 @@
  */
 package io.github.ketraterm.completion.ranking
 
-import io.github.ketraterm.completion.api.TerminalShellSyntax
-import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
 import io.github.ketraterm.completion.internal.CompletionLearningContextKey
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
+import io.github.ketraterm.completion.internal.terminalCompletionRankingIdentity
+import io.github.ketraterm.completion.model.TerminalCompletionRankingStats
 
-/** Immutable direct-lookup view of learned frecency signals in one snapshot. */
+/** Immutable direct-lookup view of exact command learning in one snapshot. */
 internal class LearnedCompletionEvidenceIndex private constructor(
     private val exactEvidence: Map<ExactEvidenceKey, LearnedEvidenceCounts>,
 ) {
+    fun adjustment(
+        outcome: ResolvedCompletionOutcome?,
+        requestContext: CompletionLearningContextKey,
+        nowEpochMillis: Long,
+    ): Int {
+        if (outcome == null || exactEvidence.isEmpty()) return 0
+        return exactAdjustment(
+            identityDigest = terminalCompletionRankingIdentity(outcome.exactCommandLine),
+            requestContext = requestContext,
+            nowEpochMillis = nowEpochMillis,
+        )
+    }
+
     fun exactAdjustment(
-        key: LearnedCompletionOutcomeKey,
+        identityDigest: String,
         requestContext: CompletionLearningContextKey,
         nowEpochMillis: Long,
     ): Int {
         val match =
             requestContext.mostSpecific { context ->
-                exactEvidence[ExactEvidenceKey(key, context)]
+                exactEvidence[ExactEvidenceKey(identityDigest, context)]
             } ?: return 0
         return LearnedEvidenceScoring.exact(
             counts = match.value,
@@ -42,36 +53,18 @@ internal class LearnedCompletionEvidenceIndex private constructor(
     }
 
     companion object {
-        fun build(
-            snapshot: TerminalCommandCompletionStatsSnapshot,
-            shellSyntax: TerminalShellSyntax,
-            outcomeResolver: TerminalCompletionOutcomeKeyResolver,
-        ): LearnedCompletionEvidenceIndex {
-            val exactRows = HashMap<ExactEvidenceKey, MutableList<TerminalCommandCompletionStats>>()
-            for (row in snapshot.commandStats) {
-                val tokens = TerminalCommandLineTokenizer.parse(row.commandLine, row.commandLine.length, shellSyntax).tokens
-                if (tokens.isEmpty()) continue
+        fun build(rows: List<TerminalCompletionRankingStats>): LearnedCompletionEvidenceIndex {
+            val exactEvidence = HashMap<ExactEvidenceKey, LearnedEvidenceCounts>()
+            for (row in rows) {
                 val context = CompletionLearningContextKey.of(row.profileId, row.workingDirectoryUri)
-                outcomeResolver.learnedKey(tokens, NO_PATH_TOKEN, pathAware = false)?.let { key ->
-                    exactRows.getOrPut(ExactEvidenceKey(key, context), ::ArrayList).add(row)
-                }
-                for (tokenIndex in tokens.indices) {
-                    outcomeResolver.learnedKey(tokens, tokenIndex, pathAware = true)?.let { key ->
-                        exactRows.getOrPut(ExactEvidenceKey(key, context), ::ArrayList).add(row)
-                    }
-                }
+                exactEvidence.getOrPut(ExactEvidenceKey(row.identityDigest, context), ::LearnedEvidenceCounts).add(row)
             }
-
-            return LearnedCompletionEvidenceIndex(
-                exactEvidence = exactRows.mapValues { (_, rows) -> LearnedEvidenceCounts.fromCommands(rows) },
-            )
+            return LearnedCompletionEvidenceIndex(exactEvidence)
         }
-
-        private const val NO_PATH_TOKEN = -1
     }
 }
 
 private data class ExactEvidenceKey(
-    val outcome: LearnedCompletionOutcomeKey,
+    val identityDigest: String,
     val context: CompletionLearningContextKey,
 )

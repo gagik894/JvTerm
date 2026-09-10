@@ -43,27 +43,33 @@ data class TerminalFuzzyPathEntry(
 }
 
 /**
- * Supplies bounded fuzzy matches for one immutable completion request and its
- * active terminal prefix.
+ * Supplies host-bounded fuzzy matches for one immutable completion request and
+ * its resolved terminal context.
  *
- * Entries must already match [entries]'s prefix and be ordered from most to
- * least relevant. The shared completion source deliberately does not run a
- * second fuzzy matcher; it only applies terminal path and quoting rules.
+ * Entries must already match [TerminalCompletionContext.activePrefix] and be
+ * ordered from most to least relevant. The provider owns an independent host
+ * query, input, visit, or time budget; it never receives the engine's final
+ * candidate limit. The shared completion source deliberately does not run a
+ * second fuzzy matcher. It applies terminal path eligibility, hidden-path and
+ * quoting rules before enforcing that final limit.
+ *
  * Implementations may perform bounded suspending host queries and must
  * cooperate with cancellation. Blocking I/O must be moved to an appropriate
  * dispatcher by the host.
  */
 fun interface TerminalFuzzyPathProvider {
     /**
-     * Returns path entries matching [prefix] in descending relevance.
+     * Returns host-bounded path entries matching the context's active prefix in
+     * descending relevance.
      *
      * @param request immutable completion request whose working-directory URI
      * scopes host-relative paths.
-     * @param prefix decoded active terminal path token.
-     * @return bounded immutable path result, or an empty list when no match is available.
+     * @param context semantic completion context resolved once by the engine.
+     * @return immutable path entries within the provider's independent host
+     * query budget, or an empty list when no match is available.
      */
     suspend fun entries(
         request: TerminalCompletionRequest,
-        prefix: String,
+        context: TerminalCompletionContext,
     ): List<TerminalFuzzyPathEntry>
 }

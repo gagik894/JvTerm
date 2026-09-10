@@ -15,20 +15,24 @@
  */
 package io.github.ketraterm.completion.source
 
-import io.github.ketraterm.completion.api.TerminalShellSyntax
 import io.github.ketraterm.completion.commandline.TerminalCommandLineContext
-import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
+import io.github.ketraterm.completion.internal.CompletionLearningContextKey
+import io.github.ketraterm.completion.internal.ParsedLearnedStatsRow
+import io.github.ketraterm.completion.model.TerminalCommandReplay
+import io.github.ketraterm.completion.model.TerminalCompletionRankingStats
 import java.util.*
 
-/** Immutable prefix-context index for positive persisted command rows. */
+/** Immutable exact-host-context and command-prefix index for positive learned command rows. */
 internal class LearnedHistoryCandidateIndex private constructor(
-    private val buckets: Map<List<String>, List<IndexedLearnedCommand>>,
+    private val buckets: Map<HistoryBucketKey, List<IndexedLearnedCommand>>,
 ) {
-    /** Returns only rows whose prior tokens and active-token prefix match [requestLine]. */
-    fun matching(requestLine: TerminalCommandLineContext): List<IndexedLearnedCommand> {
-        val key = requestLine.tokens.subList(0, requestLine.activeTokenIndex).map { it.text.lowercase(Locale.ROOT) }
+    /** Returns rows whose exact host context, prior tokens, and active-token prefix match the request. */
+    fun matching(
+        requestLine: TerminalCommandLineContext,
+        requestContext: CompletionLearningContextKey,
+    ): List<IndexedLearnedCommand> {
+        val priorTokens = requestLine.tokens.subList(0, requestLine.activeTokenIndex).map { it.text.lowercase(Locale.ROOT) }
+        val key = HistoryBucketKey(requestContext, priorTokens)
         val bucket = buckets[key] ?: return emptyList()
         val prefix = requestLine.activePrefix.lowercase(Locale.ROOT)
         val start = bucket.lowerBound(prefix)
@@ -53,26 +57,27 @@ internal class LearnedHistoryCandidateIndex private constructor(
     }
 
     companion object {
-        /** Builds one bounded index for an immutable snapshot and shell syntax. */
-        fun build(
-            snapshot: TerminalCommandCompletionStatsSnapshot,
-            shellSyntax: TerminalShellSyntax,
-        ): LearnedHistoryCandidateIndex {
-            val mutableBuckets = HashMap<List<String>, MutableList<IndexedLearnedCommand>>()
-            snapshot.commandStats.forEachIndexed { snapshotRank, stats ->
-                if (!stats.hasPositiveSuggestionSignal()) return@forEachIndexed
-                val line = TerminalCommandLineTokenizer.parse(stats.commandLine, stats.commandLine.length, shellSyntax)
+        /** Builds one bounded index from rows parsed by the shared learning compiler. */
+        fun build(rows: List<ParsedLearnedStatsRow>): LearnedHistoryCandidateIndex {
+            val mutableBuckets = HashMap<HistoryBucketKey, MutableList<IndexedLearnedCommand>>()
+            for (snapshotRank in rows.indices) {
+                val parsedRow = rows[snapshotRank]
+                val stats = parsedRow.stats
+                if (!stats.hasSuccessfulExecution()) continue
+                val line = parsedRow.lineContext
+                val learningContext = CompletionLearningContextKey.of(stats.profileId, stats.workingDirectoryUri)
+                val normalizedTokens = line.tokens.map { it.text.lowercase(Locale.ROOT) }
                 val indexedTokenCount = minOf(line.tokens.size, MAX_INDEXED_TOKEN_POSITIONS)
                 for (activeIndex in 0 until indexedTokenCount) {
-                    val token = line.tokens[activeIndex]
-                    val key = line.tokens.subList(0, activeIndex).map { it.text.lowercase(Locale.ROOT) }
+                    val key = HistoryBucketKey(learningContext, normalizedTokens.subList(0, activeIndex))
                     mutableBuckets
                         .getOrPut(key, ::ArrayList)
                         .add(
                             IndexedLearnedCommand(
                                 stats = stats,
+                                replay = parsedRow.replay,
                                 lineContext = line,
-                                normalizedActiveToken = token.text.lowercase(Locale.ROOT),
+                                normalizedActiveToken = normalizedTokens[activeIndex],
                                 snapshotRank = snapshotRank,
                             ),
                         )
@@ -90,12 +95,18 @@ internal class LearnedHistoryCandidateIndex private constructor(
     }
 }
 
+private data class HistoryBucketKey(
+    val context: CompletionLearningContextKey,
+    val priorTokens: List<String>,
+)
+
 /** Pre-tokenized positive command row retained by [LearnedHistoryCandidateIndex]. */
 internal data class IndexedLearnedCommand(
-    val stats: TerminalCommandCompletionStats,
+    val stats: TerminalCompletionRankingStats,
+    val replay: TerminalCommandReplay,
     val lineContext: TerminalCommandLineContext,
     val normalizedActiveToken: String,
     val snapshotRank: Int,
 )
 
-private fun TerminalCommandCompletionStats.hasPositiveSuggestionSignal(): Boolean = successCount > 0 || acceptedCount > 0
+private fun TerminalCompletionRankingStats.hasSuccessfulExecution(): Boolean = successCount > 0

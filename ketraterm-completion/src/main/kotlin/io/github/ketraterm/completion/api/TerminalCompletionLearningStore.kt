@@ -17,95 +17,107 @@ package io.github.ketraterm.completion.api
 
 import io.github.ketraterm.completion.internal.CompletionLearningIndexCache
 import io.github.ketraterm.completion.internal.CompletionLearningIndexes
-import io.github.ketraterm.completion.model.*
-import io.github.ketraterm.completion.stats.CommandCompletionStatsIndex
-import io.github.ketraterm.completion.stats.CommandShapeStatsIndex
-import io.github.ketraterm.completion.stats.CompletionFeedbackStatsIndex
+import io.github.ketraterm.completion.internal.terminalCompletionRankingIdentity
+import io.github.ketraterm.completion.model.TerminalCompletionFeedbackKind
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
+import io.github.ketraterm.completion.stats.CompletionLearningStatsIndex
 import io.github.ketraterm.completion.stats.isRecordableStatsEvent
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Mutable, bounded in-memory store for aggregated completion learning.
+ * Mutable, bounded in-memory store for exact command completion learning.
  *
- * Hosts may load and persist [snapshot] values, record command lifecycle
- * outcomes, and feed explicit popup feedback. The store performs no I/O and
- * does not emit candidates. All operations are thread-safe, and repeated
- * [snapshot] calls return the same immutable object until the next mutation.
+ * Hosts record command lifecycle outcomes and explicit popup feedback. Optional
+ * persistence may hydrate the store once through [mergeSnapshot] and persist
+ * [snapshot] values. The store performs no I/O and does not emit candidates.
+ * Mutations are serialized around one mutable exact index. Ranking rows retain
+ * only opaque identities; plaintext replay is attached only to successful
+ * commands that [TerminalCompletionReplayPolicy] approves. Published
+ * snapshots are immutable and retain identity until their contents change.
  *
- * @param capacity maximum distinct rows retained in each statistics family.
- * @param commandSpecs command specifications used to classify
- * privacy-preserving command-family shapes.
+ * @param capacity maximum distinct exact-command rows retained.
  * @throws IllegalArgumentException if [capacity] is not positive.
  */
 class TerminalCompletionLearningStore
     @JvmOverloads
     constructor(
-        private val capacity: Int = DEFAULT_CAPACITY,
-        commandSpecs: List<TerminalCommandSpec> = TerminalCommandSpecs.defaults(),
+        capacity: Int = DEFAULT_CAPACITY,
     ) {
-        init {
-            require(capacity > 0) { "capacity must be > 0, was $capacity" }
-        }
-
-        private val commandSpecs = commandSpecs.toList()
+        private val lock = Any()
+        private val learningStats = CompletionLearningStatsIndex(capacity)
         private val learningIndexCache = CompletionLearningIndexCache()
-        private val state = AtomicReference(emptyState())
 
-        /**
-         * Replaces all retained statistics with [snapshot].
-         *
-         * Each statistics family independently compacts duplicate keys,
-         * rejects malformed rows, and applies the configured capacity.
-         *
-         * @param snapshot compact completion-learning snapshot loaded by a host.
-         */
-        fun replaceSnapshot(snapshot: TerminalCommandCompletionStatsSnapshot) {
-            replaceState(stateFrom(snapshot))
-        }
+        @Volatile
+        private var publishedSnapshot = TerminalCompletionLearningSnapshot.EMPTY
+
+        @Volatile
+        private var snapshotDirty = false
 
         /**
          * Adds distinct aggregate events from [snapshot] to retained learning.
          *
-         * Rows sharing a canonical exact, shape, or provider context key have
-         * their counters added with saturation and retain the newest timestamp.
-         * Callers must not merge the same aggregate event set more than once.
+         * Opaque rows sharing an identity and canonical context have counters
+         * added with saturation. Replay rows are rechecked against the plaintext
+         * policy and must reference retained positive evidence. Callers must not merge the
+         * same aggregate event set more than once.
          *
          * @param snapshot aggregate events not already represented by this store.
          */
-        fun mergeSnapshot(snapshot: TerminalCommandCompletionStatsSnapshot) {
-            if (snapshot == TerminalCommandCompletionStatsSnapshot.EMPTY) return
-            updateState { current ->
-                val commandStats = current.commandStats.copy().apply { mergeAll(snapshot.commandStats) }
-                val shapeStats = current.shapeStats.copy().apply { mergeAll(snapshot.shapeStats) }
-                val feedbackStats = current.feedbackStats.copy().apply { mergeAll(snapshot.feedbackStats) }
-                createState(commandStats, shapeStats, feedbackStats)
+        fun mergeSnapshot(snapshot: TerminalCompletionLearningSnapshot) {
+            if (snapshot.rankingStats.isEmpty() && snapshot.replayCommands.isEmpty()) return
+            val sanitizedSnapshot =
+                snapshot.copy(
+                    replayCommands =
+                        snapshot.replayCommands.filter { replay ->
+                            TerminalCompletionReplayPolicy.allowsPlaintext(replay.commandLine)
+                        },
+                )
+            synchronized(lock) {
+                learningStats.mergeSnapshot(sanitizedSnapshot)
+                snapshotDirty = true
             }
         }
 
         /**
-         * Returns every retained statistics family in one immutable snapshot.
+         * Returns the current immutable exact-command statistics snapshot.
          *
-         * @return exact command, command-shape, and provider-feedback statistics.
+         * @return identity-stable snapshot until the retained rows change.
          */
-        fun snapshot(): TerminalCommandCompletionStatsSnapshot = state.get().snapshot
+        fun snapshot(): TerminalCompletionLearningSnapshot {
+            if (!snapshotDirty) return publishedSnapshot
+            return synchronized(lock) {
+                if (snapshotDirty) {
+                    val snapshot = learningStats.snapshot()
+                    if (publishedSnapshot != snapshot) publishedSnapshot = snapshot
+                    snapshotDirty = false
+                }
+                publishedSnapshot
+            }
+        }
 
-        /** Returns identity-cached learned indexes shared by ranking and history recovery. */
-        internal fun indexesFor(
-            shellSyntax: TerminalShellSyntax,
-            commandSpecs: List<TerminalCommandSpec>,
-        ): CompletionLearningIndexes = learningIndexCache.indexesFor(state.get().snapshot, shellSyntax, commandSpecs)
+        /** Removes all retained ranking evidence and replay commands. */
+        fun clear() {
+            synchronized(lock) {
+                learningStats.clear()
+                publishedSnapshot = TerminalCompletionLearningSnapshot.EMPTY
+                snapshotDirty = false
+            }
+        }
+
+        /** Returns identity-cached ranking, history, and observed-token indexes. */
+        internal fun indexesFor(shellSyntax: TerminalShellSyntax): CompletionLearningIndexes =
+            learningIndexCache.indexesFor(snapshot(), shellSyntax)
 
         /**
          * Records a completed command execution.
          *
-         * Blank, multiline, and otherwise non-recordable commands are ignored
-         * by the bounded indexes.
+         * Blank, multiline, and otherwise non-recordable commands are ignored.
          *
          * @param commandLine command text executed by the shell.
          * @param successful whether the command exited successfully.
          * @param profileId optional host profile id.
          * @param workingDirectoryUri optional working-directory URI.
          * @param usedAtEpochMillis host timestamp for the execution event.
+         * @return `true` if the retained exact-command rows changed.
          */
         fun recordCommandResult(
             commandLine: String,
@@ -113,139 +125,60 @@ class TerminalCompletionLearningStore
             profileId: String?,
             workingDirectoryUri: String?,
             usedAtEpochMillis: Long,
-        ) {
-            if (!isRecordableStatsEvent(commandLine, usedAtEpochMillis)) return
-            updateState { current ->
-                val commandStats = current.commandStats.copy()
-                commandStats.recordCommandResult(
-                    commandLine = commandLine,
-                    successful = successful,
-                    profileId = profileId,
-                    workingDirectoryUri = workingDirectoryUri,
-                    usedAtEpochMillis = usedAtEpochMillis,
-                )
-                val shapeStats = current.shapeStats.copy()
-                shapeStats.recordCommandResult(
-                    commandLine = commandLine,
-                    successful = successful,
-                    profileId = profileId,
-                    workingDirectoryUri = workingDirectoryUri,
-                    usedAtEpochMillis = usedAtEpochMillis,
-                )
-                createState(commandStats, shapeStats, current.feedbackStats)
+        ): Boolean {
+            if (!isRecordableStatsEvent(commandLine, usedAtEpochMillis)) return false
+            val identityDigest = terminalCompletionRankingIdentity(commandLine)
+            val replayCommand =
+                commandLine.takeIf {
+                    successful && TerminalCompletionReplayPolicy.allowsPlaintext(commandLine)
+                }
+            return synchronized(lock) {
+                val changed =
+                    learningStats.recordCommandResult(
+                        identityDigest = identityDigest,
+                        replayCommandLine = replayCommand,
+                        successful = successful,
+                        profileId = profileId,
+                        workingDirectoryUri = workingDirectoryUri,
+                        usedAtEpochMillis = usedAtEpochMillis,
+                    )
+                if (changed) snapshotDirty = true
+                changed
             }
         }
 
         /**
-         * Records explicit user feedback for a displayed suggestion.
+         * Records explicit user feedback for the exact suggested command.
          *
          * @param commandLine command text represented after applying the suggestion.
          * @param feedback accepted or dismissed feedback kind.
          * @param profileId optional host profile id.
          * @param workingDirectoryUri optional working-directory URI.
          * @param feedbackAtEpochMillis host timestamp for the feedback event.
-         * @param context optional source-specific candidate context.
+         * @return `true` if the retained exact-command rows changed.
          */
-        @JvmOverloads
         fun recordSuggestionFeedback(
             commandLine: String,
             feedback: TerminalCompletionFeedbackKind,
             profileId: String?,
             workingDirectoryUri: String?,
             feedbackAtEpochMillis: Long,
-            context: TerminalCompletionFeedbackContext? = null,
-        ) {
-            if (!isRecordableStatsEvent(commandLine, feedbackAtEpochMillis)) return
-            updateState { current ->
-                val commandStats = current.commandStats.copy()
-                commandStats.recordSuggestionFeedback(
-                    commandLine = commandLine,
-                    feedback = feedback,
-                    profileId = profileId,
-                    workingDirectoryUri = workingDirectoryUri,
-                    feedbackAtEpochMillis = feedbackAtEpochMillis,
-                )
-                val shapeStats = current.shapeStats.copy()
-                shapeStats.recordSuggestionFeedback(
-                    commandLine = commandLine,
-                    feedback = feedback,
-                    profileId = profileId,
-                    workingDirectoryUri = workingDirectoryUri,
-                    feedbackAtEpochMillis = feedbackAtEpochMillis,
-                )
-                val feedbackStats =
-                    if (context == null) {
-                        current.feedbackStats
-                    } else {
-                        current.feedbackStats.copy().also { feedbackStats ->
-                            feedbackStats.recordSuggestionFeedback(
-                                context = context,
-                                feedback = feedback,
-                                profileId = profileId,
-                                workingDirectoryUri = workingDirectoryUri,
-                                feedbackAtEpochMillis = feedbackAtEpochMillis,
-                            )
-                        }
-                    }
-                createState(commandStats, shapeStats, feedbackStats)
+        ): Boolean {
+            if (!isRecordableStatsEvent(commandLine, feedbackAtEpochMillis)) return false
+            val identityDigest = terminalCompletionRankingIdentity(commandLine)
+            return synchronized(lock) {
+                val changed =
+                    learningStats.recordSuggestionFeedback(
+                        identityDigest = identityDigest,
+                        feedback = feedback,
+                        profileId = profileId,
+                        workingDirectoryUri = workingDirectoryUri,
+                        feedbackAtEpochMillis = feedbackAtEpochMillis,
+                    )
+                if (changed) snapshotDirty = true
+                changed
             }
         }
-
-        private fun emptyState(): LearningState =
-            createState(
-                CommandCompletionStatsIndex(capacity),
-                CommandShapeStatsIndex(capacity, commandSpecs),
-                CompletionFeedbackStatsIndex(capacity),
-            )
-
-        private fun stateFrom(snapshot: TerminalCommandCompletionStatsSnapshot): LearningState {
-            val commandStats = CommandCompletionStatsIndex(capacity).apply { replaceAll(snapshot.commandStats) }
-            val shapeStats = CommandShapeStatsIndex(capacity, commandSpecs).apply { replaceAll(snapshot.shapeStats) }
-            val feedbackStats = CompletionFeedbackStatsIndex(capacity).apply { replaceAll(snapshot.feedbackStats) }
-            return createState(commandStats, shapeStats, feedbackStats)
-        }
-
-        private fun createState(
-            commandStats: CommandCompletionStatsIndex,
-            shapeStats: CommandShapeStatsIndex,
-            feedbackStats: CompletionFeedbackStatsIndex,
-        ): LearningState =
-            LearningState(
-                commandStats = commandStats,
-                shapeStats = shapeStats,
-                feedbackStats = feedbackStats,
-                snapshot =
-                    TerminalCommandCompletionStatsSnapshot(
-                        commandStats = commandStats.snapshot(),
-                        shapeStats = shapeStats.snapshot(),
-                        feedbackStats = feedbackStats.snapshot(),
-                    ),
-            )
-
-        private fun replaceState(replacement: LearningState) {
-            while (true) {
-                val current = state.get()
-                if (current.snapshot == replacement.snapshot) return
-                if (state.compareAndSet(current, replacement)) return
-            }
-        }
-
-        private fun updateState(transform: (LearningState) -> LearningState) {
-            while (true) {
-                val current = state.get()
-                val updated = transform(current)
-                if (current.snapshot == updated.snapshot) return
-                if (state.compareAndSet(current, updated)) return
-            }
-        }
-
-        /** Copy-on-write state; contained indexes are never mutated after publication. */
-        private class LearningState(
-            val commandStats: CommandCompletionStatsIndex,
-            val shapeStats: CommandShapeStatsIndex,
-            val feedbackStats: CompletionFeedbackStatsIndex,
-            val snapshot: TerminalCommandCompletionStatsSnapshot,
-        )
 
         private companion object {
             private const val DEFAULT_CAPACITY = 2048

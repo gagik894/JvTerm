@@ -1,44 +1,26 @@
 ---
 name: terminal-unicode-text
-description: Unicode/text guidance for this terminal emulator. Use when changing UTF-8 decoding, PrintableProcessor, CharsetMapper, GraphemeAssembler, GraphemeSegmenter, UnicodeClass, generated Unicode tables, grapheme clustering, or core width policy.
+description: Use for Unicode-specific changes to UTF-8 decoding, charset mapping, grapheme segmentation, generated Unicode classification, cluster assembly, or core width policy. Do not invoke for ordinary parser/core work without Unicode semantics.
 ---
 
 # Terminal Unicode and Text
 
-Use this skill when changing text ingestion, Unicode classification, grapheme
-assembly, charset mapping, or width behavior.
+Read the root plus the affected parser/core module guides.
 
-## Ownership
+## Ownership and hot paths
 
-- `TerminalParser` owns UTF-8 decoding and malformed-byte replay.
-- Parser text code owns charset mapping and grapheme segmentation.
-- Core owns width calculation and ambiguous-width policy.
+- Parser owns UTF-8 recovery, charset mapping, grapheme segmentation, and
+  cluster assembly.
+- Core owns cell width and ambiguous-width policy.
+- Keep classification table-shaped, primitive, and allocation-free in hot
+  paths; do not use regex, ICU, or `BreakIterator`.
+- Do not add another UTF-8 decoder to `PrintableProcessor`.
+- Clear grapheme context completely after flush, abort, reset, or end-of-input.
 
-Do not add a second UTF-8 decoder to `PrintableProcessor`. Do not calculate cell
-width in parser.
+## Verification
 
-## Unicode Rules
-
-- Use generated-table-shaped APIs even when seed data is curated.
-- Keep hot-path classification primitive and allocation-free.
-- Do not use regex, ICU, or `BreakIterator` in hot paths.
-- Keep grapheme context clearing complete after cluster flush.
-
-## Test Checklist
-
-Cover:
-
-- ASCII fast path.
-- valid 2-, 3-, and 4-byte UTF-8.
-- malformed UTF-8 followed by ASCII and ESC.
-- combining marks.
-- variation selectors.
-- ZWJ emoji sequences.
-- regional indicator pairs and triples.
-- Hangul Jamo sequences.
-- DEC Special Graphics and active/inactive GL slots.
-- SS2/SS3 single shifts for one character only.
-- chunk boundaries.
-
-The key hostile case: malformed UTF-8 followed by ESC must emit U+FFFD and then
-route ESC structurally, not print ESC as text.
+Cover the changed Unicode rule with ASCII, valid multi-byte input, malformed
+recovery, and relevant combining, variation-selector, ZWJ, regional-indicator,
+Hangul, charset-shift, and chunk-boundary cases. The critical recovery invariant
+is that malformed UTF-8 followed by ESC emits replacement text and then routes
+ESC structurally.

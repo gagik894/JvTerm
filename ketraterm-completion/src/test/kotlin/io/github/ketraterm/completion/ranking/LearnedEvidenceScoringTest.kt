@@ -24,22 +24,28 @@ class LearnedEvidenceScoringTest {
         val counts =
             LearnedEvidenceCounts(
                 useCount = Long.MAX_VALUE,
-                successCount = Long.MAX_VALUE,
                 acceptedCount = Long.MAX_VALUE,
             )
 
-        assertEquals(390, LearnedEvidenceScoring.exact(counts, contextBoost = 0, nowEpochMillis = 0))
+        assertEquals(350, LearnedEvidenceScoring.exact(counts, contextBoost = 0, nowEpochMillis = 0))
     }
 
     @Test
-    fun `saturated negative evidence remains bounded`() {
+    fun `saturated dismissal evidence remains bounded`() {
         val counts =
             LearnedEvidenceCounts(
-                failureCount = Long.MAX_VALUE,
                 dismissedCount = Long.MAX_VALUE,
             )
 
         assertEquals(-200, LearnedEvidenceScoring.exact(counts, contextBoost = 0, nowEpochMillis = 0))
+    }
+
+    @Test
+    fun `recent dismissal without positive evidence remains negative`() {
+        val now = 2_000_000_000_000L
+        val counts = LearnedEvidenceCounts(dismissedCount = 1, lastUsedEpochMillis = now)
+
+        assertEquals(-10, LearnedEvidenceScoring.exact(counts, contextBoost = 50, nowEpochMillis = now))
     }
 
     @Test

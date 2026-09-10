@@ -17,16 +17,9 @@ package io.github.ketraterm.completion.api
 
 /**
  * Suspending completion source contract for one provider such as static
- * command specs, session MRU, indexed history, path completion, or IDE context.
+ * command specs, path completion, or IDE context.
  */
 fun interface TerminalCompletionSource {
-    /**
-     * Whether this source operates strictly in memory without suspending or blocking I/O.
-     * Fast in-memory sources are evaluated synchronously on the request coroutine for immediate UI emission.
-     */
-    val isFastInMemory: Boolean
-        get() = false
-
     /**
      * Returns candidates produced by this source for [request] and [context].
      *

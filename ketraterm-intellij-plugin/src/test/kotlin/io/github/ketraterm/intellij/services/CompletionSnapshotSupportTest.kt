@@ -16,28 +16,11 @@
 package io.github.ketraterm.intellij.services
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.nio.file.Path
 
-/** Pure tests for bounded and lexical IntelliJ snapshot support. */
+/** Pure tests for lexical IntelliJ completion-path support. */
 class CompletionSnapshotSupportTest {
-    @Test
-    fun `bounded collector retains the best deterministic values`() {
-        val collector = BoundedSnapshotCollector(capacity = 3, order = compareBy<String> { it })
-
-        listOf("delta", "alpha", "charlie", "bravo", "echo").forEach(collector::add)
-
-        assertEquals(listOf("alpha", "bravo", "charlie"), collector.toSortedList())
-    }
-
-    @Test
-    fun `bounded collector rejects a nonpositive capacity`() {
-        assertThrows(IllegalArgumentException::class.java) {
-            BoundedSnapshotCollector(capacity = 0, order = compareBy<String> { it })
-        }
-    }
-
     @Test
     fun `relative completion paths use shell separators and preserve parent navigation`() {
         val base = Path.of("project", "module").toAbsolutePath()

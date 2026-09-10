@@ -16,9 +16,8 @@
 package io.github.ketraterm.completion.source
 
 import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.completion.internal.TERMINAL_COMPLETION_CANDIDATE_ORDER
-import io.github.ketraterm.completion.internal.boundedTo
-import kotlinx.coroutines.CancellationException
+import io.github.ketraterm.completion.internal.BoundedCompletionCandidateCollector
+import io.github.ketraterm.completion.matching.CompletionMatcher
 
 /**
  * Autocomplete source for directory contents and file paths.
@@ -38,6 +37,7 @@ internal class PathCompletionSource(
         context: TerminalCompletionContext,
         limit: Int,
     ): List<TerminalCompletionCandidate> {
+        require(limit > 0) { "limit must be > 0, was $limit" }
         val workingDir = request.workingDirectoryUri ?: return emptyList()
         val prefix = context.activePrefix
         if (!allowsPathCompletion(context.activePosition, context.expectedPathKind, prefix)) {
@@ -49,53 +49,59 @@ internal class PathCompletionSource(
         val directoryPortion = pathParts.directoryPrefix
         val filePrefix = pathParts.entryNamePrefix
         val entries =
-            try {
-                fileSystemProvider.listDirectory(
-                    TerminalDirectoryListingRequest(
-                        workingDirectoryUri = workingDir,
-                        directoryPrefix = directoryPortion,
-                        entryNamePrefix = filePrefix,
-                    ),
-                )
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Exception) {
-                return emptyList()
-            }
+            fileSystemProvider.listDirectory(
+                TerminalDirectoryListingRequest(
+                    workingDirectoryUri = workingDir,
+                    directoryPrefix = directoryPortion,
+                    entryNamePrefix = filePrefix,
+                ),
+            )
 
         val pathSeparator = if (prefix.contains('\\')) '\\' else '/'
-        val candidates = ArrayList<TerminalCompletionCandidate>()
+        val candidates = BoundedCompletionCandidateCollector(limit)
         var orderIndex = 0
 
         for ((name, isDirectory) in entries) {
             if (!context.expectedPathKind.acceptsPathEntry(isDirectory)) continue
             if (!context.expectedHiddenPathPolicy.acceptsPath(name, filePrefix)) continue
-            if (matchesPrefix(name, filePrefix)) {
-                val rawSuffix = if (isDirectory) "$pathSeparator" else ""
-                val rawReplacement = directoryPortion + name + rawSuffix
-                val replacementText =
-                    ShellReplacementText.encode(
-                        value = if (pathSeparator == '\\') rawReplacement.replace('/', '\\') else rawReplacement,
-                        activeTokenQuote = context.activeTokenQuote,
-                        policy = request.shellCapabilities.quoting,
-                    ) ?: continue
-
-                candidates +=
-                    TerminalCompletionCandidate(
-                        replacementText = replacementText,
-                        replacementStartOffset = context.replacementStartOffset,
-                        replacementEndOffset = context.replacementEndOffset,
-                        displayText = name + (if (isDirectory) "$pathSeparator" else ""),
-                        detail = if (isDirectory) "directory" else "file",
-                        source = SOURCE_PATH,
-                        kind = TerminalCompletionCandidateKind.PATH,
-                        score = score(name, filePrefix, PATH_BASE_SCORE, orderIndex++),
-                    )
+            val match = CompletionMatcher.match(name, filePrefix) ?: continue
+            if (!match.matchedRanges.isEmpty() && match.matchedRanges.startOffset(0) != 0) continue
+            val rawSuffix = if (isDirectory) "$pathSeparator" else ""
+            val rawReplacement = directoryPortion + name + rawSuffix
+            val normalizedReplacement = if (pathSeparator == '\\') rawReplacement.replace('/', '\\') else rawReplacement
+            if (!ShellReplacementText.canEncode(
+                    normalizedReplacement,
+                    context.activeTokenQuote,
+                    request.shellCapabilities.quoting,
+                )
+            ) {
+                continue
             }
+            val candidateScore = match.sourceScore(PATH_BASE_SCORE, filePrefix, orderIndex++)
+            if (!candidates.shouldMaterialize(candidateScore)) continue
+            val replacementText =
+                ShellReplacementText.encode(
+                    value = normalizedReplacement,
+                    activeTokenQuote = context.activeTokenQuote,
+                    policy = request.shellCapabilities.quoting,
+                ) ?: continue
+
+            candidates.offer(
+                TerminalCompletionCandidate(
+                    replacementText = replacementText,
+                    replacementStartOffset = context.replacementStartOffset,
+                    replacementEndOffset = context.replacementEndOffset,
+                    displayText = name + rawSuffix,
+                    detail = if (isDirectory) "directory" else "file",
+                    source = SOURCE_PATH,
+                    kind = TerminalCompletionCandidateKind.PATH,
+                    score = candidateScore,
+                    matchedRanges = match.matchedRanges,
+                ),
+            )
         }
 
-        candidates.sortWith(TERMINAL_COMPLETION_CANDIDATE_ORDER)
-        return candidates.boundedTo(limit)
+        return candidates.finish()
     }
 
     private fun splitPathPrefix(prefix: String): PathParts? {
@@ -110,23 +116,6 @@ internal class PathCompletionSource(
         } else {
             PathParts(directoryPrefix = "", entryNamePrefix = prefix)
         }
-    }
-
-    private fun matchesPrefix(
-        value: String,
-        prefix: String,
-    ): Boolean = prefix.isEmpty() || value.startsWith(prefix, ignoreCase = true)
-
-    private fun score(
-        value: String,
-        prefix: String,
-        base: Int,
-        orderIndex: Int,
-    ): Int {
-        if (prefix.isEmpty()) return base - orderIndex
-        val caseBonus = if (value.startsWith(prefix)) 40 else 20
-        val completionLengthPenalty = value.length - prefix.length
-        return base + caseBonus - completionLengthPenalty - orderIndex
     }
 
     private companion object {

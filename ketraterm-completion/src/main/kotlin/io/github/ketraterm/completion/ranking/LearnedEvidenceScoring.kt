@@ -15,48 +15,23 @@
  */
 package io.github.ketraterm.completion.ranking
 
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
+import io.github.ketraterm.completion.model.TerminalCompletionRankingStats
 
-/** Saturating aggregate for command frecency learning. */
-internal data class LearnedEvidenceCounts(
+/** Saturating aggregate for exact command learning. */
+internal class LearnedEvidenceCounts(
     var useCount: Long = 0,
-    var successCount: Long = 0,
-    var failureCount: Long = 0,
     var acceptedCount: Long = 0,
     var dismissedCount: Long = 0,
     var lastUsedEpochMillis: Long = 0,
 ) {
-    private fun add(
-        useCount: Int,
-        successCount: Int,
-        failureCount: Int,
-        acceptedCount: Int,
-        dismissedCount: Int,
-        lastUsedEpochMillis: Long,
-    ) {
-        this.useCount = saturatedAdd(this.useCount, useCount.toLong())
-        this.successCount = saturatedAdd(this.successCount, successCount.toLong())
-        this.failureCount = saturatedAdd(this.failureCount, failureCount.toLong())
-        this.acceptedCount = saturatedAdd(this.acceptedCount, acceptedCount.toLong())
-        this.dismissedCount = saturatedAdd(this.dismissedCount, dismissedCount.toLong())
-        this.lastUsedEpochMillis = maxOf(this.lastUsedEpochMillis, lastUsedEpochMillis)
+    fun add(row: TerminalCompletionRankingStats) {
+        useCount = saturatedAdd(useCount, row.useCount.toLong())
+        acceptedCount = saturatedAdd(acceptedCount, row.acceptedCount.toLong())
+        dismissedCount = saturatedAdd(dismissedCount, row.dismissedCount.toLong())
+        lastUsedEpochMillis = maxOf(lastUsedEpochMillis, row.lastUsedEpochMillis)
     }
 
-    companion object {
-        fun fromCommands(rows: List<TerminalCommandCompletionStats>): LearnedEvidenceCounts =
-            LearnedEvidenceCounts().also { counts ->
-                for (row in rows) {
-                    counts.add(
-                        row.useCount,
-                        row.successCount,
-                        row.failureCount,
-                        row.acceptedCount,
-                        row.dismissedCount,
-                        row.lastUsedEpochMillis,
-                    )
-                }
-            }
-
+    private companion object {
         private fun saturatedAdd(
             left: Long,
             right: Long,
@@ -72,15 +47,11 @@ internal object LearnedEvidenceScoring {
         nowEpochMillis: Long,
     ): Int {
         var score = minOf(counts.useCount, EXACT_MAX_USE_COUNT) * EXACT_USE_SCORE
-        score +=
-            if (counts.successCount >= counts.failureCount) {
-                minOf(counts.successCount, 10L) * 4L
-            } else {
-                -minOf(counts.failureCount, 10L) * 4L
-            }
         score += (counts.acceptedCount - counts.dismissedCount).coerceIn(-20L, 20L) * 10L
-        score += contextBoost
-        score += recencyBoost(nowEpochMillis, counts.lastUsedEpochMillis)
+        if (counts.useCount > 0 || counts.acceptedCount > 0) {
+            score += contextBoost
+            score += recencyBoost(nowEpochMillis, counts.lastUsedEpochMillis)
+        }
         return score.coerceIn(EXACT_MIN_ADJUSTMENT, EXACT_MAX_ADJUSTMENT).toInt()
     }
 

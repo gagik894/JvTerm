@@ -82,6 +82,15 @@ class IntellijProjectFileLoaderTest : BasePlatformTestCase() {
         assertTrue("read action was not restarted", resolutions.get() >= 2)
     }
 
+    /** Verifies that the engine's 256-candidate cap does not truncate the host query. */
+    fun testProjectFileQueryUsesItsOwnHostBudget() {
+        repeat(300) { index -> myFixture.addFileToProject("BoundedFile$index.kt", "") }
+
+        val entries = load("BoundedFile")
+
+        assertTrue(entries.size > 256)
+    }
+
     private fun load(prefix: String) = runBlocking { loader().load(projectDirectoryUri(), prefix) }
 
     private fun loader(): IntellijProjectFileLoader {

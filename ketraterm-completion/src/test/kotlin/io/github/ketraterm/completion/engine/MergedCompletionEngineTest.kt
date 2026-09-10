@@ -16,11 +16,14 @@
 package io.github.ketraterm.completion.engine
 
 import io.github.ketraterm.completion.api.*
+import io.github.ketraterm.completion.model.TerminalCommandSpec
 import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.toList
+import java.io.IOException
 import kotlin.test.*
+import kotlin.time.Duration.Companion.milliseconds
 
 class MergedCompletionEngineTest {
     @Test
@@ -65,6 +68,44 @@ class MergedCompletionEngineTest {
         }
 
     @Test
+    fun `specs publish directly before suspending host sources`() =
+        runBlocking {
+            val hostStarted = CompletableDeferred<Unit>()
+            val releaseHost = CompletableDeferred<Unit>()
+            val engine =
+                TerminalCompletionEngines.fromSources(
+                    sources =
+                        listOf(
+                            entry(
+                                TerminalCompletionSource { _, _, _ ->
+                                    hostStarted.complete(Unit)
+                                    releaseHost.await()
+                                    listOf(
+                                        candidate(
+                                            replacement = "storage",
+                                            end = 2,
+                                            source = "host",
+                                            kind = TerminalCompletionCandidateKind.COMMAND,
+                                        ),
+                                    )
+                                },
+                                priority = 0,
+                            ),
+                        ),
+                    commandSpecs = listOf(TerminalCommandSpec("status")),
+                )
+
+            val collected = async { engine.completions(request("st")).toList() }
+            hostStarted.await()
+            releaseHost.complete(Unit)
+
+            val emissions = collected.await()
+            assertEquals(listOf("status"), emissions.first().map { it.replacementText })
+            assertEquals("spec", emissions.first().single().source)
+            assertTrue(emissions.last().any { it.source == "host" })
+        }
+
+    @Test
     fun `source failure is isolated from progressive results`() =
         runBlocking {
             val failedSource = TerminalCompletionSource { _, _, _ -> error("failed source") }
@@ -88,6 +129,35 @@ class MergedCompletionEngineTest {
             assertEquals(0, failureEvents.single().sourceIndex)
             assertSame(failedSource, failureEvents.single().source.source)
             assertEquals("failed source", failureEvents.single().failure.message)
+        }
+
+    @Test
+    fun `path provider failure reaches the centralized source diagnostic`() =
+        runBlocking {
+            val failure = IOException("directory access failed")
+            val pathSource = TerminalCompletionSources.path(TerminalFileSystemProvider { throw failure })
+            val failureEvents = mutableListOf<RecordedSourceFailure>()
+            val engine =
+                TerminalCompletionEngines.fromSources(
+                    sources = listOf(entry(pathSource, 0)),
+                    commandSpecs = emptyList(),
+                    sourceFailureHandler =
+                        TerminalCompletionSourceFailureHandler { index, source, reportedFailure ->
+                            failureEvents += RecordedSourceFailure(index, source, reportedFailure)
+                        },
+                )
+            val request =
+                TerminalCompletionRequest(
+                    commandLine = "./r",
+                    cursorOffset = 3,
+                    workingDirectoryUri = "file:///project",
+                )
+
+            assertEquals(emptyList(), engine.complete(request))
+            assertEquals(1, failureEvents.size)
+            assertEquals(0, failureEvents.single().sourceIndex)
+            assertSame(pathSource, failureEvents.single().source.source)
+            assertSame(failure, failureEvents.single().failure)
         }
 
     @Test
@@ -216,14 +286,14 @@ class MergedCompletionEngineTest {
                 TerminalCompletionEngines.fromSources(
                     listOf(
                         entry(source(candidate("status", source = "spec", score = 900)), priority = 0),
-                        entry(source(candidate("switch", source = "mru", score = 1)), priority = 100),
+                        entry(source(candidate("switch", source = "learned", score = 1)), priority = 100),
                     ),
                 )
 
             val candidates = engine.complete(request())
 
             assertEquals(listOf("switch", "status"), candidates.map { it.replacementText })
-            assertEquals(listOf("mru", "spec"), candidates.map { it.source })
+            assertEquals(listOf("learned", "spec"), candidates.map { it.source })
         }
 
     @Test
@@ -233,7 +303,7 @@ class MergedCompletionEngineTest {
                 TerminalCompletionEngines.fromSources(
                     listOf(
                         entry(source(candidate("status", detail = "static", source = "spec", score = 900)), priority = 0),
-                        entry(source(candidate("status", detail = "recent", source = "mru", score = 1)), priority = 100),
+                        entry(source(candidate("status", detail = "recent", source = "learned", score = 1)), priority = 100),
                     ),
                 )
 
@@ -241,7 +311,7 @@ class MergedCompletionEngineTest {
 
             assertEquals(listOf("status"), candidates.map { it.replacementText })
             assertEquals("recent", candidates.single().detail)
-            assertEquals("mru", candidates.single().source)
+            assertEquals("learned", candidates.single().source)
         }
 
     @Test
@@ -297,7 +367,7 @@ class MergedCompletionEngineTest {
                                 start = 0,
                                 end = 5,
                                 source = "mixed",
-                                kind = TerminalCompletionCandidateKind.HISTORY,
+                                kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 score = 1_000 - index,
                             ),
                         )
@@ -316,16 +386,21 @@ class MergedCompletionEngineTest {
             var collectionLimit = 0
             val engine =
                 TerminalCompletionEngines.fromSources(
-                    TerminalCompletionSource { _, _, limit ->
-                        collectionLimit = limit
-                        rawCandidates.take(limit)
-                    },
+                    listOf(
+                        entry(
+                            TerminalCompletionSource { _, _, limit ->
+                                collectionLimit = limit
+                                rawCandidates.take(limit)
+                            },
+                            priority = 0,
+                        ),
+                    ),
                 )
 
             val candidates = engine.complete(request(commandLine = "git s"))
 
             assertEquals(256, collectionLimit)
-            assertEquals(11, candidates.size)
+            assertEquals(12, candidates.size)
             assertEquals("spec", candidates.first().source)
             assertEquals(TerminalCompletionCandidateKind.SUBCOMMAND, candidates.first().kind)
         }
@@ -411,7 +486,10 @@ class MergedCompletionEngineTest {
                         index++
                     }
                 }
-            val engine = TerminalCompletionEngines.fromSources(TerminalCompletionSource { _, _, _ -> candidates })
+            val engine =
+                TerminalCompletionEngines.fromSources(
+                    listOf(entry(TerminalCompletionSource { _, _, _ -> candidates }, priority = 0)),
+                )
 
             val actual = engine.complete(request())
             val expected =
@@ -432,9 +510,14 @@ class MergedCompletionEngineTest {
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
-                    source(
-                        candidate("zeta", display = "zeta", score = 10),
-                        candidate("alpha", display = "alpha", score = 10),
+                    listOf(
+                        entry(
+                            source(
+                                candidate("zeta", display = "zeta", score = 10),
+                                candidate("alpha", display = "alpha", score = 10),
+                            ),
+                            priority = 0,
+                        ),
                     ),
                 )
 
@@ -444,7 +527,7 @@ class MergedCompletionEngineTest {
         }
 
     @Test
-    fun `path candidates outrank history in cd positional path position`() =
+    fun `path candidates outrank generic arguments in cd positional path position`() =
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
@@ -455,8 +538,8 @@ class MergedCompletionEngineTest {
                                     replacement = "cd remembered",
                                     start = 0,
                                     end = 3,
-                                    source = "mru",
-                                    kind = TerminalCompletionCandidateKind.HISTORY,
+                                    source = "learned",
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             priority = 100,
@@ -482,7 +565,7 @@ class MergedCompletionEngineTest {
         }
 
     @Test
-    fun `subcommand candidates outrank history and paths in subcommand position`() =
+    fun `subcommand candidates outrank generic arguments and paths in subcommand position`() =
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
@@ -493,8 +576,8 @@ class MergedCompletionEngineTest {
                                     replacement = "git stash",
                                     start = 0,
                                     end = 5,
-                                    source = "mru",
-                                    kind = TerminalCompletionCandidateKind.HISTORY,
+                                    source = "learned",
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             priority = 100,
@@ -532,7 +615,7 @@ class MergedCompletionEngineTest {
         }
 
     @Test
-    fun `static option values outrank history in option value position`() =
+    fun `static option values prefer narrow edits over generic whole-command edits`() =
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
@@ -543,8 +626,8 @@ class MergedCompletionEngineTest {
                                     replacement = "aws --output table",
                                     start = 0,
                                     end = 14,
-                                    source = "mru",
-                                    kind = TerminalCompletionCandidateKind.HISTORY,
+                                    source = "learned",
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             priority = 100,
@@ -571,7 +654,7 @@ class MergedCompletionEngineTest {
         }
 
     @Test
-    fun `option names outrank history and paths in option name position`() =
+    fun `option names outrank generic arguments and paths in option name position`() =
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
@@ -582,8 +665,8 @@ class MergedCompletionEngineTest {
                                     replacement = "git status",
                                     start = 0,
                                     end = 5,
-                                    source = "mru",
-                                    kind = TerminalCompletionCandidateKind.HISTORY,
+                                    source = "learned",
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             priority = 100,
@@ -621,7 +704,7 @@ class MergedCompletionEngineTest {
         }
 
     @Test
-    fun `dynamic positional domain candidates outrank paths and history`() =
+    fun `dynamic positional domain candidates outrank paths and generic arguments`() =
         runBlocking {
             val engine =
                 TerminalCompletionEngines.fromSources(
@@ -644,8 +727,8 @@ class MergedCompletionEngineTest {
                                     replacement = "git switch main",
                                     start = 0,
                                     end = 14,
-                                    source = "mru",
-                                    kind = TerminalCompletionCandidateKind.HISTORY,
+                                    source = "learned",
+                                    kind = TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             priority = 100,
@@ -717,7 +800,7 @@ class MergedCompletionEngineTest {
             val engine = TerminalCompletionEngines.fromSources(emptyList<TerminalCompletionSourceEntry>())
 
             assertEquals(
-                listOf("status", "stash", "switch"),
+                listOf("show", "status", "switch", "stash"),
                 engine.complete(request(commandLine = "git s")).map { it.replacementText },
             )
         }
@@ -728,10 +811,15 @@ class MergedCompletionEngineTest {
             var sourceCalls = 0
             val engine =
                 TerminalCompletionEngines.fromSources(
-                    TerminalCompletionSource { _, _, _ ->
-                        sourceCalls++
-                        listOf(candidate("unexpected"))
-                    },
+                    listOf(
+                        entry(
+                            TerminalCompletionSource { _, _, _ ->
+                                sourceCalls++
+                                listOf(candidate("unexpected"))
+                            },
+                            priority = 0,
+                        ),
+                    ),
                 )
             val commandLine = "git status && cd"
 
@@ -771,13 +859,50 @@ class MergedCompletionEngineTest {
         }
 
     @Test
+    fun `learning mutation during a request is visible only to the next request`() =
+        runBlocking {
+            val learningStore = TerminalCompletionLearningStore()
+            learningStore.recordCommandResult(
+                commandLine = "tool old",
+                successful = true,
+                profileId = null,
+                workingDirectoryUri = null,
+                usedAtEpochMillis = 1L,
+            )
+            var mutationTimestamp = 2L
+            val mutatingSource =
+                TerminalCompletionSource { _, _, _ ->
+                    learningStore.recordCommandResult(
+                        commandLine = "tool new",
+                        successful = true,
+                        profileId = null,
+                        workingDirectoryUri = null,
+                        usedAtEpochMillis = mutationTimestamp++,
+                    )
+                    emptyList()
+                }
+            val engine =
+                TerminalCompletionEngines.fromSources(
+                    sources = listOf(entry(mutatingSource, priority = 0)),
+                    commandSpecs = emptyList(),
+                    learningStore = learningStore,
+                )
+
+            val firstRequest = engine.complete(request("tool "))
+            val secondRequest = engine.complete(request("tool "))
+
+            assertEquals(listOf("old"), firstRequest.map { it.replacementText })
+            assertEquals(setOf("old", "new"), secondRequest.map { it.replacementText }.toSet())
+        }
+
+    @Test
     fun `rapid typing bursts cleanly cancel obsolete queries and converge to final request`(): Unit =
         runBlocking {
             var activeCancelledCount = 0
             val delayedSource =
-                TerminalCompletionSource { req, ctx, _ ->
+                TerminalCompletionSource { req, _, _ ->
                     try {
-                        delay(20)
+                        delay(20.milliseconds)
                         listOf(
                             TerminalCompletionCandidate(
                                 replacementText = req.commandLine + "-done",
@@ -811,7 +936,7 @@ class MergedCompletionEngineTest {
                             lastEmitted = it
                         }
                     }
-                delay(2) // simulate fast keystroke typing interval (2ms)
+                delay(2.milliseconds) // simulate fast keystroke typing interval (2ms)
             }
 
             currentJob?.join()
@@ -824,17 +949,17 @@ class MergedCompletionEngineTest {
         runBlocking {
             val sourceA =
                 TerminalCompletionSource { _, _, _ ->
-                    delay(5)
+                    delay(5.milliseconds)
                     listOf(candidate("alpha", source = "sourceA", score = 10))
                 }
             val sourceB =
                 TerminalCompletionSource { _, _, _ ->
-                    delay(15)
+                    delay(15.milliseconds)
                     listOf(candidate("beta", source = "sourceB", score = 20))
                 }
             val sourceC =
                 TerminalCompletionSource { _, _, _ ->
-                    delay(25)
+                    delay(25.milliseconds)
                     listOf(candidate("gamma", source = "sourceC", score = 30))
                 }
 

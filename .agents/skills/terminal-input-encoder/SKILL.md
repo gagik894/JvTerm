@@ -1,43 +1,30 @@
 ---
-name: ketraterm-input-encoder
-description: Input encoder guidance for this Kotlin terminal repository. Use when adding or changing ketraterm-input keyboard, paste, focus, mouse, host-output, or input mode-bit behavior.
+name: terminal-input-encoder
+description: Use for changes to ketraterm-input event vocabulary or keyboard, paste, focus, mouse, host-output, and mode-dependent byte encoding. Do not invoke for UI event collection or terminal-output parsing.
 ---
 
 # Terminal Input Encoder
 
-Use this skill for work in `:ketraterm-input` or shared API needed by input.
+Read the root guide, `ketraterm-input/AGENTS.md`, and
+`ketraterm-input/docs/terminal-input-contract.md`.
 
-## Workflow
+## Encoding rules
 
-1. Read root `AGENTS.md`, then `ketraterm-input/AGENTS.md`.
-2. Follow `ketraterm-input/docs/ketraterm-input-implementation-plan.md`.
-3. Keep `TerminalHostOutput` in `:ketraterm-protocol`.
-4. Read packed mode bits once per event through core's input-readable API.
-5. Add tests before or alongside each behavior slice.
-6. Keep mouse deferred until keyboard, paste, and focus are implemented and
-   passing.
+- Accept normalized input events and emit host-bound bytes only.
+- Read the packed input-facing mode state once per event through public core
+  helpers; do not decode bit positions locally.
+- Keep dynamic CSI/SS3 construction allocation-conscious with reusable scratch
+  storage.
+- Write through `TerminalHostOutput`. Its byte-range consumer must synchronously
+  consume or copy data because buffers may be reused immediately.
+- Keep UI toolkit types, parser state, grid storage, cursor internals, and
+  renderer state outside this module.
+- Add shared vocabulary to the owning protocol/core API rather than inventing
+  input-local semantics.
 
-## Boundaries
+## Verification
 
-- Input encodes host-bound bytes; it does not parse terminal output.
-- Input may depend on protocol vocabulary and core API mode reads.
-- Input must not depend on parser, host, grid storage, cursor internals,
-  renderer state, or UI toolkit types.
-- Do not decode mode bit positions inside input. Add missing helper methods to
-  the core API first.
-
-## Hot Path Rules
-
-- Use primitive bit masks for modifiers.
-- Use reusable scratch buffers for dynamic CSI/SS3 sequences.
-- Avoid `StringBuilder`, `sliceArray`, regex, or allocation-heavy helpers in
-  encoder hot paths.
-- `writeBytes(bytes, offset, length)` consumers must synchronously consume or
-  copy the byte range because encoders may immediately reuse buffers.
-
-## Testing
-
-Assert exact bytes for every encoded event. Include validation failures,
-modifier CSI parameters, UTF-8 printable codepoints, Ctrl/Alt combinations,
-application cursor/keypad modes, bracketed paste wrappers, focus reporting, and
-one real core mode-bit host case.
+Assert exact bytes and explicit validation failures. Cover only the modes,
+modifiers, event phases, coordinates, UTF-8, and policy branches affected by the
+change, plus one real public core-mode integration case when mode-dependent.
+Consult the canonical maps for capability status; do not record it here.

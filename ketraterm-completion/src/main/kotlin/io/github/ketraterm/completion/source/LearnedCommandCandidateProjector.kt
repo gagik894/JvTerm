@@ -17,7 +17,6 @@ package io.github.ketraterm.completion.source
 
 import io.github.ketraterm.completion.api.*
 import io.github.ketraterm.completion.commandline.TerminalCommandLineContext
-import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
 import io.github.ketraterm.completion.commandline.commandEndOffset
 import io.github.ketraterm.completion.model.TerminalPathArgumentKind
 
@@ -30,8 +29,7 @@ internal fun projectLearnedCommandCandidate(
     source: String,
     score: Int,
     detailPrefix: String,
-    learnedLine: TerminalCommandLineContext =
-        TerminalCommandLineTokenizer.parse(learnedCommand, learnedCommand.length, request.shellCapabilities.syntax),
+    learnedLine: TerminalCommandLineContext,
 ): TerminalCompletionCandidate? {
     val activeIndex = requestLine.activeTokenIndex
     val learnedToken = learnedLine.tokens.getOrNull(activeIndex) ?: return null
@@ -56,7 +54,7 @@ internal fun projectLearnedCommandCandidate(
         return null
     }
 
-    val kind = semanticKind(completionContext)
+    val kind = semanticKind(completionContext) ?: return null
     return TerminalCompletionCandidate(
         replacementText = replacementText,
         replacementStartOffset = completionContext.replacementStartOffset,
@@ -97,7 +95,7 @@ private fun replacementStartInLearnedCommand(
     return learnedTokenStart + offsetWithinToken
 }
 
-private fun semanticKind(context: TerminalCompletionContext): TerminalCompletionCandidateKind =
+private fun semanticKind(context: TerminalCompletionContext): TerminalCompletionCandidateKind? =
     when (context.activePosition) {
         TerminalCompletionActivePosition.COMMAND -> TerminalCompletionCandidateKind.COMMAND
         TerminalCompletionActivePosition.SUBCOMMAND -> TerminalCompletionCandidateKind.SUBCOMMAND
@@ -110,7 +108,7 @@ private fun semanticKind(context: TerminalCompletionContext): TerminalCompletion
             } else {
                 TerminalCompletionCandidateKind.PATH
             }
-        TerminalCompletionActivePosition.OPERATOR -> TerminalCompletionCandidateKind.HISTORY
+        TerminalCompletionActivePosition.OPERATOR -> null
     }
 
 private fun learnedCandidateDetail(

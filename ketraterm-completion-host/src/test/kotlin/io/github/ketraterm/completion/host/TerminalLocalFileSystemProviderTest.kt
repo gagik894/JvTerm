@@ -18,10 +18,13 @@ package io.github.ketraterm.completion.host
 import io.github.ketraterm.completion.api.TerminalDirectoryListingRequest
 import io.github.ketraterm.completion.api.TerminalFileEntry
 import kotlinx.coroutines.test.runTest
+import java.io.IOException
 import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertSame
 
 class TerminalLocalFileSystemProviderTest {
     @Test
@@ -45,5 +48,39 @@ class TerminalLocalFileSystemProviderTest {
             assertEquals(listOf("present"), first.map(TerminalFileEntry::name))
             assertEquals(first, second)
             assertEquals(listOf(directory to "pre", directory to "pre"), scans)
+        }
+
+    @Test
+    fun `unsupported working-directory URI is a normal empty result`() =
+        runTest {
+            var scans = 0
+            val provider =
+                TerminalLocalFileSystemProvider(
+                    scanner =
+                        TerminalDirectoryScanner { _, _ ->
+                            scans++
+                            emptyList()
+                        },
+                )
+
+            val entries = provider.listDirectory(TerminalDirectoryListingRequest("ssh://host/repo", "", "pre"))
+
+            assertEquals(emptyList(), entries)
+            assertEquals(0, scans)
+        }
+
+    @Test
+    fun `scanner failure propagates unchanged`() =
+        runTest {
+            val directory = createTempDirectory("completion-failure")
+            val failure = IOException("directory access failed")
+            val provider = TerminalLocalFileSystemProvider(scanner = TerminalDirectoryScanner { _, _ -> throw failure })
+
+            val thrown =
+                assertFailsWith<IOException> {
+                    provider.listDirectory(TerminalDirectoryListingRequest(directory.toUri().toString(), "", "pre"))
+                }
+
+            assertSame(failure, thrown)
         }
 }

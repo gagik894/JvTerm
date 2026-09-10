@@ -16,11 +16,8 @@
 package io.github.ketraterm.app.ui
 
 import io.github.ketraterm.app.completion.StandaloneCompletionRegistry
-import io.github.ketraterm.app.completion.StandaloneCompletionStatisticsCoordinator
 import io.github.ketraterm.app.completion.completionShellCapabilities
 import io.github.ketraterm.app.config.KetraTermSettings
-import io.github.ketraterm.completion.api.TerminalCompletionLearningStore
-import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.host.TerminalClipboardPromptEvent
 import io.github.ketraterm.host.TerminalClipboardWriteEvent
 import io.github.ketraterm.session.TerminalShellIntegrationCommandLifecycle
@@ -32,7 +29,11 @@ import java.awt.event.InputEvent
 import java.awt.event.KeyEvent
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.logging.Level
+import java.util.logging.Logger
 import javax.swing.*
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
  * Owns standalone terminal tabs and tab-scoped session lifecycle.
@@ -58,22 +59,16 @@ internal class TabManager(
     private val workspace = TerminalWorkspace(StandaloneWorkspaceListener())
     private val tabRoots = HashMap<String, SplitNode>()
     private val tabContainers = HashMap<String, JPanel>()
-    private val completionSpecs = TerminalCommandSpecs.defaults()
-    private val commandCompletionStatsSource = TerminalCompletionLearningStore(commandSpecs = completionSpecs)
-    private val completionScope =
-        CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineName("standalone-completion"))
-    private val completionStatistics =
-        StandaloneCompletionStatisticsCoordinator(
-            statsSource = commandCompletionStatsSource,
-            initialPersistencePath =
-                settings.commandCompletionStatsPath.takeIf { settings.persistentSuggestionLearningEnabled },
-            coroutineScope = completionScope,
-        )
-    private val completionRegistry =
-        StandaloneCompletionRegistry(
-            specs = completionSpecs,
-            persistentStatsSource = commandCompletionStatsSource,
-        )
+
+    @Volatile private var completionRegistry: StandaloneCompletionRegistry? = null
+    private val completionLifecycle = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var completionShutdown: Job? = null
+    private val shutdownStarted = AtomicBoolean()
+    private var appliedTheme = settings.theme
+    private val settingsListener: () -> Unit = {
+        if (!shutdownStarted.get()) reloadAllPanes()
+    }
     val selectedPane: TerminalPane?
         get() = tabBar.selectedId()?.let { getActivePane(it) }
 
@@ -162,7 +157,17 @@ internal class TabManager(
         }
 
     init {
-        KeyboardFocusManager.getCurrentKeyboardFocusManager().addKeyEventDispatcher(keyEventDispatcher)
+        val focusManager = KeyboardFocusManager.getCurrentKeyboardFocusManager()
+        try {
+            focusManager.addKeyEventDispatcher(keyEventDispatcher)
+            settings.addChangeListener(settingsListener)
+        } catch (failure: Throwable) {
+            var cleanupFailure: Throwable? = failure
+            cleanupFailure = captureCleanupFailure(cleanupFailure) { settings.removeChangeListener(settingsListener) }
+            cleanupFailure = captureCleanupFailure(cleanupFailure) { focusManager.removeKeyEventDispatcher(keyEventDispatcher) }
+            cleanupFailure = captureCleanupFailure(cleanupFailure, ::closeCompletionLearningWithinBudget)
+            throw requireNotNull(cleanupFailure)
+        }
     }
 
     fun selectTab(id: String) {
@@ -260,20 +265,21 @@ internal class TabManager(
         root: SplitNode,
     ) {
         val tabPanes = root.allPanes()
+        var failure: Throwable? = null
         for (pane in tabPanes) {
             panes.remove(pane)
-            pane.close()
-            completionRegistry.removeSession(pane.tab.id)
-            workspace.closeTab(pane.tab.id)
+            failure = captureCleanupFailure(failure, pane::close)
+            failure = captureCleanupFailure(failure) { workspace.closeTab(pane.tab.id) }
         }
         tabRoots.remove(id)
         val container = tabContainers.remove(id)
         if (container != null) {
-            tabContentPanel.remove(container)
+            failure = captureCleanupFailure(failure) { tabContentPanel.remove(container) }
         }
-        tabBar.removeTab(id)
-        updateFrameTitle()
-        selectedPane?.let { onTabSelected(it.tab.id) }
+        failure = captureCleanupFailure(failure) { tabBar.removeTab(id) }
+        failure = captureCleanupFailure(failure, ::updateFrameTitle)
+        failure = captureCleanupFailure(failure) { selectedPane?.let { onTabSelected(it.tab.id) } }
+        failure?.let { throw it }
     }
 
     /**
@@ -288,34 +294,79 @@ internal class TabManager(
         return true
     }
 
-    /** Closes every open tab without prompting; used after remote/session shutdown. */
+    /** Closes every open tab and starts bounded completion persistence without blocking the Swing EDT. */
     fun closeAllTabsWithoutConfirmation() {
-        KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(keyEventDispatcher)
+        if (!shutdownStarted.compareAndSet(false, true)) return
+        settings.removeChangeListener(settingsListener)
+        var failure: Throwable? = null
+        failure =
+            captureCleanupFailure(failure) {
+                KeyboardFocusManager.getCurrentKeyboardFocusManager().removeKeyEventDispatcher(keyEventDispatcher)
+            }
         val tabIds = tabRoots.keys.toList()
         for (tabId in tabIds) {
-            tabRoots[tabId]?.let { closeTabWithoutConfirmation(tabId, it) }
+            tabRoots[tabId]?.let { root ->
+                failure = captureCleanupFailure(failure) { closeTabWithoutConfirmation(tabId, root) }
+            }
         }
-        completionRegistry.close()
-        workspace.close()
-        runBlocking { completionStatistics.closeAndFlush() }
-        completionScope.cancel()
+        failure = captureCleanupFailure(failure, workspace::close)
+        failure = captureCleanupFailure(failure, ::startCompletionLearningShutdown)
+        failure?.let { throw it }
     }
 
-    /** Propagates a settings reload to all live panes and the workspace. */
-    fun reloadAllPanes() {
-        val snapshot = settings.current()
-        Chrome.applyPalette(snapshot.palette)
-        frame.rootPane.putClientProperty("JRootPane.titleBarBackground", Chrome.topBarBackground)
-        frame.rootPane.putClientProperty("JRootPane.titleBarForeground", Chrome.textPrimary)
-        SwingUtilities.updateComponentTreeUI(frame)
+    private fun startCompletionLearningShutdown() {
+        if (completionRegistry == null && completionShutdown == null) {
+            completionLifecycle.cancel()
+            return
+        }
+        Thread
+            .ofPlatform()
+            .name("ketraterm-completion-shutdown")
+            .daemon(false)
+            .start {
+                try {
+                    closeCompletionLearningWithinBudget()
+                } catch (failure: Throwable) {
+                    LOGGER.log(Level.WARNING, "Final completion learning persistence failed during shutdown", failure)
+                }
+            }
+    }
+
+    private fun closeCompletionLearningWithinBudget() {
+        val registry = completionRegistry
+        completionRegistry = null
+        val completed =
+            runBlocking {
+                withTimeoutOrNull(COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS.milliseconds) {
+                    completionShutdown?.join()
+                    if (registry != null) {
+                        if (settings.config.smartSuggestionsEnabled) registry.closeAndFlush() else registry.closeWithoutFlush()
+                    }
+                    true
+                } ?: false
+            }
+        completionLifecycle.cancel()
+        if (!completed) {
+            LOGGER.warning(
+                "Completion learning persistence exceeded its " +
+                    "$COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS ms shutdown budget; continuing shutdown",
+            )
+        }
+    }
+
+    private fun reloadAllPanes() {
+        val theme = settings.theme
+        if (theme != appliedTheme) {
+            appliedTheme = theme
+            Chrome.applyPalette(theme.createPalette())
+            frame.rootPane.putClientProperty("JRootPane.titleBarBackground", Chrome.topBarBackground)
+            frame.rootPane.putClientProperty("JRootPane.titleBarForeground", Chrome.textPrimary)
+            SwingUtilities.updateComponentTreeUI(frame)
+            tabContentPanel.background = Chrome.terminalBackground
+            tabBar.repaint()
+        }
         panes.forEach { it.reloadSettings() }
-        tabContentPanel.background = Chrome.terminalBackground
-        workspace.applySettings(
-            palette = snapshot.palette,
-            treatAmbiguousAsWide = snapshot.treatAmbiguousAsWide,
-        )
-        reconcileCommandPersistenceStores()
-        tabBar.repaint()
+        reconcileCompletion()
     }
 
     /**
@@ -403,30 +454,26 @@ internal class TabManager(
         updateFrameTitle()
     }
 
-    private fun createTerminalPane(workspaceTab: TerminalWorkspaceTab): TerminalPane {
-        val workingDirectoryUriProvider = { workspaceTab.currentWorkingDirectoryUri }
-        val shellCapabilities = workspaceTab.profile.kind.completionShellCapabilities()
-        val suggestionProvider =
-            completionRegistry.createProvider(
-                sessionId = workspaceTab.id,
-                profileId = workspaceTab.profile.id,
-                workingDirectoryUriProvider = workingDirectoryUriProvider,
-                shellCapabilities = shellCapabilities,
-            )
-        return TerminalPane.create(
-            tab = workspaceTab,
-            settings = settings,
-            completionScope = completionScope,
-            suggestionProvider = suggestionProvider,
-            suggestionFeedbackHandler =
-                completionStatistics.createFeedbackHandler(
+    private fun createTerminalPane(workspaceTab: TerminalWorkspaceTab): TerminalPane =
+        try {
+            val registry = ensureCompletionRegistry()
+            val completionResources =
+                registry?.createResources(
                     profileId = workspaceTab.profile.id,
-                    workingDirectoryUriProvider = workingDirectoryUriProvider,
-                ),
-        ) { pane, request ->
-            showPaneContextMenu(pane, request)
+                    workingDirectoryUriProvider = { workspaceTab.currentWorkingDirectoryUri },
+                    shellCapabilities = workspaceTab.profile.kind.completionShellCapabilities(),
+                )
+            TerminalPane.create(
+                tab = workspaceTab,
+                settings = settings,
+                completionResources = completionResources,
+            ) { pane, request ->
+                showPaneContextMenu(pane, request)
+            }
+        } catch (failure: Throwable) {
+            val cleanupFailure = captureCleanupFailure(failure) { workspace.closeTab(workspaceTab.id) }
+            throw requireNotNull(cleanupFailure)
         }
-    }
 
     private fun splitNodeInTree(
         current: SplitNode,
@@ -480,24 +527,30 @@ internal class TabManager(
 
         if (!openReplacementWhenLastPane && !confirmClose(listOf(pane))) return
 
+        var failure: Throwable? = null
         val newRoot = root.removePane(pane)
         if (newRoot != null) {
             tabRoots[tabId] = newRoot
-            val container = tabContainers[tabId] ?: return
-            container.removeAll()
-            container.add(newRoot.component, BorderLayout.CENTER)
-            container.revalidate()
-            container.repaint()
+            val container = tabContainers[tabId]
+            if (container != null) {
+                failure =
+                    captureCleanupFailure(failure) {
+                        container.removeAll()
+                        container.add(newRoot.component, BorderLayout.CENTER)
+                        container.revalidate()
+                        container.repaint()
+                    }
+            }
         }
 
         panes.remove(pane)
-        pane.close()
-        completionRegistry.removeSession(pane.tab.id)
-        workspace.closeTab(pane.tab.id)
+        failure = captureCleanupFailure(failure, pane::close)
+        failure = captureCleanupFailure(failure) { workspace.closeTab(pane.tab.id) }
 
         val newActive = getActivePane(tabId)
-        newActive?.requestFocus()
-        updateFrameTitle()
+        failure = captureCleanupFailure(failure) { newActive?.requestFocus() }
+        failure = captureCleanupFailure(failure, ::updateFrameTitle)
+        failure?.let { throw it }
     }
 
     fun closeActivePane() {
@@ -773,11 +826,11 @@ internal class TabManager(
             event: io.github.ketraterm.protocol.ShellIntegrationEvent,
         ) {
             if (event.marker != io.github.ketraterm.protocol.ShellIntegrationMarker.COMMAND_FINISHED) return
+            if (!settings.config.smartSuggestionsEnabled) return
             val state = tab.session.shellIntegrationState
             val metadata = state.commandMetadata(state.latestCommandRecordId()) ?: return
-            val command = metadata.commandText
-            if (command != null) {
-                completionStatistics.recordFinishedCommand(
+            metadata.commandText?.let { command ->
+                completionRegistry?.recordFinishedCommand(
                     commandLine = command,
                     successful = metadata.lifecycle == TerminalShellIntegrationCommandLifecycle.SUCCEEDED,
                     profileId = tab.profile.id,
@@ -785,25 +838,15 @@ internal class TabManager(
                     usedAtEpochMillis = metadata.finishedAtEpochMillis ?: System.currentTimeMillis(),
                 )
             }
-            if (metadata.lifecycle == TerminalShellIntegrationCommandLifecycle.SUCCEEDED) {
-                command?.let {
-                    completionRegistry.recordSuccessfulCommand(
-                        sessionId = tab.id,
-                        commandLine = it,
-                        profileId = tab.profile.id,
-                        workingDirectoryUri = metadata.workingDirectoryUri,
-                    )
-                }
-            }
         }
 
         override fun bell(tab: TerminalWorkspaceTab) {
-            if (settings.visualBell) {
+            if (settings.config.visualBell) {
                 SwingUtilities.invokeLater {
                     panes.firstOrNull { it.tab == tab }?.terminal?.showVisualBell()
                 }
             }
-            if (settings.audibleBell) {
+            if (settings.config.audibleBell) {
                 SwingUtilities.invokeLater {
                     frame.toolkit.beep()
                 }
@@ -868,7 +911,7 @@ internal class TabManager(
             body: String,
             level: io.github.ketraterm.protocol.NotificationLevel,
         ) {
-            if (settings.desktopNotificationsEnabled) {
+            if (settings.config.desktopNotificationsEnabled) {
                 DesktopNotificationManager.showNotification(title, body, level)
             }
         }
@@ -909,7 +952,7 @@ internal class TabManager(
             rows: Int,
             columns: Int,
         ) {
-            if (settings.shellRequestResizeWindow) {
+            if (settings.config.shellRequestResizeWindow) {
                 // Resize the session synchronously so that subsequent query reports (e.g. vttest CSI 18 t)
                 // return the updated size immediately.
                 tab.session.resize(columns, rows)
@@ -934,7 +977,7 @@ internal class TabManager(
             x: Int,
             y: Int,
         ) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.setLocation(x, y)
                 }
@@ -942,7 +985,7 @@ internal class TabManager(
         }
 
         override fun minimizeWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.state = Frame.ICONIFIED
                 }
@@ -950,7 +993,7 @@ internal class TabManager(
         }
 
         override fun deminimizeWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.state = Frame.NORMAL
                 }
@@ -958,7 +1001,7 @@ internal class TabManager(
         }
 
         override fun raiseWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.toFront()
                 }
@@ -966,7 +1009,7 @@ internal class TabManager(
         }
 
         override fun lowerWindow(tab: TerminalWorkspaceTab) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     frame.toBack()
                 }
@@ -977,7 +1020,7 @@ internal class TabManager(
             tab: TerminalWorkspaceTab,
             maximize: Boolean,
         ) {
-            if (settings.shellRequestWindowManipulation) {
+            if (settings.config.shellRequestWindowManipulation) {
                 SwingUtilities.invokeLater {
                     if (maximize) {
                         frame.extendedState = Frame.MAXIMIZED_BOTH
@@ -989,14 +1032,56 @@ internal class TabManager(
         }
     }
 
-    private fun reconcileCommandPersistenceStores() {
-        completionStatistics.setPersistencePath(
-            settings.commandCompletionStatsPath.takeIf { settings.persistentSuggestionLearningEnabled },
-        )
+    private fun ensureCompletionRegistry(): StandaloneCompletionRegistry? {
+        if (!settings.config.smartSuggestionsEnabled || shutdownStarted.get() || completionShutdown != null) return null
+        return completionRegistry ?: StandaloneCompletionRegistry
+            .create(
+                persistencePath = settings.commandCompletionStatsPath,
+                persistenceEnabled = settings.config.persistentSuggestionLearningEnabled,
+                onPersistenceLoadFailure = { LOGGER.log(Level.WARNING, "Completion learning could not be loaded", it) },
+            ).also { completionRegistry = it }
+    }
+
+    private fun reconcileCompletion() {
+        if (!settings.config.smartSuggestionsEnabled) {
+            panes.forEach { it.setCompletionResources(null) }
+            val retiring = completionRegistry ?: return
+            completionRegistry = null
+            completionShutdown =
+                completionLifecycle.launch(start = CoroutineStart.UNDISPATCHED) {
+                    try {
+                        retiring.closeWithoutFlush()
+                    } finally {
+                        SwingUtilities.invokeLater {
+                            completionShutdown = null
+                            if (!shutdownStarted.get()) reconcileCompletion()
+                        }
+                    }
+                }
+            return
+        }
+        if (panes.isEmpty()) return
+        val previous = completionRegistry
+        val registry = ensureCompletionRegistry() ?: return
+        registry.setPersistenceEnabled(settings.config.persistentSuggestionLearningEnabled)
+        if (previous === registry) return
+        panes.forEach { pane ->
+            pane.setCompletionResources(
+                registry.createResources(
+                    profileId = pane.tab.profile.id,
+                    workingDirectoryUriProvider = { pane.tab.currentWorkingDirectoryUri },
+                    shellCapabilities =
+                        pane.tab.profile.kind
+                            .completionShellCapabilities(),
+                ),
+            )
+        }
     }
 
     private companion object {
+        private val LOGGER: Logger = Logger.getLogger(TabManager::class.java.name)
         private const val INITIAL_TAB_CAPACITY = 4
+        private const val COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS = 500L
 
         private fun targetsHostClipboard(selection: String): Boolean = selection.isEmpty() || selection.indexOf('c') >= 0
 

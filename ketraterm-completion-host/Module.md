@@ -2,8 +2,7 @@
 
 ## KetraTerm Completion Host Support (`:ketraterm-completion-host`)
 
-This module provides structured asynchronous completion snapshots shared by standalone and IDE hosts. It owns one
-optional active load job per provider, a shared suspending concurrency limit, immutable ready snapshots, local path
-interpretation, and bounded interruptible directory scanning while keeping all command parsing and ranking in
-`ketraterm-completion`.
+This module provides host-neutral suspending local-filesystem support shared by standalone and IDE products. It owns
+local-file URI resolution, direct-directory scanner contracts, deterministic entry projection, and bounded interruptible
+NIO scanning while keeping command parsing, source scheduling, ranking, jobs, and caches out of the module.
 

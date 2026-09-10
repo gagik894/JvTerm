@@ -187,6 +187,20 @@ class TerminalCompletionContextResolverTest {
     }
 
     @Test
+    fun `recent Git commit domain remains active for repeated commit arguments`() {
+        for (subcommand in listOf("cherry-pick", "revert", "show")) {
+            val firstCommit = resolve("git $subcommand ")
+            assertEquals(listOf("git", subcommand), firstCommit.commandPath.map { it.name })
+            assertEquals(TerminalCompletionActivePosition.POSITIONAL_ARGUMENT, firstCommit.activePosition)
+            assertEquals(TerminalCompletionValueDomain.GIT_COMMIT, firstCommit.expectedValueDomain)
+
+            val nextCommit = resolve("git $subcommand deadbeef ")
+            assertEquals(TerminalCompletionActivePosition.POSITIONAL_ARGUMENT, nextCommit.activePosition)
+            assertEquals(TerminalCompletionValueDomain.GIT_COMMIT, nextCommit.expectedValueDomain)
+        }
+    }
+
+    @Test
     fun `ordered positional arguments advance through optional and variadic declarations`() {
         val spec =
             TerminalCommandSpec(
@@ -206,6 +220,24 @@ class TerminalCompletionContextResolverTest {
         val variadicContext = resolve("tool alpha dev first ", listOf(spec))
         assertEquals("file", variadicContext.activePositionalArgument?.name)
         assertEquals(TerminalPathArgumentKind.FILE, variadicContext.expectedPathKind)
+    }
+
+    @Test
+    fun `only positional tokens advance the positional argument counter`() {
+        val spec =
+            TerminalCommandSpec(
+                name = "tool",
+                options = listOf(TerminalOptionSpec(listOf("--config"), requiresValue = true)),
+                positionalArguments =
+                    listOf(
+                        TerminalArgumentSpec(name = "first"),
+                        TerminalArgumentSpec(name = "second"),
+                    ),
+            )
+
+        assertEquals("second", resolve("tool --config config.toml first ", listOf(spec)).activePositionalArgument?.name)
+        assertEquals("second", resolve("tool --config=config.toml first ", listOf(spec)).activePositionalArgument?.name)
+        assertEquals("second", resolve("tool -- --config ", listOf(spec)).activePositionalArgument?.name)
     }
 
     @Test

@@ -32,19 +32,27 @@ internal class SwingTerminalInputController(
     val keyListener =
         object : KeyAdapter() {
             override fun keyPressed(event: KeyEvent) {
-                if (claimedKeyLifecycle.ownsRepeatedPress(event)) {
-                    event.consume()
-                    return
+                when (claimedKeyLifecycle.repeatedPressOwner(event)) {
+                    ClaimedSwingKeyOwner.SUGGESTION -> {
+                        host.handleShellSuggestionKeyPressed(event)
+                        event.consume()
+                        return
+                    }
+                    ClaimedSwingKeyOwner.HOST -> {
+                        event.consume()
+                        return
+                    }
+                    null -> Unit
                 }
 
                 if (host.handleShellSuggestionKeyPressed(event)) {
-                    claimedKeyLifecycle.claim(event)
+                    claimedKeyLifecycle.claim(event, ClaimedSwingKeyOwner.SUGGESTION)
                     event.consume()
                     return
                 }
 
                 if (host.handleHostKeyPressed(event)) {
-                    claimedKeyLifecycle.claim(event)
+                    claimedKeyLifecycle.claim(event, ClaimedSwingKeyOwner.HOST)
                     event.consume()
                     return
                 }

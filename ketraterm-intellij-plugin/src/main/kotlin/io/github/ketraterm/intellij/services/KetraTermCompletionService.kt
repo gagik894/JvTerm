@@ -19,47 +19,81 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.components.service
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
-import io.github.ketraterm.completion.api.TerminalCompletionLearningStore
 import io.github.ketraterm.completion.api.TerminalCompletionSourceEntry
 import io.github.ketraterm.completion.api.TerminalCompletionSourcePrior
-import io.github.ketraterm.completion.persistence.TerminalCompletionLearningRepository
+import io.github.ketraterm.completion.persistence.TerminalCompletionLearningCoordinator
 import io.github.ketraterm.intellij.settings.KetraTermIntellijSettings
 import io.github.ketraterm.session.TerminalShellIntegrationCommandMetadata
+import io.github.ketraterm.ui.swing.host.SwingCompletionResources
 import io.github.ketraterm.workspace.TerminalWorkspaceTab
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
+import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
+import javax.swing.SwingUtilities
+import kotlin.time.Duration.Companion.milliseconds
 
 /**
- * Application-level owner of IntelliJ completion learning and session sources.
+ * Application-level owner of IntelliJ completion learning and product sources.
  *
- * The service owns persistent statistics and one [IntellijCompletionRegistry].
- * IntelliJ disposal closes all session providers and cancels registry-owned work.
+ * The service owns one [IntellijCompletionRegistry] and an independent scope
+ * that remains alive until final learning persistence has completed.
  */
 @Service(Service.Level.APP)
-internal class KetraTermCompletionService(
-    coroutineScope: CoroutineScope,
-) : Disposable {
+internal class KetraTermCompletionService : Disposable {
+    private val lifecycle = IntellijCompletionLifecycle()
     private val settings = KetraTermIntellijSettings.getInstance()
-    private val learningStore = TerminalCompletionLearningStore()
-    private val learningRepository =
-        TerminalCompletionLearningRepository(
-            learningStore = learningStore,
-            initialPersistencePath =
-                PathManager
-                    .getSystemDir()
-                    .resolve("ketraterm")
-                    .resolve(TerminalCompletionLearningRepository.currentFileName()),
-            persistenceEnabled = settings.completionLearningPersistenceEnabled(),
-        )
-    private val registry =
-        IntellijCompletionRegistry(
-            statsSource = learningStore,
-            learningRepository = learningRepository,
-            coroutineScope = coroutineScope,
-        )
+    private val persistencePath =
+        PathManager
+            .getSystemDir()
+            .resolve("ketraterm")
+            .resolve(TerminalCompletionLearningCoordinator.currentFileName())
+
+    @Volatile private var completionRuntime: CompletionRuntime? = null
+    private val lifecycleScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    @Volatile private var shutdownJob: Job? = null
+    private val resourcesByTab = java.util.IdentityHashMap<TerminalWorkspaceTab, SwingCompletionResources>()
+    private val resourceListeners = CopyOnWriteArrayList<() -> Unit>()
     private val settingsListener: () -> Unit = {
-        registry.setPersistenceEnabled(settings.completionLearningPersistenceEnabled())
+        lifecycle.ifOpen {
+            if (!settings.state.smartSuggestionsEnabled) {
+                val retiring = completionRuntime
+                completionRuntime = null
+                if (retiring != null) {
+                    resourcesByTab.clear()
+                    shutdownJob =
+                        lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                            try {
+                                retiring.registry.closeWithoutFlush()
+                            } finally {
+                                retiring.scope.cancel()
+                                SwingUtilities.invokeLater {
+                                    lifecycle.ifOpen { shutdownJob = null }
+                                    notifyResourceListeners()
+                                }
+                            }
+                        }
+                }
+            } else {
+                completionRuntime?.registry?.setPersistenceEnabled(settings.completionLearningPersistenceEnabled())
+            }
+        }
+        notifyResourceListeners()
+    }
+
+    fun addResourceListener(listener: () -> Unit) {
+        resourceListeners.addIfAbsent(listener)
+    }
+
+    fun removeResourceListener(listener: () -> Unit) {
+        resourceListeners.remove(listener)
+    }
+
+    private fun notifyResourceListeners() {
+        val notify = Runnable { resourceListeners.forEach { it() } }
+        if (SwingUtilities.isEventDispatchThread()) notify.run() else SwingUtilities.invokeLater(notify)
     }
 
     init {
@@ -67,20 +101,38 @@ internal class KetraTermCompletionService(
     }
 
     /**
-     * Creates completion resources bound to one terminal workspace tab.
+     * Creates completion resources for one terminal workspace tab.
      *
      * @param project IntelliJ project used for project-aware VFS and Git queries.
      * @param tab terminal tab providing identity, profile, and working-directory state.
-     * @return session resources that the owning terminal pane must close.
+     * @return provider and feedback resources consumed by the terminal pane.
      * @throws IllegalStateException if application-level completion has been disposed.
      */
-    fun openSession(
+    fun resourcesFor(
         project: Project,
         tab: TerminalWorkspaceTab,
-    ): IntellijCompletionSession =
-        registry.openSession(
-            IntellijCompletionSessionContext(
-                sessionId = tab.id,
+    ): SwingCompletionResources? =
+        lifecycle.requireOpen {
+            if (!settings.state.smartSuggestionsEnabled || shutdownJob != null) return@requireOpen null
+            resourcesByTab.getOrPut(tab) {
+                val runtime =
+                    completionRuntime ?: createCompletionRuntime(persistencePath, settings.completionLearningPersistenceEnabled())
+                        .also { completionRuntime = it }
+                createResources(runtime, project, tab)
+            }
+        }
+
+    fun releaseResources(tab: TerminalWorkspaceTab) {
+        lifecycle.ifOpen { resourcesByTab.remove(tab) }
+    }
+
+    private fun createResources(
+        runtime: CompletionRuntime,
+        project: Project,
+        tab: TerminalWorkspaceTab,
+    ): SwingCompletionResources {
+        val context =
+            IntellijCompletionContext(
                 profileId = tab.profile.id,
                 workingDirectoryUriProvider = { tab.currentWorkingDirectoryUri },
                 shellCapabilities = tab.profile.kind.intellijCompletionShellCapabilities(),
@@ -89,6 +141,12 @@ internal class KetraTermCompletionService(
                         TerminalCompletionSourceEntry(
                             intellijGitCompletionSource(
                                 loader = IntellijGitCompletionLoader(project)::load,
+                            ),
+                            TerminalCompletionSourcePrior.GIT_REFERENCE,
+                        ),
+                        TerminalCompletionSourceEntry(
+                            intellijGitCommitCompletionSource(
+                                loader = IntellijGitCommitCompletionLoader(project)::load,
                             ),
                             TerminalCompletionSourcePrior.GIT_REFERENCE,
                         ),
@@ -112,11 +170,12 @@ internal class KetraTermCompletionService(
                         ),
                     ),
                 directoryScanner = IntellijProjectDirectoryScanner(project),
-            ),
-        )
+            )
+        return runtime.registry.createResources(context)
+    }
 
     /**
-     * Records one shell-integration command completion for MRU and learned ranking.
+     * Records one shell-integration command completion for shared learning.
      *
      * Privacy policy is applied before any command is persisted.
      *
@@ -127,25 +186,125 @@ internal class KetraTermCompletionService(
         tab: TerminalWorkspaceTab,
         metadata: TerminalShellIntegrationCommandMetadata,
     ) {
-        registry.recordFinishedCommand(
-            sessionId = tab.id,
-            profileId = tab.profile.id,
-            metadata = metadata,
-        )
+        lifecycle.ifOpen {
+            if (!settings.state.smartSuggestionsEnabled) return@ifOpen
+            completionRuntime?.registry?.recordFinishedCommand(
+                profileId = tab.profile.id,
+                metadata = metadata,
+            )
+        }
     }
 
-    /** Closes sessions and durably flushes queued completion learning. */
+    /** Starts bounded final persistence without waiting on the EDT. */
     override fun dispose() {
+        if (!lifecycle.beginClose()) return
         settings.removeChangeListener(settingsListener)
-        runBlocking { registry.closeAndFlush() }
+        resourceListeners.clear()
+        resourcesByTab.clear()
+        val runtime = completionRuntime
+        completionRuntime = null
+        val stopping = shutdownJob
+        if (runtime == null && stopping == null) {
+            lifecycleScope.cancel()
+            return
+        }
+        val flush = settings.state.smartSuggestionsEnabled
+        lifecycleScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                val completed =
+                    withTimeoutOrNull(COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS.milliseconds) {
+                        stopping?.join()
+                        if (runtime != null) {
+                            if (flush) runtime.registry.closeAndFlush() else runtime.registry.closeWithoutFlush()
+                        }
+                        true
+                    } ?: false
+                if (!completed) {
+                    LOG.warn(
+                        "Completion learning persistence exceeded its $COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS ms shutdown budget",
+                    )
+                }
+            } catch (failure: Exception) {
+                if (failure is CancellationException) throw failure
+                LOG.warn("Final completion learning persistence failed", failure)
+            } finally {
+                runtime?.scope?.cancel()
+                lifecycleScope.cancel()
+            }
+        }
     }
+
+    private class CompletionRuntime(
+        val scope: CoroutineScope,
+        val registry: IntellijCompletionRegistry,
+    )
 
     companion object {
+        private fun createCompletionRuntime(
+            persistencePath: Path,
+            persistenceEnabled: Boolean,
+        ): CompletionRuntime {
+            val scope =
+                CoroutineScope(SupervisorJob() + Dispatchers.IO + CoroutineName("ketraterm-completion-persistence"))
+            return try {
+                CompletionRuntime(
+                    scope = scope,
+                    registry =
+                        IntellijCompletionRegistry(
+                            persistencePath = persistencePath,
+                            persistenceEnabled = persistenceEnabled,
+                            coroutineScope = scope,
+                            onPersistenceLoadFailure = { failure ->
+                                LOG.warn(
+                                    "Completion learning persistence was disabled because existing data could not be loaded",
+                                    failure,
+                                )
+                            },
+                        ),
+                )
+            } catch (failure: Throwable) {
+                scope.cancel()
+                throw failure
+            }
+        }
+
         /**
          * Returns the application service instance.
          *
          * @return IntelliJ-managed completion service.
          */
         fun getInstance(): KetraTermCompletionService = service()
+
+        fun getInstanceIfCreated(): KetraTermCompletionService? =
+            com.intellij.openapi.application.ApplicationManager
+                .getApplication()
+                .getServiceIfCreated(KetraTermCompletionService::class.java)
+
+        private val LOG: Logger = Logger.getInstance(KetraTermCompletionService::class.java)
+        private const val COMPLETION_PERSISTENCE_DURABILITY_BUDGET_MILLIS = 500L
     }
+}
+
+internal class IntellijCompletionLifecycle {
+    private val lock = Any()
+    private var closed = false
+
+    fun <T> requireOpen(action: () -> T): T =
+        synchronized(lock) {
+            check(!closed) { "IntelliJ completion service is disposed" }
+            action()
+        }
+
+    fun ifOpen(action: () -> Unit) {
+        synchronized(lock) {
+            if (!closed) action()
+        }
+    }
+
+    fun beginClose(): Boolean =
+        synchronized(lock) {
+            if (closed) return@synchronized false
+            closed = true
+            true
+        }
 }

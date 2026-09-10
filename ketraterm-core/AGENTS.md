@@ -71,23 +71,15 @@ core.
 
 ## Attribute Ownership
 
-Core must represent pen attributes truthfully. If an attribute is not supported,
-do not let host fake it.
-
-High-priority gaps:
-
-- inverse/reverse-video cell attribute
-- 256-color indexed foreground/background
-- RGB/truecolor foreground/background
-- faint, blink, conceal, strikethrough
-- richer underline styles and underline color
-
-Document each gap in `docs/terminal-feature-gap-map.md` until implemented, and
-move it to `docs/terminal-feature-map.md` once complete.
+Core must represent pen attributes truthfully; host must never fake or degrade
+unsupported values. Do not maintain an attribute-support inventory here. Use
+the core contract plus the canonical feature and gap maps for current status.
 
 ## Response Channel Security
 
-When implementing or extending query/response features (such as `DECRQSS` or `XTGETTCAP`), or when creating new terminal features that can be queried, always update the security allowlist of queried settings or capabilities in `TerminalResponseChannel` (e.g. in `BufferResponseChannel.kt`), and reject unauthorized or unsupported queries with standard protocol-defined failure responses.
+`TerminalResponseChannel` owns capability-allowlist enforcement. Any change to
+queryable core state must update that policy boundary; global response-security
+requirements remain defined by the root guide.
 
 ## Testing
 
@@ -103,6 +95,5 @@ Core tests should focus on invariants and terminal physics:
 - mode snapshots
 - pen attribute storage and reset behavior
 
-Tests must verify expected terminal behavior, not current bugs. Prefer small
-unit tests for exact mechanics and broader invariant tests around mutation
-engines.
+Prefer small unit tests for exact mechanics and broader invariant tests around
+mutation engines.

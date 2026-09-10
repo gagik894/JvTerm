@@ -15,12 +15,18 @@
  */
 package io.github.ketraterm.completion.host
 
+import kotlinx.coroutines.*
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.io.TempDir
+import java.net.URI
+import java.nio.file.ClosedFileSystemException
+import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class TerminalBoundedDirectoryScannerTest {
@@ -40,7 +46,7 @@ class TerminalBoundedDirectoryScannerTest {
             Files.setLastModifiedTime(directory, originalVersion)
             val narrow = scanner.scan(directory, "zebra")
 
-            assertEquals(256, broad.size)
+            assertEquals(300, broad.size)
             assertEquals(emptyList(), narrow)
         }
 
@@ -67,11 +73,49 @@ class TerminalBoundedDirectoryScannerTest {
             assertEquals(entries.sortedBy { it.name }, entries)
         }
 
-    private fun scanner(maxVisitedEntries: Int = 8_192): TerminalBoundedDirectoryScanner =
+    @Test
+    fun `missing and non-directory paths are normal empty results`() =
+        runTest {
+            val scanner = scanner()
+            val regularFile = Files.createFile(directory.resolve("regular-file"))
+
+            assertEquals(emptyList(), scanner.scan(directory.resolve("missing"), ""))
+            assertEquals(emptyList(), scanner.scan(regularFile, ""))
+        }
+
+    @Test
+    fun `abnormal filesystem failure propagates`() =
+        runTest {
+            val archive = directory.resolve("closed.zip")
+            val fileSystem = FileSystems.newFileSystem(URI.create("jar:${archive.toUri()}"), mapOf("create" to "true"))
+            val closedRoot = fileSystem.getPath("/")
+            fileSystem.close()
+
+            assertFailsWith<ClosedFileSystemException> {
+                scanner().scan(closedRoot, "")
+            }
+        }
+
+    @Test
+    fun `scan propagates coroutine cancellation before blocking work starts`() =
+        runTest {
+            val dispatcher = StandardTestDispatcher(testScheduler)
+            val scanner = scanner(ioDispatcher = dispatcher)
+            val scanning = async(start = CoroutineStart.UNDISPATCHED) { scanner.scan(directory, "") }
+
+            scanning.cancel(CancellationException("obsolete directory completion"))
+
+            assertFailsWith<CancellationException> { scanning.await() }
+        }
+
+    private fun scanner(
+        maxVisitedEntries: Int = 8_192,
+        ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    ): TerminalBoundedDirectoryScanner =
         TerminalBoundedDirectoryScanner(
             maxVisitedEntries = maxVisitedEntries,
-            maxMatchingEntries = 256,
             scanBudgetNanos = Long.MAX_VALUE,
             nanoTime = { 0L },
+            ioDispatcher = ioDispatcher,
         )
 }

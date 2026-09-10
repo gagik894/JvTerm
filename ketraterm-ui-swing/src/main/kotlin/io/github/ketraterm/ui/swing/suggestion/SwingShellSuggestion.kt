@@ -31,16 +31,27 @@ import java.util.regex.Pattern
  * @property replacementText text the provider intends to insert or use for
  * command-line replacement after acceptance.
  * @property displayText primary text shown in the popup.
- * @property detail secondary text shown below [displayText], such as flags,
- * path context, or a short description.
- * @property source compact source label, such as `history`, `path`, or `git`.
+ * @property detail secondary contextual text shown with [displayText], such as
+ * flags, path context, or a short description.
+ * @property source stable provider identifier used for feedback and learning,
+ * such as `history`, `path`, or `intellij-git-branch`.
+ * @property sourceDisplayText compact user-facing source label. This is kept
+ * separate from [source] so renderers never need to infer presentation from a
+ * provider identifier.
  * @property kind compact semantic candidate kind label supplied by the host.
  * @property accentRole stable visual category supplied by the host or derived
  * from [kind] for generic providers.
+ * @property interactionContext opaque host-owned request context preserved by
+ * Swing and returned unchanged with acceptance or dismissal feedback.
  * @property replacementStartOffset inclusive UTF-16 start offset in the request
  * command text.
  * @property replacementEndOffset exclusive UTF-16 end offset in the request
  * command text.
+ * @property matchedRanges immutable ordered UTF-16 intervals relative to
+ * [displayText] used to visually highlight matching fragments.
+ * @throws IllegalArgumentException if text/source/kind fields are invalid,
+ * replacement offsets are unordered, or [matchedRanges] do not address
+ * [displayText].
  */
 data class SwingShellSuggestion
     @JvmOverloads
@@ -53,11 +64,15 @@ data class SwingShellSuggestion
         val displayText: String = replacementText,
         val detail: String = "",
         val accentRole: SwingShellSuggestionAccentRole = SwingShellSuggestionAccentRole.from(kind, source),
+        val matchedRanges: SwingShellSuggestionMatchRanges = SwingShellSuggestionMatchRanges.EMPTY,
+        val sourceDisplayText: String = source,
+        val interactionContext: Any? = null,
     ) {
         init {
             require(replacementText.isNotEmpty()) { "replacementText must not be empty" }
             require(displayText.isNotEmpty()) { "displayText must not be empty" }
             require(source.isNotBlank()) { "source must not be blank" }
+            require(sourceDisplayText.isNotBlank()) { "sourceDisplayText must not be blank" }
             require(kind.isNotBlank()) { "kind must not be blank" }
             require(replacementStartOffset >= 0) {
                 "replacementStartOffset must be >= 0, was $replacementStartOffset"
@@ -66,6 +81,7 @@ data class SwingShellSuggestion
                 "replacementEndOffset must be >= replacementStartOffset, was " +
                     "$replacementEndOffset < $replacementStartOffset"
             }
+            matchedRanges.requireValidFor(displayText)
         }
     }
 
@@ -85,7 +101,7 @@ enum class SwingShellSuggestionAccentRole {
     /** Command option-name completion. */
     OPTION,
 
-    /** Session or persisted command-history completion. */
+    /** Completion derived from learned command history. */
     HISTORY,
 
     /** A value that does not belong to another presentation category. */
@@ -102,12 +118,11 @@ enum class SwingShellSuggestionAccentRole {
             source: String,
         ): SwingShellSuggestionAccentRole =
             when {
+                source.equals("learned", ignoreCase = true) ||
+                    source.equals("observed", ignoreCase = true) -> HISTORY
                 kind.equals("PATH", ignoreCase = true) -> PATH
                 kind.equals("OPTION", ignoreCase = true) -> OPTION
                 kind.equals("COMMAND", ignoreCase = true) || kind.equals("SUBCOMMAND", ignoreCase = true) -> COMMAND
-                source.equals("mru", ignoreCase = true) ||
-                    source.equals("history", ignoreCase = true) ||
-                    source.equals("stats", ignoreCase = true) -> HISTORY
                 else -> OTHER
             }
     }

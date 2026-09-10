@@ -18,7 +18,6 @@ package io.github.ketraterm.completion.ranking
 import io.github.ketraterm.completion.api.*
 import io.github.ketraterm.completion.internal.CompletionLearningContextKey
 import io.github.ketraterm.completion.internal.TERMINAL_COMPLETION_CANDIDATE_ORDER
-import io.github.ketraterm.completion.model.TerminalCommandSpec
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 import io.github.ketraterm.completion.model.TerminalPathArgumentKind
 
@@ -26,38 +25,36 @@ import io.github.ketraterm.completion.model.TerminalPathArgumentKind
 internal data class CompletionSourceCandidates(
     val sourceIndex: Int,
     val priority: Int,
+    val isFallback: Boolean = false,
     val candidates: List<TerminalCompletionCandidate>,
 )
 
 /**
  * Deterministic global evidence-fusion ranker for one merged completion engine.
  *
- * This component groups projected outcomes, chooses representatives, and orders
- * the fused results. Outcome resolution, context relevance, numeric policy, and
- * learned evidence indexing are delegated to their owning collaborators.
+ * This component groups projected outcomes, chooses edit and presentation
+ * representatives, and orders the fused results. Outcome resolution, context
+ * relevance, numeric policy, and learned evidence indexing are delegated to
+ * their owning collaborators.
  */
-internal class GlobalCompletionRanker(
-    commandSpecs: List<TerminalCommandSpec>,
-    private val learningStore: TerminalCompletionLearningStore?,
-    private val clockEpochMillis: () -> Long,
-) {
-    private val commandSpecs = commandSpecs.toList()
-    private val outcomeResolver = TerminalCompletionOutcomeKeyResolver(commandSpecs)
+internal class GlobalCompletionRanker {
+    private val outcomeResolver = TerminalCompletionOutcomeKeyResolver()
 
     fun createRequestState(
         request: TerminalCompletionRequest,
         context: TerminalCompletionContext,
         resultLimit: Int,
+        nowEpochMillis: Long,
+        learnedIndex: LearnedCompletionEvidenceIndex? = null,
     ): RequestCompletionRankingState {
         require(resultLimit > 0) { "resultLimit must be > 0, was $resultLimit" }
-        val learnedIndex = learningStore?.indexesFor(request.shellCapabilities.syntax, commandSpecs)?.evidence
         return RequestCompletionRankingState(
             request = request,
             context = context,
             outcomeResolver = outcomeResolver,
             learnedIndex = learnedIndex,
             learningContext = CompletionLearningContextKey.from(request),
-            now = clockEpochMillis().coerceAtLeast(0L),
+            now = nowEpochMillis.coerceAtLeast(0L),
             resultLimit = resultLimit,
         )
     }
@@ -85,22 +82,25 @@ internal class GlobalCompletionRanker(
                 val contribution =
                     RankedContribution(
                         candidate = candidate,
-                        resolved = resolved,
                         sourceIndex = sourceResult.sourceIndex,
                         candidateIndex = candidateIndex,
                         localRank = candidateIndex + 1,
                         sourcePrior = sourceResult.priority.coerceIn(MIN_SOURCE_PRIOR, MAX_SOURCE_PRIOR),
-                        contextAdjustment = semanticAdjustment(context, candidate),
+                        isFallback = sourceResult.isFallback,
+                        contextAdjustment =
+                            semanticAdjustment(context, candidate) +
+                                if (sourceResult.isFallback) fallbackContextAdjustment(candidate) else 0,
+                        exactLearningAdjustment = learnedIndex?.adjustment(resolved, learningContext, now) ?: 0,
                     )
                 val existing = bestByOutcome[key]
-                if (existing == null || REPRESENTATIVE_ORDER.compare(contribution, existing) < 0) {
+                if (existing == null || EDIT_REPRESENTATIVE_ORDER.compare(contribution, existing) < 0) {
                     bestByOutcome[key] = contribution
                 }
             }
             for ((key, contribution) in bestByOutcome) {
                 val outcome = outcomes.getOrPut(key, ::RankedOutcome)
                 outcome.aggregate.add(contribution)
-                outcome.fused = outcome.aggregate.finish(learnedIndex, learningContext, now)
+                outcome.fused = outcome.aggregate.finish()
                 publicationDirty = true
             }
         }
@@ -138,12 +138,9 @@ internal class GlobalCompletionRanker(
             contributions += contribution
         }
 
-        fun finish(
-            learnedIndex: LearnedCompletionEvidenceIndex?,
-            learningContext: CompletionLearningContextKey,
-            now: Long,
-        ): FusedCandidate {
-            val representative = contributions.minWith(REPRESENTATIVE_ORDER)
+        fun finish(): FusedCandidate {
+            val editRepresentative = contributions.minWith(EDIT_REPRESENTATIVE_ORDER)
+            var presentationRepresentative = editRepresentative
             var reciprocalRankScore = 0L
             var sourcePriorScore = 0L
             var strongestContext = Int.MIN_VALUE
@@ -151,23 +148,27 @@ internal class GlobalCompletionRanker(
                 reciprocalRankScore += reciprocalRank(contribution.localRank)
                 sourcePriorScore += contribution.sourcePrior
                 strongestContext = maxOf(strongestContext, contribution.contextAdjustment)
+                if (contribution.hasSameEditAs(editRepresentative) &&
+                    PRESENTATION_REPRESENTATIVE_ORDER.compare(contribution, presentationRepresentative) < 0
+                ) {
+                    presentationRepresentative = contribution
+                }
             }
-            val exactLearningScore =
-                representative.resolved?.let { learnedIndex?.exactAdjustment(it.learnedKey, learningContext, now) } ?: 0
             val score =
                 CompletionScoreComponents(
                     reciprocalRank = reciprocalRankScore,
                     sourcePrior = sourcePriorScore,
                     semanticContext = strongestContext,
-                    exactLearning = exactLearningScore,
+                    exactLearning = editRepresentative.exactLearningAdjustment,
                 )
             return FusedCandidate(
-                candidate = representative.candidate,
+                rankingCandidate = editRepresentative.candidate,
+                presentationCandidate = presentationRepresentative.candidate,
                 score = score.total,
                 strongestContext = strongestContext,
                 bestLocalRank = contributions.minOf { it.localRank },
-                sourceIndex = representative.sourceIndex,
-                candidateIndex = representative.candidateIndex,
+                sourceIndex = editRepresentative.sourceIndex,
+                candidateIndex = editRepresentative.candidateIndex,
             )
         }
     }
@@ -185,14 +186,20 @@ internal class GlobalCompletionRanker(
 
     private data class RankedContribution(
         val candidate: TerminalCompletionCandidate,
-        val resolved: ResolvedCompletionOutcome?,
         val sourceIndex: Int,
         val candidateIndex: Int,
         val localRank: Int,
         val sourcePrior: Int,
+        val isFallback: Boolean,
         val contextAdjustment: Int,
+        val exactLearningAdjustment: Int,
     ) {
         val replacementLength: Int = candidate.replacementText.length
+
+        fun hasSameEditAs(other: RankedContribution): Boolean =
+            candidate.replacementText == other.candidate.replacementText &&
+                candidate.replacementStartOffset == other.candidate.replacementStartOffset &&
+                candidate.replacementEndOffset == other.candidate.replacementEndOffset
     }
 
     private data class FallbackOutcomeKey(
@@ -208,7 +215,8 @@ internal class GlobalCompletionRanker(
     }
 
     private data class FusedCandidate(
-        val candidate: TerminalCompletionCandidate,
+        val rankingCandidate: TerminalCompletionCandidate,
+        val presentationCandidate: TerminalCompletionCandidate,
         val score: Long,
         val strongestContext: Int,
         val bestLocalRank: Int,
@@ -216,7 +224,7 @@ internal class GlobalCompletionRanker(
         val candidateIndex: Int,
     ) {
         fun toPublicCandidate(): TerminalCompletionCandidate =
-            candidate.copy(score = score.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt())
+            presentationCandidate.copy(score = score.coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt())
     }
 
     private companion object {
@@ -242,7 +250,6 @@ internal class GlobalCompletionRanker(
                             if (candidate.matchesExpectedDomain(context)) DOMAIN_CONTEXT_BOOST else STRONG_CONTEXT_BOOST
                         TerminalCompletionCandidateKind.PATH ->
                             if (context.expectedPathKind == TerminalPathArgumentKind.NONE) PATH_CONTEXT_PENALTY else STRONG_CONTEXT_BOOST
-                        TerminalCompletionCandidateKind.HISTORY -> HISTORY_CONTEXT_PENALTY
                         else -> 0
                     }
 
@@ -252,7 +259,6 @@ internal class GlobalCompletionRanker(
                             if (candidate.matchesExpectedDomain(context)) DOMAIN_CONTEXT_BOOST else MEDIUM_CONTEXT_BOOST
                         TerminalCompletionCandidateKind.PATH ->
                             if (context.expectedPathKind == TerminalPathArgumentKind.NONE) 0 else STRONG_CONTEXT_BOOST
-                        TerminalCompletionCandidateKind.HISTORY -> HISTORY_CONTEXT_PENALTY
                         TerminalCompletionCandidateKind.SUBCOMMAND -> PATH_CONTEXT_PENALTY
                         else -> 0
                     }
@@ -262,6 +268,13 @@ internal class GlobalCompletionRanker(
         private fun TerminalCompletionCandidate.matchesExpectedDomain(context: TerminalCompletionContext): Boolean =
             context.expectedValueDomain != TerminalCompletionValueDomain.NONE && valueDomain == context.expectedValueDomain
 
+        private fun fallbackContextAdjustment(candidate: TerminalCompletionCandidate): Int =
+            if (candidate.kind == TerminalCompletionCandidateKind.PATH) {
+                FALLBACK_PATH_CONTEXT_PENALTY
+            } else {
+                FALLBACK_CONTEXT_PENALTY
+            }
+
         private val STATIC_CONTEXT_BOOST_TABLE =
             Array(TerminalCompletionActivePosition.entries.size) {
                 IntArray(TerminalCompletionCandidateKind.entries.size) { 0 }
@@ -269,27 +282,30 @@ internal class GlobalCompletionRanker(
                 this[TerminalCompletionActivePosition.COMMAND.ordinal][TerminalCompletionCandidateKind.COMMAND.ordinal] =
                     STRONG_CONTEXT_BOOST
                 this[TerminalCompletionActivePosition.COMMAND.ordinal][TerminalCompletionCandidateKind.PATH.ordinal] = WEAK_CONTEXT_BOOST
-                this[TerminalCompletionActivePosition.COMMAND.ordinal][TerminalCompletionCandidateKind.HISTORY.ordinal] =
-                    HISTORY_CONTEXT_PENALTY
 
                 this[TerminalCompletionActivePosition.SUBCOMMAND.ordinal][TerminalCompletionCandidateKind.SUBCOMMAND.ordinal] =
                     STRONG_CONTEXT_BOOST
-                this[TerminalCompletionActivePosition.SUBCOMMAND.ordinal][TerminalCompletionCandidateKind.HISTORY.ordinal] =
-                    HISTORY_CONTEXT_PENALTY
                 this[TerminalCompletionActivePosition.SUBCOMMAND.ordinal][TerminalCompletionCandidateKind.PATH.ordinal] =
                     PATH_CONTEXT_PENALTY
 
                 this[TerminalCompletionActivePosition.OPTION_NAME.ordinal][TerminalCompletionCandidateKind.OPTION.ordinal] =
                     STRONG_CONTEXT_BOOST
-                this[TerminalCompletionActivePosition.OPTION_NAME.ordinal][TerminalCompletionCandidateKind.HISTORY.ordinal] =
-                    HISTORY_CONTEXT_PENALTY
                 this[TerminalCompletionActivePosition.OPTION_NAME.ordinal][TerminalCompletionCandidateKind.PATH.ordinal] =
                     PATH_CONTEXT_PENALTY
             }
 
-        private val REPRESENTATIVE_ORDER =
+        private val EDIT_REPRESENTATIVE_ORDER =
             compareByDescending<RankedContribution> { it.contextAdjustment }
+                .thenBy { it.isFallback }
                 .thenBy { it.replacementLength }
+                .thenByDescending { it.sourcePrior }
+                .thenBy { it.localRank }
+                .thenBy { it.sourceIndex }
+                .thenBy { it.candidateIndex }
+
+        private val PRESENTATION_REPRESENTATIVE_ORDER =
+            compareByDescending<RankedContribution> { it.contextAdjustment }
+                .thenBy { it.isFallback }
                 .thenByDescending { it.sourcePrior }
                 .thenBy { it.localRank }
                 .thenBy { it.sourceIndex }
@@ -299,8 +315,8 @@ internal class GlobalCompletionRanker(
             compareByDescending<FusedCandidate> { it.score }
                 .thenByDescending { it.strongestContext }
                 .thenBy { it.bestLocalRank }
-                .thenBy { it.candidate.displayText }
-                .thenBy { it.candidate.replacementText }
+                .thenBy { it.rankingCandidate.displayText }
+                .thenBy { it.rankingCandidate.replacementText }
                 .thenBy { it.sourceIndex }
                 .thenBy { it.candidateIndex }
 
@@ -324,7 +340,8 @@ internal class GlobalCompletionRanker(
         private const val STRONG_CONTEXT_BOOST = 160
         private const val MEDIUM_CONTEXT_BOOST = 80
         private const val WEAK_CONTEXT_BOOST = 40
-        private const val HISTORY_CONTEXT_PENALTY = -40
         private const val PATH_CONTEXT_PENALTY = -80
+        private const val FALLBACK_CONTEXT_PENALTY = -40
+        private const val FALLBACK_PATH_CONTEXT_PENALTY = -80
     }
 }

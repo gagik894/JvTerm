@@ -21,18 +21,15 @@ import io.github.ketraterm.ui.swing.api.SwingTerminal
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionEligibilityListener
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedbackHandler
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionInvalidationListener
-import kotlinx.coroutines.CoroutineName
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.swing.Swing
 import java.awt.event.FocusAdapter
 import java.awt.event.FocusEvent
 import java.awt.event.FocusListener
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import javax.swing.SwingUtilities
-import javax.swing.Timer
 
 /**
  * Binds host-neutral live-completion behavior to one Swing terminal.
@@ -48,65 +45,57 @@ import javax.swing.Timer
  * binding the terminal to the session, call [attach]. Call [close] from the EDT
  * before disposing the terminal.
  */
+@OptIn(FlowPreview::class)
 class SwingLiveCompletionBinding
     internal constructor(
         private val activeCommandLine: () -> TerminalShellCommandLineSnapshot?,
-        private val shellCommandLineRevisions: Flow<Long>,
+        private val shellCommandLineRevisions: StateFlow<Long>,
         private val suggestionsEnabled: () -> Boolean,
         private val rankingContextKey: () -> String?,
         feedbackHandler: SwingShellSuggestionFeedbackHandler,
-        private val scheduler: SwingLiveCompletionScheduler,
         private val observationScope: CoroutineScope,
-        private val edtDispatcher: SwingLiveCompletionEdtDispatcher = SwingLiveCompletionSwingEdtDispatcher,
+        private val edtDispatcher: CoroutineDispatcher = Dispatchers.Swing,
         private val debounceMillis: Int = DEFAULT_DEBOUNCE_MILLIS,
         private val minimumNonWhitespaceCharacters: Int = DEFAULT_MINIMUM_NON_WHITESPACE_CHARACTERS,
     ) : AutoCloseable {
         private var target: SwingLiveCompletionTarget? = null
         private var observationJob: Job? = null
-        private var invalidatedRevision = NO_SHELL_COMMAND_LINE_REVISION
-        private var awaitingShellCommandLineRevision = false
-        private val latestRevision = AtomicLong(NO_SHELL_COMMAND_LINE_REVISION)
-        private val revisionDispatchQueued = AtomicBoolean()
+        private var invalidatedRevision: Long? = null
+        private val refreshes = MutableStateFlow<Long?>(null)
+        private var refreshSequence = 0L
         private var lastRequest: RequestKey? = null
 
-        @Volatile
         private var closed = false
-
-        private val revisionDrain = Runnable(::drainShellCommandLineRevisionOnEdt)
-        private val scheduleRefreshTask = Runnable { scheduleRefreshOnEdt() }
-        private val cancelAndHideTask = Runnable { cancelAndHideOnEdt() }
-        private val refreshAction = ::refreshNow
 
         private val focusListener =
             object : FocusAdapter() {
                 override fun focusGained(event: FocusEvent) {
-                    scheduleRefreshOnEdt()
+                    scheduleRefresh()
                 }
 
                 override fun focusLost(event: FocusEvent) {
-                    cancelAndHideOnEdt()
+                    cancelAndHide()
                 }
             }
 
         private val invalidationListener =
             SwingShellSuggestionInvalidationListener {
-                check(edtDispatcher.isDispatchThread()) { "shell suggestion invalidation must run on the EDT" }
+                check(SwingUtilities.isEventDispatchThread()) { "shell suggestion invalidation must run on the EDT" }
                 if (closed) return@SwingShellSuggestionInvalidationListener
-                invalidatedRevision = latestRevision.get()
-                awaitingShellCommandLineRevision = true
+                invalidatedRevision = shellCommandLineRevisions.value
                 cancelAndHideInternal()
             }
 
         private val eligibilityListener =
             SwingShellSuggestionEligibilityListener { eligible ->
-                check(edtDispatcher.isDispatchThread()) { "shell suggestion eligibility must run on the EDT" }
+                check(SwingUtilities.isEventDispatchThread()) { "shell suggestion eligibility must run on the EDT" }
                 if (closed) return@SwingShellSuggestionEligibilityListener
-                if (eligible && isEligibleOnEdt() && !awaitingShellCommandLineRevision) {
-                    invalidateLastRequest()
-                    scheduleRefreshInternal()
+                if (eligible && isEligibleOnEdt() && invalidatedRevision == null) {
+                    lastRequest = null
+                    scheduleRefresh()
                 } else {
-                    scheduler.cancel()
-                    invalidateLastRequest()
+                    refreshes.value = null
+                    lastRequest = null
                 }
             }
 
@@ -118,8 +107,8 @@ class SwingLiveCompletionBinding
          */
         val suggestionFeedbackHandler =
             SwingShellSuggestionFeedbackHandler { feedback ->
-                check(edtDispatcher.isDispatchThread()) { "shell suggestion feedback must run on the EDT" }
-                invalidateLastRequest()
+                check(SwingUtilities.isEventDispatchThread()) { "shell suggestion feedback must run on the EDT" }
+                lastRequest = null
                 feedbackHandler.onSuggestionFeedback(feedback)
             }
 
@@ -144,12 +133,11 @@ class SwingLiveCompletionBinding
             suggestionsEnabled = suggestionsEnabled,
             rankingContextKey = rankingContextKey,
             feedbackHandler = feedbackHandler,
-            scheduler = SwingTimerLiveCompletionScheduler(),
             observationScope = coroutineScope,
         )
 
         /**
-         * Attaches this binding to [terminal] and starts render observation.
+         * Attaches this binding to [terminal] and observes shell-edit revisions.
          *
          * A binding may be attached exactly once. The terminal must already be
          * bound to the session supplied to the constructor.
@@ -161,7 +149,7 @@ class SwingLiveCompletionBinding
         }
 
         internal fun attach(target: SwingLiveCompletionTarget) {
-            check(edtDispatcher.isDispatchThread()) { "live completion must be attached on the EDT" }
+            check(SwingUtilities.isEventDispatchThread()) { "live completion must be attached on the EDT" }
             check(!closed) { "live completion binding is closed" }
             check(this.target == null) { "live completion binding is already attached" }
             this.target = target
@@ -172,9 +160,18 @@ class SwingLiveCompletionBinding
                 target.addInvalidationListener(invalidationListener)
                 target.addEligibilityListener(eligibilityListener)
                 observationJob =
-                    observationScope.launch(CoroutineName("swing-live-completion")) {
+                    observationScope.launch(edtDispatcher + CoroutineName("swing-live-completion")) {
+                        launch {
+                            refreshes
+                                .debounce { if (it == null) 0L else debounceMillis.toLong() }
+                                .collect { revision ->
+                                    if (revision != null && revision == refreshes.value) refreshNow()
+                                }
+                        }
                         shellCommandLineRevisions.collect { revision ->
-                            if (revision >= 0L) enqueueShellCommandLineRevision(revision)
+                            if (revision >= 0L) {
+                                onShellCommandLineRevisionOnEdt(revision)
+                            }
                         }
                     }
             } catch (failure: Throwable) {
@@ -189,28 +186,26 @@ class SwingLiveCompletionBinding
         }
 
         /** Re-evaluates live completion after the shared debounce interval. */
-        fun scheduleRefresh() {
-            edtDispatcher.dispatch(scheduleRefreshTask)
-        }
+        fun scheduleRefresh() =
+            onEdt {
+                if (!closed && invalidatedRevision == null && isEligibleOnEdt()) refreshes.value = ++refreshSequence
+            }
 
         /** Cancels pending live completion and hides the current popup. */
-        fun cancelAndHide() {
-            edtDispatcher.dispatch(cancelAndHideTask)
-        }
-
-        internal fun invalidateLastRequest() {
-            lastRequest = null
-        }
+        fun cancelAndHide() =
+            onEdt {
+                if (!closed) cancelAndHideInternal()
+            }
 
         internal fun refreshNow() {
-            check(edtDispatcher.isDispatchThread()) { "live completion must refresh on the EDT" }
-            if (closed || !isEligibleOnEdt()) {
+            check(SwingUtilities.isEventDispatchThread()) { "live completion must refresh on the EDT" }
+            if (closed || invalidatedRevision != null || !isEligibleOnEdt()) {
                 cancelAndHideInternal()
                 return
             }
             val snapshot = activeCommandLine()
             if (snapshot == null || !shouldRequest(snapshot)) {
-                invalidateLastRequest()
+                lastRequest = null
                 target?.hideSuggestions()
                 return
             }
@@ -222,69 +217,46 @@ class SwingLiveCompletionBinding
 
         /** Stops observation, removes focus wiring, and hides suggestions. */
         override fun close() {
-            check(edtDispatcher.isDispatchThread()) { "live completion must be closed on the EDT" }
+            check(SwingUtilities.isEventDispatchThread()) { "live completion must be closed on the EDT" }
+            if (closed) return
+            cancelAndHideInternal()
+            detach()
+        }
+
+        /** Stops automatic observation without dismissing an explicit completion request. */
+        fun detach() {
+            check(SwingUtilities.isEventDispatchThread()) { "live completion must be closed on the EDT" }
             if (closed) return
             closed = true
             observationJob?.cancel()
             observationJob = null
-            cancelAndHideInternal()
+            refreshes.value = null
+            lastRequest = null
             target?.removeFocusListener(focusListener)
             target?.removeInvalidationListener(invalidationListener)
             target?.removeEligibilityListener(eligibilityListener)
             target = null
         }
 
-        private fun enqueueShellCommandLineRevision(revision: Long) {
-            latestRevision.set(revision)
-            if (revisionDispatchQueued.compareAndSet(false, true)) {
-                edtDispatcher.dispatch(revisionDrain)
-            }
-        }
-
-        private fun drainShellCommandLineRevisionOnEdt() {
-            check(edtDispatcher.isDispatchThread()) { "shell command-line revisions must drain on the EDT" }
-            while (true) {
-                val revision = latestRevision.get()
-                onShellCommandLineRevisionOnEdt(revision)
-                revisionDispatchQueued.set(false)
-                if (latestRevision.get() == revision || !revisionDispatchQueued.compareAndSet(false, true)) return
+        private fun onEdt(action: () -> Unit) {
+            if (SwingUtilities.isEventDispatchThread()) {
+                action()
+            } else {
+                observationScope.launch(edtDispatcher) { action() }
             }
         }
 
         private fun onShellCommandLineRevisionOnEdt(revision: Long) {
             if (closed) return
-            if (awaitingShellCommandLineRevision) {
-                if (revision == invalidatedRevision) return
-                awaitingShellCommandLineRevision = false
-                invalidatedRevision = NO_SHELL_COMMAND_LINE_REVISION
-            }
-            if (!isEligibleOnEdt()) {
-                cancelAndHideInternal()
-                return
-            }
-            scheduler.cancel()
-            invalidateLastRequest()
-            target?.hideSuggestions()
-            scheduleRefreshInternal()
-        }
-
-        private fun scheduleRefreshOnEdt() {
-            if (!closed && !awaitingShellCommandLineRevision && isEligibleOnEdt()) {
-                scheduleRefreshInternal()
-            }
-        }
-
-        private fun scheduleRefreshInternal() {
-            scheduler.restart(debounceMillis, refreshAction)
-        }
-
-        private fun cancelAndHideOnEdt() {
-            if (!closed) cancelAndHideInternal()
+            if (revision == invalidatedRevision) return
+            invalidatedRevision = null
+            cancelAndHideInternal()
+            scheduleRefresh()
         }
 
         private fun cancelAndHideInternal() {
-            scheduler.cancel()
-            invalidateLastRequest()
+            refreshes.value = null
+            lastRequest = null
             target?.hideSuggestions()
         }
 
@@ -314,26 +286,14 @@ class SwingLiveCompletionBinding
                 suggestionsEnabled()
 
         private data class RequestKey(
-            val commandText: String,
-            val cursorOffset: Int,
-            val cursorColumn: Int,
-            val cursorRow: Int,
+            val snapshot: TerminalShellCommandLineSnapshot,
             val rankingContextKey: String?,
-        ) {
-            constructor(snapshot: TerminalShellCommandLineSnapshot, rankingContextKey: String?) : this(
-                commandText = snapshot.commandText,
-                cursorOffset = snapshot.cursorOffset,
-                cursorColumn = snapshot.cursorColumn,
-                cursorRow = snapshot.cursorRow,
-                rankingContextKey = rankingContextKey,
-            )
-        }
+        )
 
         private companion object {
             private const val DEFAULT_DEBOUNCE_MILLIS = 75
             private const val DEFAULT_MINIMUM_NON_WHITESPACE_CHARACTERS = 2
             private const val MINIMUM_SPACE_TRIGGER_CHARACTERS = 2
-            private const val NO_SHELL_COMMAND_LINE_REVISION = -1L
         }
     }
 
@@ -371,90 +331,25 @@ private class SwingTerminalLiveCompletionTarget(
         )
     }
 
-    override fun hideSuggestions() {
-        terminal.hideShellSuggestions()
-    }
+    override fun hideSuggestions() = terminal.hideShellSuggestions()
 
-    override fun addFocusListener(listener: FocusListener) {
-        terminal.addFocusListener(listener)
-    }
+    override fun addFocusListener(listener: FocusListener) = terminal.addFocusListener(listener)
 
-    override fun removeFocusListener(listener: FocusListener) {
-        terminal.removeFocusListener(listener)
-    }
+    override fun removeFocusListener(listener: FocusListener) = terminal.removeFocusListener(listener)
 
-    override fun addInvalidationListener(listener: SwingShellSuggestionInvalidationListener) {
+    override fun addInvalidationListener(listener: SwingShellSuggestionInvalidationListener) =
         terminal.addShellSuggestionInvalidationListener(listener)
-    }
 
-    override fun removeInvalidationListener(listener: SwingShellSuggestionInvalidationListener) {
+    override fun removeInvalidationListener(listener: SwingShellSuggestionInvalidationListener) =
         terminal.removeShellSuggestionInvalidationListener(listener)
-    }
 
-    override fun addEligibilityListener(listener: SwingShellSuggestionEligibilityListener) {
+    override fun addEligibilityListener(listener: SwingShellSuggestionEligibilityListener) =
         terminal.addShellSuggestionEligibilityListener(listener)
-    }
 
-    override fun removeEligibilityListener(listener: SwingShellSuggestionEligibilityListener) {
+    override fun removeEligibilityListener(listener: SwingShellSuggestionEligibilityListener) =
         terminal.removeShellSuggestionEligibilityListener(listener)
-    }
 
     override fun isFocusOwner(): Boolean = terminal.isFocusOwner
 
     override fun isAutomaticSuggestionEligible(): Boolean = terminal.isAutomaticShellSuggestionEligible()
-}
-
-/** EDT-confined replaceable delayed-action seam for Swing live completion refreshes. */
-internal interface SwingLiveCompletionScheduler {
-    /** Replaces pending work and invokes [action] after [delayMillis]. */
-    fun restart(
-        delayMillis: Int,
-        action: () -> Unit,
-    )
-
-    /** Cancels the pending action, if present. */
-    fun cancel()
-}
-
-/** Reusable one-shot Swing timer whose state is confined to the EDT. */
-internal class SwingTimerLiveCompletionScheduler : SwingLiveCompletionScheduler {
-    private var pendingAction: (() -> Unit)? = null
-    private val timer =
-        Timer(0) {
-            val action = pendingAction
-            pendingAction = null
-            action?.invoke()
-        }.apply {
-            isRepeats = false
-        }
-
-    override fun restart(
-        delayMillis: Int,
-        action: () -> Unit,
-    ) {
-        check(SwingUtilities.isEventDispatchThread()) { "live completion timer must restart on the EDT" }
-        pendingAction = action
-        timer.initialDelay = delayMillis
-        timer.restart()
-    }
-
-    override fun cancel() {
-        check(SwingUtilities.isEventDispatchThread()) { "live completion timer must cancel on the EDT" }
-        pendingAction = null
-        timer.stop()
-    }
-}
-
-internal interface SwingLiveCompletionEdtDispatcher {
-    fun isDispatchThread(): Boolean
-
-    fun dispatch(task: Runnable)
-}
-
-private object SwingLiveCompletionSwingEdtDispatcher : SwingLiveCompletionEdtDispatcher {
-    override fun isDispatchThread(): Boolean = SwingUtilities.isEventDispatchThread()
-
-    override fun dispatch(task: Runnable) {
-        if (SwingUtilities.isEventDispatchThread()) task.run() else SwingUtilities.invokeLater(task)
-    }
 }

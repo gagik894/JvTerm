@@ -15,42 +15,12 @@
  */
 package io.github.ketraterm.completion.api
 
-import io.github.ketraterm.completion.model.TerminalCommandSpec
-import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.completion.model.TerminalCompletionDomainValue
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 import io.github.ketraterm.completion.source.*
 
 /** Factories for dependency-free, host-composable completion sources. */
 object TerminalCompletionSources {
-    /**
-     * Creates a bounded in-memory source for commands observed in the current
-     * terminal session.
-     *
-     * @param capacity maximum number of distinct normalized commands and
-     * session-local observed-token transitions retained.
-     * @param commandSpecs static command specs whose known command families are
-     * excluded from observed-token learning because specs are authoritative for
-     * those commands.
-     * @param learningStore optional shared learning store used to recover
-     * positive commands across sessions. Its rows contribute through this
-     * single learned source and are not a separate completion provider.
-     * @return mutable session MRU completion source.
-     * @throws IllegalArgumentException if [capacity] is not positive.
-     */
-    @JvmStatic
-    @JvmOverloads
-    fun sessionMru(
-        capacity: Int = 128,
-        commandSpecs: List<TerminalCommandSpec> = TerminalCommandSpecs.defaults(),
-        learningStore: TerminalCompletionLearningStore? = null,
-    ): TerminalSessionMruCompletionSource =
-        SessionMruCompletionSourceImpl(
-            capacity = capacity,
-            commandSpecs = commandSpecs,
-            learningStore = learningStore,
-        )
-
     /**
      * Creates a path autocomplete source backed by a host-provided file system lister.
      *
@@ -61,53 +31,14 @@ object TerminalCompletionSources {
     fun path(fileSystemProvider: TerminalFileSystemProvider): TerminalCompletionSource = PathCompletionSource(fileSystemProvider)
 
     /**
-     * Creates a source that fuzzy-matches a bounded host path result.
-     *
-     * [entriesProvider] is called only for an eligible completion context and
-     * must return paths relative to the request's current directory. It may
-     * perform bounded suspending host work and must cooperate with cancellation.
-     * The result is matched once by the shared dependency-free matcher before
-     * terminal path rules are applied.
-     *
-     * @param sourceId stable candidate-source id used by ranking feedback.
-     * @param entriesProvider suspending loader for bounded indexed paths. The
-     * immutable request supplies the authoritative working-directory URI.
-     * @param requiresNonEmptyPrefix whether this source waits for explicit path
-     * text before matching. Use `false` only for small, context-specific
-     * result sets such as changed Git paths.
-     * @param allowedCommandNames optional canonical command/subcommand names to
-     * which this source is restricted. An empty set permits every valid path
-     * position.
-     * @return context-aware fuzzy path completion source.
-     * @throws IllegalArgumentException if [sourceId] is blank.
-     */
-    @JvmStatic
-    @JvmOverloads
-    fun fuzzyPath(
-        sourceId: String,
-        entriesProvider: suspend (TerminalCompletionRequest) -> List<TerminalFuzzyPathEntry>,
-        requiresNonEmptyPrefix: Boolean = true,
-        allowedCommandNames: Set<String> = emptySet(),
-    ): TerminalCompletionSource {
-        require(sourceId.isNotBlank()) { "sourceId must not be blank" }
-        require(allowedCommandNames.none(String::isBlank)) { "allowedCommandNames must not contain blank values" }
-        return FuzzyPathCompletionSource(
-            sourceId = sourceId,
-            entriesProvider = BoundedFuzzyPathProvider(entriesProvider),
-            requiresNonEmptyPrefix = requiresNonEmptyPrefix,
-            allowedCommandNames = allowedCommandNames.toSet(),
-        )
-    }
-
-    /**
      * Creates a source backed by a query-aware host fuzzy-path provider.
      *
-     * Unlike the list-loader overload, this overload passes the immutable
-     * request and decoded active path prefix to [entriesProvider]. This lets
-     * IDE hosts query their indexes asynchronously and apply bounds after matching instead of
-     * truncating an unrelated whole-project traversal. The provider owns the
-     * only fuzzy match and must return ready results in relevance order without
-     * blocking the completion thread.
+     * The immutable request and resolved semantic context let IDE hosts query
+     * their indexes asynchronously using the decoded active path prefix. The
+     * provider owns the only fuzzy match and an independent host-query budget;
+     * it must return ready results in relevance order without blocking the
+     * completion thread. The engine's final candidate limit is applied only
+     * after shared terminal path and quoting rules.
      *
      * @param sourceId stable candidate-source id used by ranking feedback.
      * @param entriesProvider ready query-aware path provider scoped by the
@@ -129,7 +60,7 @@ object TerminalCompletionSources {
         require(allowedCommandNames.none(String::isBlank)) { "allowedCommandNames must not contain blank values" }
         return FuzzyPathCompletionSource(
             sourceId = sourceId,
-            entriesProvider = entriesProvider,
+            entriesProvider = entriesProvider::entries,
             requiresNonEmptyPrefix = requiresNonEmptyPrefix,
             allowedCommandNames = allowedCommandNames.toSet(),
         )
@@ -140,19 +71,20 @@ object TerminalCompletionSources {
      *
      * The source understands Gradle's canonical `:project:task` notation and
      * scopes short task names after `-p` or `--project-dir`. [tasksProvider]
-     * must return a bounded result and cooperate with cancellation. The loader
-     * may read a host model but must never start Gradle from a completion request.
+     * receives the resolved semantic context and returns a snapshot bounded by
+     * its own host-model input or visit budget. The shared source matches that
+     * snapshot before applying the final candidate limit. The loader may read a
+     * host model but must never start Gradle from a completion request.
      *
      * @param sourceId stable candidate-source id used by ranking feedback.
-     * @param tasksProvider suspending bounded Gradle-task loader. The immutable
-     * request supplies the authoritative working-directory URI.
+     * @param tasksProvider suspending bounded Gradle-task snapshot loader.
      * @return context-aware Gradle task completion source.
      * @throws IllegalArgumentException if [sourceId] is blank.
      */
     @JvmStatic
     fun gradleTask(
         sourceId: String,
-        tasksProvider: suspend (TerminalCompletionRequest) -> List<TerminalGradleTask>,
+        tasksProvider: suspend (TerminalCompletionRequest, TerminalCompletionContext) -> List<TerminalGradleTask>,
     ): TerminalCompletionSource =
         GradleTaskCompletionSource(
             sourceId = sourceId,
@@ -164,11 +96,13 @@ object TerminalCompletionSources {
      *
      * [valuesProvider] is called only when the resolved context expects [domain].
      * It may perform bounded suspending host work and must cooperate with
-     * cancellation. The source retains no returned values.
+     * cancellation. The provider receives the resolved semantic context and
+     * owns an independent input or visit budget. The shared source matches the
+     * complete snapshot before applying its final candidate limit.
      *
      * @param domain command-spec value domain served by this source.
      * @param sourceId stable candidate-source id used by ranking feedback.
-     * @param valuesProvider suspending bounded value loader.
+     * @param valuesProvider suspending bounded value snapshot loader.
      * @param allowedCommandNames optional canonical command/subcommand names to
      * which this source is restricted. An empty set permits every matching
      * value-domain position.
@@ -181,7 +115,7 @@ object TerminalCompletionSources {
     fun valueDomain(
         domain: TerminalCompletionValueDomain,
         sourceId: String,
-        valuesProvider: suspend () -> List<TerminalCompletionDomainValue>,
+        valuesProvider: suspend (TerminalCompletionRequest, TerminalCompletionContext) -> List<TerminalCompletionDomainValue>,
         allowedCommandNames: Set<String> = emptySet(),
     ): TerminalCompletionSource =
         ValueDomainCompletionSource(

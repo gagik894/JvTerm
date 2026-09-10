@@ -64,6 +64,26 @@ class SwingTerminalInputControllerTest {
             assertTrue(host.cursorBlinkResets.isEmpty())
             assertTrue(event.isConsumed)
         }
+
+        @Test
+        fun `host-owned repeat cannot become a suggestion action before release`() {
+            val host = RecordingInputHost(hostKeyHandled = true)
+            val controller = SwingTerminalInputController(host)
+            val press = keyPressed(KeyEvent.VK_DOWN, 0)
+            val repeat = keyPressed(KeyEvent.VK_DOWN, 0)
+            val release = keyReleased(KeyEvent.VK_DOWN, 0)
+
+            controller.keyListener.keyPressed(press)
+            host.shellSuggestionKeyHandled = true
+            controller.keyListener.keyPressed(repeat)
+            controller.keyListener.keyReleased(release)
+
+            assertEquals(1, host.shellSuggestionKeyPressCount)
+            assertEquals(1, host.hostKeyPressCount)
+            assertTrue(press.isConsumed)
+            assertTrue(repeat.isConsumed)
+            assertTrue(release.isConsumed)
+        }
     }
 
     @Nested
@@ -94,24 +114,53 @@ class SwingTerminalInputControllerTest {
         }
 
         @Test
-        fun `claimed key owns repeat typed and release events after popup closes`() {
+        fun `claimed navigation key redispatches repeated presses to suggestions`() {
             val host = RecordingInputHost(shellSuggestionKeyHandled = true)
             val controller = SwingTerminalInputController(host)
-            val press = keyPressed(KeyEvent.VK_ENTER, 0)
-            val repeat = keyPressed(KeyEvent.VK_ENTER, 0)
-            val typed = keyTyped('\n')
-            val release = keyReleased(KeyEvent.VK_ENTER, 0)
+            val press = keyPressed(KeyEvent.VK_DOWN, 0)
+            val repeat = keyPressed(KeyEvent.VK_DOWN, 0)
+            val release = keyReleased(KeyEvent.VK_DOWN, 0)
 
             controller.keyListener.keyPressed(press)
             controller.keyListener.keyPressed(repeat)
-            controller.keyListener.keyTyped(typed)
             controller.keyListener.keyReleased(release)
 
-            assertEquals(1, host.shellSuggestionKeyPressCount)
+            assertEquals(2, host.shellSuggestionKeyPressCount)
             assertTrue(press.isConsumed)
             assertTrue(repeat.isConsumed)
-            assertTrue(typed.isConsumed)
             assertTrue(release.isConsumed)
+            assertEquals(0, host.hostKeyPressCount)
+            assertEquals(0, host.invalidationCount)
+        }
+
+        @Test
+        fun `claimed acceptance key owns repeat typed and release events after popup closes`() {
+            val host = RecordingInputHost(shellSuggestionKeyHandled = true)
+            val controller = SwingTerminalInputController(host)
+            val press = keyPressed(KeyEvent.VK_ENTER, 0)
+            val firstRepeat = keyPressed(KeyEvent.VK_ENTER, 0)
+            val firstTyped = keyTyped('\n')
+            val secondRepeat = keyPressed(KeyEvent.VK_ENTER, 0)
+            val secondTyped = keyTyped('\n')
+            val release = keyReleased(KeyEvent.VK_ENTER, 0)
+
+            controller.keyListener.keyPressed(press)
+            host.shellSuggestionKeyHandled = false
+            controller.keyListener.keyPressed(firstRepeat)
+            controller.keyListener.keyTyped(firstTyped)
+            controller.keyListener.keyPressed(secondRepeat)
+            controller.keyListener.keyTyped(secondTyped)
+            controller.keyListener.keyReleased(release)
+
+            assertEquals(3, host.shellSuggestionKeyPressCount)
+            assertTrue(press.isConsumed)
+            assertTrue(firstRepeat.isConsumed)
+            assertTrue(firstTyped.isConsumed)
+            assertTrue(secondRepeat.isConsumed)
+            assertTrue(secondTyped.isConsumed)
+            assertTrue(release.isConsumed)
+            assertEquals(0, host.hostKeyPressCount)
+            assertEquals(0, host.invalidationCount)
         }
     }
 
@@ -205,7 +254,7 @@ class SwingTerminalInputControllerTest {
 
     private class RecordingInputHost(
         private val hostKeyHandled: Boolean = false,
-        private val shellSuggestionKeyHandled: Boolean = false,
+        shellSuggestionKeyHandled: Boolean = false,
     ) : SwingTerminalInputHost {
         override val session: TerminalSession? = null
         val hyperlinkHoverUpdates = ArrayList<Boolean>()
@@ -214,6 +263,7 @@ class SwingTerminalInputControllerTest {
         var cursorRepaints = 0
         var hostKeyPressCount = 0
         var shellSuggestionKeyPressCount = 0
+        var shellSuggestionKeyHandled = shellSuggestionKeyHandled
         var invalidationCount = 0
 
         override fun updateHyperlinkActivationHover(active: Boolean) {

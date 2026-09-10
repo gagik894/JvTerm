@@ -21,6 +21,7 @@ internal class BoundedVisitBudget(
     private val cancellationCheckpoint: () -> Unit,
 ) {
     private var visited = 0
+    private var stopped = false
 
     init {
         require(limit > 0) { "limit must be > 0, was $limit" }
@@ -29,15 +30,19 @@ internal class BoundedVisitBudget(
     /** Visits values without requesting an element after the shared limit is exhausted. */
     fun <T> visit(
         values: Iterable<T>,
-        action: (T) -> Unit,
+        action: (T) -> Boolean,
     ) {
+        if (stopped) return
         val iterator = values.iterator()
         while (visited < limit) {
             cancellationCheckpoint()
             if (!iterator.hasNext()) return
             val value = iterator.next()
             visited++
-            action(value)
+            if (!action(value)) {
+                stopped = true
+                return
+            }
         }
     }
 }

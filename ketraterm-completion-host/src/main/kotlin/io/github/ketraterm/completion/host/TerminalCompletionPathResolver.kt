@@ -40,7 +40,7 @@ class TerminalCompletionPathResolver
         fun resolve(request: TerminalDirectoryListingRequest): Path? {
             val workingDirectory = TerminalLocalFileUriResolver.resolve(request.workingDirectoryUri) ?: return null
             val prefix = request.directoryPrefix
-            return runCatching {
+            return try {
                 val resolved =
                     when {
                         prefix == "~/" -> homeDirectory
@@ -52,7 +52,9 @@ class TerminalCompletionPathResolver
                         else -> workingDirectory.resolve(prefix)
                     } ?: return null
                 resolved.toAbsolutePath().normalize()
-            }.getOrNull()
+            } catch (_: IllegalArgumentException) {
+                null
+            }
         }
 
         private fun String.hasWindowsDriveRoot(): Boolean = length >= 3 && this[0].isLetter() && this[1] == ':' && this[2] == '/'

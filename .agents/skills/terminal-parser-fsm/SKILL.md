@@ -1,44 +1,28 @@
 ---
-name: ketraterm-parser-fsm
-description: Parser FSM and protocol dispatch guidance for this terminal emulator. Use when touching ByteClass, AnsiStateMachine, ActionEngine, ParserState, CSI/ESC/OSC/DCS handling, SGR dispatch, charset mapping, UTF-8 recovery, or TerminalParser full byte-stream behavior.
+name: terminal-parser-fsm
+description: Use for parser finite-state-machine, byte classification, action engine, CSI/ESC/OSC/DCS dispatch, UTF-8 recovery, charset, or string-termination changes. Do not invoke for core-only terminal behavior.
 ---
 
 # Terminal Parser FSM
 
-Use this skill when changing parser state machines, action engines, protocol
-dispatch, or byte-stream recovery behavior.
+Read the root and `ketraterm-parser/AGENTS.md` first.
 
-## Boundaries
+## Parser invariants
 
-- Parser owns UTF-8 decoding, ANSI state transitions, string termination,
-  parameter assembly, charset shifts, grapheme segmentation, and semantic sink
-  calls.
-- Parser does not own terminal width, grid bounds, cursor clamping, cell width,
-  scrollback, rendering, or durable core state.
+- Keep byte classification, transition tables, actions, and completed-sequence
+  dispatch separate.
+- Dispatch CSI by structural signature, not final byte alone.
+- Handle controls inside string states according to string-local semantics.
+- Bound parameters and string payloads before semantic dispatch.
+- Recover from unknown, malformed, aborted, or overflowing sequences without
+  printing structural bytes or dispatching a different command.
+- Keep UTF-8 recovery synchronized so a following ESC or control byte is routed
+  structurally.
 
-## FSM Rules
+## Verification
 
-- Keep byte classification, matrix transitions, actions, and command dispatch
-  separate.
-- CSI dispatch should use structural signatures, not final-byte-only switches.
-- String states need string-local control handling; do not use global execute
-  semantics inside OSC/DCS/SOS/PM/APC bodies when real terminal rules differ.
-- Bound OSC/DCS payloads. Ignore overflow-sensitive semantic commands unless a
-  clear policy allows dispatch.
-- Unknown or malformed sequences must recover according to terminal semantics,
-  not accidentally print or dispatch as another command.
-
-## Test Checklist
-
-Add tests at the narrowest useful level and full parser level when observable:
-
-- byte class and state table coverage.
-- CAN/SUB aborts.
-- ESC `\` ST termination from string states.
-- BEL OSC termination.
-- omitted, empty, colon, and overflowing params.
-- max params, intermediates, payloads, and cluster length.
-- malformed UTF-8 followed by ASCII, ESC, CSI, and string terminators.
-- chunk boundaries around every structural byte.
-
-Tests must assert real terminal semantics, not current implementation quirks.
+Test the narrowest changed component and the full byte-stream parser when the
+behavior is externally observable. Cover relevant abort/termination forms,
+omitted and overflowing parameters, malformed UTF-8 recovery, payload bounds,
+and chunk boundaries around structural bytes. Capability status belongs in the
+canonical maps, not this skill.

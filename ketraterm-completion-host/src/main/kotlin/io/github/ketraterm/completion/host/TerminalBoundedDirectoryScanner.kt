@@ -19,18 +19,16 @@ import io.github.ketraterm.completion.api.TerminalFileEntry
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runInterruptible
-import java.nio.file.Files
-import java.nio.file.Path
+import java.nio.file.*
+import java.nio.file.attribute.BasicFileAttributes
 import java.util.concurrent.TimeUnit
 
 /**
- * Best-effort time-, visit-, and result-bounded local directory scanner.
+ * Time- and visit-bounded local directory scanner.
  *
  * @param maxVisitedEntries positive cap on inspected direct children.
- * @param maxMatchingEntries positive cap on retained matches.
  * @param scanBudgetNanos positive best-effort monotonic scan budget.
  * @param nanoTime monotonic clock used to enforce the budget.
- * @param onFailure diagnostic callback for a directory-level scan failure.
  * @param ioDispatcher dispatcher used only for blocking filesystem access.
  * @throws IllegalArgumentException if a capacity or the scan budget is not positive.
  */
@@ -38,24 +36,22 @@ class TerminalBoundedDirectoryScanner
     @JvmOverloads
     constructor(
         private val maxVisitedEntries: Int = DEFAULT_MAX_VISITED_ENTRIES,
-        private val maxMatchingEntries: Int = DEFAULT_MAX_MATCHING_ENTRIES,
         private val scanBudgetNanos: Long = TimeUnit.MILLISECONDS.toNanos(DEFAULT_SCAN_BUDGET_MILLIS),
         private val nanoTime: () -> Long = System::nanoTime,
-        private val onFailure: (Throwable) -> Unit = {},
         private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     ) : TerminalDirectoryScanner {
         init {
             require(maxVisitedEntries > 0) { "maxVisitedEntries must be > 0, was $maxVisitedEntries" }
-            require(maxMatchingEntries > 0) { "maxMatchingEntries must be > 0, was $maxMatchingEntries" }
             require(scanBudgetNanos > 0L) { "scanBudgetNanos must be > 0, was $scanBudgetNanos" }
         }
 
         /**
-         * Returns a bounded deterministic snapshot or an empty list on failure.
+         * Returns a bounded deterministic snapshot.
          *
          * @param directory normalized absolute local directory to inspect.
          * @param entryNamePrefix case-insensitive child-name prefix.
-         * @return bounded deterministic entries, or an empty list on failure/interruption.
+         * @return bounded deterministic entries, or an empty list when the
+         * directory is absent or the path is not a directory.
          */
         override suspend fun scan(
             directory: Path,
@@ -73,7 +69,7 @@ class TerminalBoundedDirectoryScanner
             val startedAt = nanoTime()
             val entries = ArrayList<TerminalFileEntry>(minOf(maxVisitedEntries, INITIAL_SCAN_CAPACITY))
             try {
-                if (!Files.isDirectory(directory)) return emptyList()
+                if (!Files.readAttributes(directory, BasicFileAttributes::class.java).isDirectory) return emptyList()
                 Files.newDirectoryStream(directory).use { stream ->
                     var visited = 0
                     val iterator = stream.iterator()
@@ -88,38 +84,30 @@ class TerminalBoundedDirectoryScanner
                         val name = child.fileName?.toString() ?: continue
                         val isDirectory =
                             try {
-                                child.toFile().isDirectory
-                            } catch (_: Exception) {
-                                try {
-                                    Files.isDirectory(child)
-                                } catch (_: Exception) {
-                                    continue
-                                }
+                                Files.readAttributes(child, BasicFileAttributes::class.java).isDirectory
+                            } catch (_: NoSuchFileException) {
+                                continue
                             }
                         val entry = TerminalFileEntry(name, isDirectory)
                         entries += entry
                     }
                 }
-            } catch (failure: Exception) {
-                reportFailure(failure)
+            } catch (_: NoSuchFileException) {
                 return emptyList()
+            } catch (_: NotDirectoryException) {
+                return emptyList()
+            } catch (failure: DirectoryIteratorException) {
+                when (failure.cause) {
+                    is NoSuchFileException, is NotDirectoryException -> return emptyList()
+                    else -> throw failure
+                }
             }
-            if (Thread.currentThread().isInterrupted) return emptyList()
-            return TerminalDirectoryEntrySnapshot(entries).matching(entryNamePrefix, maxMatchingEntries)
-        }
-
-        private fun reportFailure(failure: Throwable) {
-            try {
-                onFailure(failure)
-            } catch (_: RuntimeException) {
-                // A diagnostics sink must not turn a failed completion scan into a caller failure.
-            }
+            return TerminalDirectoryEntrySnapshot(entries).matching(entryNamePrefix)
         }
 
         private companion object {
             private const val INITIAL_SCAN_CAPACITY = 128
             private const val DEFAULT_MAX_VISITED_ENTRIES = 8_192
-            private const val DEFAULT_MAX_MATCHING_ENTRIES = 256
             private const val DEFAULT_SCAN_BUDGET_MILLIS = 50L
         }
     }

@@ -1,45 +1,26 @@
 ---
-name: ketraterm-host-adapter
-description: Integration adapter guidance for mapping ketraterm-parser TerminalCommandSink semantics to ketraterm-core TerminalBuffer. Use when changing HostCommandAdapter, parser-to-core wiring, module dependencies, coordinate conversion, or explicit TODO gap handling.
+name: terminal-integration-adapter
+description: Use for HostCommandAdapter and parser-to-core mapping changes, including coordinate conversion, host metadata routing, or an explicitly unwired integration edge. Do not invoke for parser recognition or core implementation alone.
 ---
 
 # Terminal Integration Adapter
 
-Use this skill when changing `ketraterm-host` or parser-to-core wiring.
+Read the root and `ketraterm-host/AGENTS.md` first.
 
-## Boundary
+## Mapping rules
 
-Integration maps semantic sink calls to core APIs. It must stay thin.
+- Map semantic sink calls to public core APIs without parsing protocol syntax.
+- Convert coordinate conventions explicitly at the boundary.
+- Preserve the full semantic value when the destination supports it; otherwise
+  leave an ownership-marked gap instead of clamping or fabricating behavior.
+- Keep host metadata and policy decisions explicit and outside core storage
+  unless the core contract assigns ownership there.
+- Do not inspect core internals or duplicate parser dispatch logic.
+- Determine current support from implementation plus the canonical feature/gap
+  maps; never maintain a watch-list of supposedly missing attributes here.
 
-It must not:
+## Verification
 
-- parse bytes or escape sequences.
-- duplicate CSI/OSC/SGR command logic.
-- inspect or mutate core internals.
-- silently clamp richer parser data into weaker core models.
-- fake unsupported behavior.
-
-## Mapping Rules
-
-- Convert coordinate conventions explicitly and document the direction.
-- Map only behavior that both parser and core can represent correctly.
-- Keep host metadata temporary and obvious when core does not own it yet.
-- Add explicit TODOs for missing parser/core/policy support.
-
-## Watch Points
-
-- parser zero-based coordinates versus DEC one-based APIs.
-- DECSTBM inclusive margins.
-- 256-color and RGB SGR until core stores them.
-- inverse/faint/blink/conceal/strikethrough until core stores them.
-- alternate-screen variants 47, 1047, 1048, 1049.
-- DECSTR soft reset versus RIS full reset.
-- title, hyperlink, bell, palette, clipboard, and notification host policy.
-
-## Testing
-
-Prefer parser-to-core tests using real byte streams, `TerminalOutputParser`,
-`HostCommandAdapter`, and public `TerminalBuffer` assertions.
-
-Adapter-only tests may assert honest documented no-op behavior for unsupported
-features, but never assert degraded behavior as if it were terminal-correct.
+Prefer real byte streams through the parser and `HostCommandAdapter`, asserting
+public `TerminalBuffer` state or host events. Adapter-only tests may cover a
+documented no-op, but must not bless degraded semantics.

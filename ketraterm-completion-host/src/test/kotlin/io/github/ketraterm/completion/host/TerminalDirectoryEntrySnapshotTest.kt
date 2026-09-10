@@ -21,7 +21,7 @@ import kotlin.test.assertEquals
 
 class TerminalDirectoryEntrySnapshotTest {
     @Test
-    fun `orders once and returns bounded case-insensitive prefix matches`() {
+    fun `orders once and returns all case-insensitive prefix matches`() {
         val snapshot =
             TerminalDirectoryEntrySnapshot(
                 listOf(
@@ -32,7 +32,6 @@ class TerminalDirectoryEntrySnapshotTest {
             )
 
         assertEquals(3, snapshot.size)
-        assertEquals(listOf("alphaOne"), snapshot.matching("ALPHA", limit = 1).map { it.name })
-        assertEquals(listOf("alphaOne", "AlphaTwo"), snapshot.matching("alpha", limit = 2).map { it.name })
+        assertEquals(listOf("alphaOne", "AlphaTwo"), snapshot.matching("ALPHA").map { it.name })
     }
 }

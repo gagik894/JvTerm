@@ -25,10 +25,8 @@ import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import io.github.ketraterm.workspace.config.TerminalConfig
 import java.awt.Font
 import java.util.*
+import java.util.concurrent.CancellationException
 import java.util.concurrent.CopyOnWriteArrayList
-
-private val TerminalTheme.id: String
-    get() = name.lowercase(Locale.ROOT).replace('_', '-')
 
 /**
  * Application-level IntelliJ settings service for IDE-hosted KetraTerm terminals.
@@ -45,6 +43,7 @@ private val TerminalTheme.id: String
     category = SettingsCategory.TOOLS,
 )
 class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTermIntellijSettings.State>(State()) {
+    private val stateLock = Any()
     private val changeListeners = CopyOnWriteArrayList<() -> Unit>()
 
     /**
@@ -59,7 +58,7 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
      *
      * @return `true` when middle mouse button paste is enabled.
      */
-    fun pasteOnMiddleClick(): Boolean = KetraTermIntellijSettingsNormalizer.normalize(state).pasteOnMiddleClick
+    fun pasteOnMiddleClick(): Boolean = state.pasteOnMiddleClick
 
     /**
      * Returns whether terminal panes should override IDE shortcuts.
@@ -70,33 +69,59 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
      *
      * @return `true` when terminal panes may override IDE shortcuts.
      */
-    fun overrideIdeShortcuts(): Boolean = KetraTermIntellijSettingsNormalizer.normalize(state).overrideIdeShortcuts
+    fun overrideIdeShortcuts(): Boolean = state.overrideIdeShortcuts
 
     /**
      * Returns whether learned completion statistics may be stored on disk.
      *
-     * Disabling persistence does not disable session-local MRU or in-memory
-     * ranking. It only prevents the IntelliJ host from reading or writing the
+     * Disabling persistence does not disable product-lifetime in-memory
+     * learning. It only prevents the IntelliJ host from reading or writing the
      * learned completion snapshot.
      *
      * @return `true` when completion learning may cross IDE restarts.
      */
-    fun completionLearningPersistenceEnabled(): Boolean =
-        KetraTermIntellijSettingsNormalizer.normalize(state).completionLearningPersistenceEnabled
+    fun completionLearningPersistenceEnabled(): Boolean {
+        val snapshot = state
+        return snapshot.smartSuggestionsEnabled && snapshot.completionLearningPersistenceEnabled
+    }
 
     /**
      * Replaces persisted IDE terminal settings with a normalized state.
      *
      * @param nextState new settings state produced by the IntelliJ settings UI.
      */
-    fun replaceState(nextState: State) {
+    fun replaceState(nextState: State) = publishState(nextState) { normalized -> updateState { normalized } }
+
+    /** Loads platform state through the same normalization and notification boundary as UI changes. */
+    override fun loadState(state: State) = publishState(state) { normalized -> super.loadState(normalized) }
+
+    private fun publishState(
+        nextState: State,
+        publish: (State) -> Unit,
+    ) {
         val normalized = KetraTermIntellijSettingsNormalizer.normalize(nextState)
-        val oldState = state
-        if (normalized == oldState) return
-        updateState { normalized }
-        for (listener in changeListeners) {
-            listener()
+        synchronized(stateLock) {
+            if (normalized == state) return
+            publish(normalized)
         }
+        // Publication has committed: every consumer must see it even when another listener fails.
+        var failure: Exception? = null
+        for (listener in changeListeners) {
+            try {
+                listener()
+            } catch (error: Exception) {
+                val previous = failure
+                if (previous == null) {
+                    failure = error
+                } else if (error is CancellationException) {
+                    error.addSuppressed(previous)
+                    failure = error
+                } else {
+                    previous.addSuppressed(error)
+                }
+            }
+        }
+        failure?.let { throw it }
     }
 
     fun createHostPolicy(command: List<String>): HostPolicy {
@@ -105,13 +130,13 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
         val clipboardOrigin = if (isRemote) TerminalClipboardOrigin.REMOTE else TerminalClipboardOrigin.LOCAL
         val titleOrigin = if (isRemote) TerminalTitleOrigin.REMOTE else TerminalTitleOrigin.LOCAL
 
-        val localWrite = parseClipboardPermission(s.clipboardLocalWrite, TerminalConfig.DEFAULT_CLIPBOARD_LOCAL_WRITE)
-        val remoteWrite = parseClipboardPermission(s.clipboardRemoteWrite, TerminalConfig.DEFAULT_CLIPBOARD_REMOTE_WRITE)
-        val read = parseClipboardPermission(s.clipboardRead, TerminalConfig.DEFAULT_CLIPBOARD_READ)
-        val maxBytes = s.clipboardMaxDecodedBytes.coerceAtLeast(0)
+        val localWrite = TerminalClipboardPermission.valueOf(s.clipboardLocalWrite.uppercase(Locale.ROOT))
+        val remoteWrite = TerminalClipboardPermission.valueOf(s.clipboardRemoteWrite.uppercase(Locale.ROOT))
+        val read = TerminalClipboardPermission.valueOf(s.clipboardRead.uppercase(Locale.ROOT))
+        val maxBytes = s.clipboardMaxDecodedBytes
 
-        val localTitle = parseTitlePermission(s.titleLocalPermission, TerminalConfig.DEFAULT_TITLE_LOCAL_PERMISSION)
-        val remoteTitle = parseTitlePermission(s.titleRemotePermission, TerminalConfig.DEFAULT_TITLE_REMOTE_PERMISSION)
+        val localTitle = TerminalTitlePermission.valueOf(s.titleLocalPermission.uppercase(Locale.ROOT))
+        val remoteTitle = TerminalTitlePermission.valueOf(s.titleRemotePermission.uppercase(Locale.ROOT))
 
         return HostPolicy(
             titlePolicy =
@@ -143,32 +168,11 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
         return executable == "ssh" || executable == "ssh.exe"
     }
 
-    private fun parseClipboardPermission(
-        value: String,
-        default: TerminalClipboardPermission,
-    ): TerminalClipboardPermission =
-        when (value.trim().lowercase(Locale.ROOT)) {
-            "allow" -> TerminalClipboardPermission.ALLOW
-            "prompt" -> TerminalClipboardPermission.PROMPT
-            "allowlist" -> TerminalClipboardPermission.ALLOWLIST
-            "deny" -> TerminalClipboardPermission.DENY
-            else -> default
-        }
-
-    private fun parseTitlePermission(
-        value: String,
-        default: TerminalTitlePermission,
-    ): TerminalTitlePermission =
-        when (value.trim().lowercase(Locale.ROOT)) {
-            "allow" -> TerminalTitlePermission.ALLOW
-            "deny" -> TerminalTitlePermission.DENY
-            else -> default
-        }
-
     /**
      * Registers a listener notified after settings are changed through this service.
      *
-     * @param listener callback invoked on the caller thread that applied settings.
+     * @param listener callback invoked on the caller thread after a changed snapshot is committed.
+     * Every listener is notified before any listener failure is rethrown to the caller.
      */
     fun addChangeListener(listener: () -> Unit) {
         changeListeners += listener
@@ -206,9 +210,9 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
      * @property startDirectory initial working directory; blank means project root.
      * @property environmentVariables newline-separated `NAME=VALUE` environment entries.
      * @property defaultTabName user-visible name for newly opened tabs.
+     * @property smartSuggestionsEnabled master switch for completion resources and requests.
      * @property shellSuggestionsEnabled whether host-provided shell suggestions
-     * may appear automatically. Explicit user requests remain available when
-     * disabled.
+     * may appear automatically. Explicit requests require only [smartSuggestionsEnabled].
      * @property acceptSelectedSuggestionWithEnter whether Enter accepts an
      * already-selected terminal suggestion and otherwise reaches the shell.
      * @property completionLearningPersistenceEnabled whether sanitized learned
@@ -234,6 +238,7 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
         @JvmField val startDirectory: String = "",
         @JvmField val environmentVariables: String = "",
         @JvmField val defaultTabName: String = "Local",
+        @JvmField val smartSuggestionsEnabled: Boolean = TerminalConfig.DEFAULT_SMART_SUGGESTIONS_ENABLED,
         @JvmField val shellSuggestionsEnabled: Boolean = TerminalConfig.DEFAULT_SHELL_SUGGESTIONS_ENABLED,
         @JvmField val acceptSelectedSuggestionWithEnter: Boolean = TerminalConfig.DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER,
         @JvmField val completionLearningPersistenceEnabled: Boolean = false,
@@ -280,16 +285,13 @@ class KetraTermIntellijSettings : SerializablePersistentStateComponent<KetraTerm
         internal fun normalizeThemeId(themeId: String): String {
             val normalized = themeId.trim().lowercase(Locale.ROOT)
             if (normalized == DEFAULT_THEME_ID) return DEFAULT_THEME_ID
-            return TerminalTheme.entries
-                .firstOrNull { it.id == normalized }
-                ?.id
-                ?: DEFAULT_THEME_ID
+            return TerminalTheme.fromId(normalized)?.id ?: DEFAULT_THEME_ID
         }
     }
 }
 
 /**
- * Normalizes persisted IntelliJ settings before they are saved or mapped.
+ * Normalizes settings at the platform-load and UI-publication boundary.
  */
 internal object KetraTermIntellijSettingsNormalizer {
     /**
@@ -426,55 +428,56 @@ internal object KetraTermIntellijSettingsMapper {
     /**
      * Creates a Swing settings snapshot from [state].
      *
-     * @param state persisted IntelliJ settings state.
+     * @param state normalized IntelliJ settings state.
      * @return immutable Swing terminal settings.
      */
     fun toSwingSettings(state: KetraTermIntellijSettings.State): SwingSettings {
-        val normalized = KetraTermIntellijSettingsNormalizer.normalize(state)
-        val fontSize = normalized.fontSize
-        val fontFamily = SwingSettings.resolveFontFamily(normalized.fontFamily)
-        val fallbackFontFamily = SwingSettings.resolveFontFamily(normalized.fallbackFontFamily)
+        val fontSize = state.fontSize
+        val fontFamily = SwingSettings.resolveFontFamily(state.fontFamily)
+        val fallbackFontFamily = SwingSettings.resolveFontFamily(state.fallbackFontFamily)
 
-        val palette = paletteForThemeId(normalized.themeId)
+        val palette = paletteForThemeId(state.themeId)
 
         return SwingSettings(
             font = JBFont.create(Font(fontFamily, Font.PLAIN, fontSize)),
             fallbackFonts = listOf(Font(fallbackFontFamily, Font.PLAIN, fontSize)),
-            columns = normalized.columns,
-            rows = normalized.rows,
+            columns = state.columns,
+            rows = state.rows,
             palette = palette,
             selectionBackground = palette.selectionBackground,
-            treatAmbiguousAsWide = normalized.treatAmbiguousAsWide,
-            cursorBlinkMillis = normalized.cursorBlinkMillis,
-            useSystemFallbackFonts = normalized.useSystemFallbackFonts,
-            visualBellEnabled = normalized.visualBell,
-            pasteSanitizationPolicy = parsePasteSanitization(normalized.pasteSanitization),
-            cursorShape = parseCursorShape(normalized.cursorShape),
-            scrollbackLines = normalized.scrollbackLines,
-            lineHeight = normalized.lineHeight,
+            treatAmbiguousAsWide = state.treatAmbiguousAsWide,
+            cursorBlinkMillis = state.cursorBlinkMillis,
+            useSystemFallbackFonts = state.useSystemFallbackFonts,
+            visualBellEnabled = state.visualBell,
+            pasteSanitizationPolicy = parsePasteSanitization(state.pasteSanitization),
+            cursorShape = parseCursorShape(state.cursorShape),
+            scrollbackLines = state.scrollbackLines,
+            lineHeight = state.lineHeight,
             shellRequestResizeWindow = false,
             shellRequestWindowManipulation = false,
-            shellSuggestionsEnabled = normalized.shellSuggestionsEnabled,
-            acceptSelectedSuggestionWithEnter = normalized.acceptSelectedSuggestionWithEnter,
-            scrollOnOutput = normalized.scrollOnOutput,
+            smartSuggestionsEnabled = state.smartSuggestionsEnabled,
+            shellSuggestionsEnabled = state.shellSuggestionsEnabled,
+            acceptSelectedSuggestionWithEnter = state.acceptSelectedSuggestionWithEnter,
+            scrollOnOutput = state.scrollOnOutput,
         )
     }
 
     private fun paletteForThemeId(themeId: String) =
-        when (val normalized = KetraTermIntellijSettings.normalizeThemeId(themeId)) {
-            KetraTermIntellijSettings.DEFAULT_THEME_ID -> KetraTermIntellijThemePalette.currentIntellijPalette()
-            else -> TerminalTheme.entries.first { it.id == normalized }.createPalette()
+        if (themeId == KetraTermIntellijSettings.DEFAULT_THEME_ID) {
+            KetraTermIntellijThemePalette.currentIntellijPalette()
+        } else {
+            requireNotNull(TerminalTheme.fromId(themeId)).createPalette()
         }
 
     private fun parseCursorShape(shape: String): TerminalRenderCursorShape =
-        when (shape.lowercase(Locale.ROOT)) {
-            "beam", "bar" -> TerminalRenderCursorShape.BAR
+        when (shape) {
+            "beam" -> TerminalRenderCursorShape.BAR
             "underline" -> TerminalRenderCursorShape.UNDERLINE
             else -> TerminalRenderCursorShape.BLOCK
         }
 
     private fun parsePasteSanitization(value: String): PasteSanitizationPolicy =
-        when (value.trim().lowercase(Locale.ROOT)) {
+        when (value) {
             "strip-c0" -> PasteSanitizationPolicy.STRIP_C0_EXCEPT_TAB_CR_LF
             "normalize-line-endings" -> PasteSanitizationPolicy.NORMALIZE_LINE_ENDINGS
             else -> PasteSanitizationPolicy.RAW

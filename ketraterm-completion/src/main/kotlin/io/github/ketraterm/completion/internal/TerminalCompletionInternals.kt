@@ -17,48 +17,60 @@ package io.github.ketraterm.completion.internal
 
 import io.github.ketraterm.completion.api.TerminalCompletionCandidate
 import io.github.ketraterm.completion.api.TerminalCompletionRequest
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandShapeStats
-import io.github.ketraterm.completion.model.TerminalCompletionFeedbackStats
 
 internal val TERMINAL_COMPLETION_CANDIDATE_ORDER: Comparator<TerminalCompletionCandidate> =
     compareByDescending<TerminalCompletionCandidate> { it.score }
         .thenBy { it.displayText }
         .thenBy { it.replacementText }
 
-internal val TERMINAL_COMMAND_COMPLETION_STATS_ORDER: Comparator<TerminalCommandCompletionStats> =
-    compareByDescending<TerminalCommandCompletionStats> { it.lastUsedEpochMillis }
-        .thenByDescending { it.acceptedCount }
-        .thenByDescending { it.successCount }
-        .thenBy { it.dismissedCount }
-        .thenBy { it.commandLine }
-        .thenBy { it.profileId.orEmpty() }
-        .thenBy { it.workingDirectoryUri.orEmpty() }
-
-internal val TERMINAL_COMMAND_SHAPE_STATS_ORDER: Comparator<TerminalCommandShapeStats> =
-    compareByDescending<TerminalCommandShapeStats> { it.lastUsedEpochMillis }
-        .thenByDescending { it.acceptedCount }
-        .thenByDescending { it.successCount }
-        .thenBy { it.dismissedCount }
-        .thenBy { it.shape.normalizedShapeKey }
-        .thenBy { it.profileId.orEmpty() }
-        .thenBy { it.workingDirectoryUri.orEmpty() }
-
-internal val TERMINAL_COMPLETION_FEEDBACK_STATS_ORDER: Comparator<TerminalCompletionFeedbackStats> =
-    compareByDescending<TerminalCompletionFeedbackStats> { it.lastUsedEpochMillis }
-        .thenByDescending { it.acceptedCount }
-        .thenBy { it.dismissedCount }
-        .thenBy { it.source }
-        .thenBy { it.candidateKind.name }
-        .thenBy { it.profileId.orEmpty() }
-        .thenBy { it.workingDirectoryUri.orEmpty() }
-
 internal fun isRecordableTerminalCompletionCommand(commandLine: String): Boolean =
-    commandLine.isNotBlank() && !commandLine.hasTerminalCompletionLineBreak()
-
-internal fun normalizeTerminalCommandLine(commandLine: String): String = commandLine.trim().lowercase()
+    commandLine.isNotBlank() &&
+        !commandLine.hasTerminalCompletionLineBreak() &&
+        commandLine.hasWellFormedTerminalCompletionUtf16()
 
 internal fun String.hasTerminalCompletionLineBreak(): Boolean = indexOf('\n') >= 0 || indexOf('\r') >= 0
+
+private fun String.hasWellFormedTerminalCompletionUtf16(): Boolean {
+    var index = 0
+    while (index < length) {
+        val character = this[index]
+        when {
+            Character.isHighSurrogate(character) -> {
+                if (index + 1 >= length || !Character.isLowSurrogate(this[index + 1])) return false
+                index++
+            }
+            Character.isLowSurrogate(character) -> return false
+        }
+        index++
+    }
+    return true
+}
+
+/** Returns whether command text is structurally safe and bounded for retained plaintext replay. */
+internal fun isStructurallyValidTerminalCompletionReplay(commandLine: String): Boolean {
+    if (!isRecordableTerminalCompletionCommand(commandLine)) return false
+    if (commandLine.length > MAX_REPLAY_UTF16_CHARS) return false
+
+    var utf8Bytes = 0
+    var index = 0
+    while (index < commandLine.length) {
+        val character = commandLine[index]
+        if (Character.isISOControl(character) && character != '\t') return false
+        utf8Bytes +=
+            when {
+                character.code <= 0x7F -> 1
+                character.code <= 0x7FF -> 2
+                Character.isHighSurrogate(character) -> {
+                    index++
+                    4
+                }
+                else -> 3
+            }
+        if (utf8Bytes > MAX_REPLAY_UTF8_BYTES) return false
+        index++
+    }
+    return true
+}
 
 /**
  * Returns whether [offset] is a valid UTF-16 scalar boundary in this string.
@@ -96,64 +108,10 @@ internal fun TerminalCompletionCandidate.hasValidReplacementRangeFor(request: Te
 
 internal fun saturatedCompletionCounterIncrement(value: Int): Int = if (value == Int.MAX_VALUE) value else value + 1
 
-internal fun isRelativeCdCommand(commandLine: String): Boolean {
-    val tokens =
-        try {
-            io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
-                .parse(commandLine, commandLine.length)
-                .tokens
-        } catch (_: Exception) {
-            return false
-        }
-    if (tokens.isEmpty()) return false
-    val first = tokens[0].text.lowercase()
-    if (first != "cd" && first != "chdir" && first != "pushd" && first != "set-location" && first != "sl") {
-        return false
-    }
-    if (tokens.size < 2) return false
-    val arg = tokens[1].text
-    if (arg.isEmpty()) return false
-    if (arg.startsWith("/") || arg.startsWith("\\") || arg.startsWith("~")) {
-        return false
-    }
-    if (arg.length >= 2 && arg[0].isLetter() && arg[1] == ':') {
-        return false
-    }
-    if (isPureTraversalPath(arg)) {
-        return false
-    }
-    return true
-}
-
-private fun isPureTraversalPath(path: String): Boolean {
-    for (i in path.indices) {
-        val ch = path[i]
-        if (ch != '.' && ch != '/' && ch != '\\') {
-            return false
-        }
-    }
-    return true
-}
-
 internal fun canonicalizeWorkingDirectoryUri(uri: String): String {
     val trimmed = uri.trim()
     return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
 }
 
-internal fun isCommandValidForDirectory(
-    commandLine: String,
-    sourceWorkingDir: String?,
-    targetWorkingDir: String?,
-): Boolean {
-    if (!isRelativeCdCommand(commandLine)) return true
-    val source = sourceWorkingDir ?: return true
-    val target = targetWorkingDir ?: return true
-    return canonicalizeWorkingDirectoryUri(source) == canonicalizeWorkingDirectoryUri(target)
-}
-
-internal fun matchesCompletablePrefix(
-    value: String,
-    prefix: String,
-): Boolean =
-    prefix.isEmpty() ||
-        (value.startsWith(prefix, ignoreCase = true) && !value.equals(prefix, ignoreCase = true))
+private const val MAX_REPLAY_UTF16_CHARS = 4_096
+private const val MAX_REPLAY_UTF8_BYTES = 8_192

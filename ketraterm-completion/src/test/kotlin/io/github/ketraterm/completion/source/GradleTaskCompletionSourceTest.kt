@@ -26,7 +26,7 @@ class GradleTaskCompletionSourceTest {
     private val source =
         TerminalCompletionSources.gradleTask(
             sourceId = "gradle-task",
-            tasksProvider = { _ ->
+            tasksProvider = { _, _ ->
                 listOf(
                     TerminalGradleTask(":test", "run root tests", projectDirectory = "."),
                     TerminalGradleTask(":app:run", "run app", projectDirectory = "app"),
@@ -109,18 +109,45 @@ class GradleTaskCompletionSourceTest {
     fun `passes the immutable request to the task provider`() =
         runBlocking {
             var requestedDirectory: String? = null
+            var requestedPrefix: String? = null
             val requestAwareSource =
                 TerminalCompletionSources.gradleTask(
                     sourceId = "request-aware-gradle-task",
-                    tasksProvider = { request ->
+                    tasksProvider = { request, context ->
                         requestedDirectory = request.workingDirectoryUri
-                        listOf(TerminalGradleTask(":test", projectDirectory = "."))
+                        requestedPrefix = context.activePrefix
+                        buildList {
+                            repeat(300) { index -> add(TerminalGradleTask(":otherTask$index", projectDirectory = ".")) }
+                            add(TerminalGradleTask(":needleTask", projectDirectory = "."))
+                        }
                     },
                 )
 
-            requestAwareSource.complete(request("gradle te"))
+            val candidates = requestAwareSource.complete(request("gradle needle"))
 
             assertEquals("file:///project", requestedDirectory)
+            assertEquals("needle", requestedPrefix)
+            assertEquals(listOf("needleTask"), candidates.map { it.replacementText })
+        }
+
+    @Test
+    fun `retains a higher-ranked late task within the final candidate bound`() =
+        runBlocking {
+            val boundedSource =
+                TerminalCompletionSources.gradleTask(
+                    sourceId = "bounded-gradle-task",
+                    tasksProvider = { _, _ ->
+                        buildList {
+                            repeat(300) { index -> add(TerminalGradleTask(":task-run-$index", projectDirectory = ".")) }
+                            add(TerminalGradleTask(":tr-target", projectDirectory = "."))
+                        }
+                    },
+                )
+
+            val candidates = boundedSource.complete(request("gradle tr"))
+
+            assertEquals(256, candidates.size)
+            assertTrue(candidates.any { it.replacementText == "tr-target" })
         }
 
     private fun request(commandLine: String): TerminalCompletionRequest =

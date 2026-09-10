@@ -43,6 +43,7 @@ dependencies {
 
 application {
     mainClass.set("io.github.ketraterm.app.KetraTermAppKt")
+    applicationDefaultJvmArgs = listOf("--enable-native-access=ALL-UNNAMED")
 }
 
 tasks.test {

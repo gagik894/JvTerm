@@ -16,90 +16,76 @@
 package io.github.ketraterm.completion.internal
 
 import io.github.ketraterm.completion.api.TerminalShellSyntax
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
-import io.github.ketraterm.completion.model.TerminalCommandSpec
+import io.github.ketraterm.completion.commandline.TerminalCommandLineContext
+import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
+import io.github.ketraterm.completion.model.TerminalCommandReplay
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
+import io.github.ketraterm.completion.model.TerminalCompletionRankingStats
 import io.github.ketraterm.completion.ranking.LearnedCompletionEvidenceIndex
-import io.github.ketraterm.completion.ranking.TerminalCompletionOutcomeKeyResolver
 import io.github.ketraterm.completion.source.LearnedHistoryCandidateIndex
+import io.github.ketraterm.completion.source.LearnedObservedTokenIndex
 
 /** Compiles and shares derived learning indexes for one current snapshot. */
 internal class CompletionLearningIndexCache {
     private val lock = Any()
-
-    @Volatile
-    private var current: SnapshotCompilation? = null
+    private var cachedSnapshot: TerminalCompletionLearningSnapshot? = null
+    private val indexesBySyntax = arrayOfNulls<CompletionLearningIndexes>(TerminalShellSyntax.entries.size)
 
     fun indexesFor(
-        snapshot: TerminalCommandCompletionStatsSnapshot,
+        snapshot: TerminalCompletionLearningSnapshot,
         shellSyntax: TerminalShellSyntax,
-        commandSpecs: List<TerminalCommandSpec>,
-    ): CompletionLearningIndexes {
-        val compilation = current?.takeIf { it.snapshot === snapshot } ?: compilationFor(snapshot)
-        return compilation.indexesFor(shellSyntax, commandSpecs)
-    }
-
-    private fun compilationFor(snapshot: TerminalCommandCompletionStatsSnapshot): SnapshotCompilation =
+    ): CompletionLearningIndexes =
         synchronized(lock) {
-            current?.takeIf { it.snapshot === snapshot }
-                ?: SnapshotCompilation(snapshot).also { current = it }
+            if (cachedSnapshot !== snapshot) {
+                cachedSnapshot = snapshot
+                indexesBySyntax.fill(null)
+            }
+            val syntaxIndex = shellSyntax.ordinal
+            indexesBySyntax[syntaxIndex]
+                ?: buildIndexes(snapshot, shellSyntax).also { indexesBySyntax[syntaxIndex] = it }
         }
 
-    private class SnapshotCompilation(
-        val snapshot: TerminalCommandCompletionStatsSnapshot,
-    ) {
-        private val lock = Any()
-
-        @Volatile
-        private var entries: Array<CompilationEntry> = emptyArray()
-
-        fun indexesFor(
-            shellSyntax: TerminalShellSyntax,
-            commandSpecs: List<TerminalCommandSpec>,
-        ): CompletionLearningIndexes {
-            val currentEntries = entries
-            for (i in currentEntries.indices) {
-                val entry = currentEntries[i]
-                if (entry.shellSyntax == shellSyntax && (entry.commandSpecs === commandSpecs || entry.commandSpecs == commandSpecs)) {
-                    return entry.indexes
-                }
-            }
-            return synchronized(lock) {
-                for (entry in entries) {
-                    if (entry.shellSyntax == shellSyntax && (entry.commandSpecs === commandSpecs || entry.commandSpecs == commandSpecs)) {
-                        return@synchronized entry.indexes
-                    }
-                }
-                val built = buildIndexes(shellSyntax, commandSpecs)
-                val newEntry = CompilationEntry(shellSyntax, commandSpecs, built)
-                entries = entries + newEntry
-                built
-            }
+    private fun buildIndexes(
+        snapshot: TerminalCompletionLearningSnapshot,
+        shellSyntax: TerminalShellSyntax,
+    ): CompletionLearningIndexes {
+        val rankingByKey = HashMap<LearningRowKey, TerminalCompletionRankingStats>(snapshot.rankingStats.size)
+        for (stats in snapshot.rankingStats) rankingByKey[stats.rowKey()] = stats
+        val parsedRows = ArrayList<ParsedLearnedStatsRow>(snapshot.replayCommands.size)
+        for (replay in snapshot.replayCommands) {
+            val stats = rankingByKey[replay.rowKey()] ?: continue
+            val line = TerminalCommandLineTokenizer.parse(replay.commandLine, replay.commandLine.length, shellSyntax)
+            parsedRows += ParsedLearnedStatsRow(stats, replay, line)
         }
-
-        private fun buildIndexes(
-            shellSyntax: TerminalShellSyntax,
-            commandSpecs: List<TerminalCommandSpec>,
-        ): CompletionLearningIndexes =
-            CompletionLearningIndexes(
-                evidence =
-                    LearnedCompletionEvidenceIndex.build(
-                        snapshot = snapshot,
-                        shellSyntax = shellSyntax,
-                        outcomeResolver = TerminalCompletionOutcomeKeyResolver(commandSpecs),
-                    ),
-                history = LearnedHistoryCandidateIndex.build(snapshot, shellSyntax),
-            )
+        return CompletionLearningIndexes(
+            evidence = LearnedCompletionEvidenceIndex.build(snapshot.rankingStats),
+            history = LearnedHistoryCandidateIndex.build(parsedRows),
+            observed = LearnedObservedTokenIndex.build(parsedRows),
+        )
     }
-
-    private class CompilationEntry(
-        val shellSyntax: TerminalShellSyntax,
-        val commandSpecs: List<TerminalCommandSpec>,
-        val indexes: CompletionLearningIndexes,
-    )
 }
 
-/** All derived learning data for one shell syntax and command-spec vocabulary. */
-internal data class CompletionLearningIndexes(
+/** All derived learning data for one shell syntax. */
+internal class CompletionLearningIndexes(
     val evidence: LearnedCompletionEvidenceIndex,
     val history: LearnedHistoryCandidateIndex,
+    val observed: LearnedObservedTokenIndex,
 )
+
+/** One learned row tokenized for every derived index. */
+internal class ParsedLearnedStatsRow(
+    val stats: TerminalCompletionRankingStats,
+    val replay: TerminalCommandReplay,
+    val lineContext: TerminalCommandLineContext,
+)
+
+private data class LearningRowKey(
+    val identityDigest: String,
+    val context: CompletionLearningContextKey,
+)
+
+private fun TerminalCompletionRankingStats.rowKey(): LearningRowKey =
+    LearningRowKey(identityDigest, CompletionLearningContextKey.of(profileId, workingDirectoryUri))
+
+private fun TerminalCommandReplay.rowKey(): LearningRowKey =
+    LearningRowKey(identityDigest, CompletionLearningContextKey.of(profileId, workingDirectoryUri))

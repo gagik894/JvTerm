@@ -13,7 +13,7 @@ PTY owns:
 - writing host-bound byte ranges to PTY stdin.
 - resizing the PTY process.
 - reporting BEL and title metadata through `PtyEventListener` when the
-  convenience session factory wires host host events.
+  convenience session factory wires host events.
 
 PTY must not:
 

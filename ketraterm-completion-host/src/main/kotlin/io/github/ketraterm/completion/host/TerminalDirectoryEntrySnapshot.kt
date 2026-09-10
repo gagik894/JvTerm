@@ -30,24 +30,13 @@ class TerminalDirectoryEntrySnapshot(
     /** Number of raw direct entries retained by this snapshot. */
     val size: Int get() = entries.size
 
-    /**
-     * Returns the first [limit] case-insensitive prefix matches.
-     *
-     * @param prefix direct-child name prefix.
-     * @param limit positive maximum result count.
-     * @return deterministic matching entries.
-     */
-    fun matching(
-        prefix: String,
-        limit: Int,
-    ): List<TerminalFileEntry> {
-        require(limit > 0) { "limit must be > 0, was $limit" }
+    /** Returns all case-insensitive prefix matches retained by this bounded snapshot. */
+    fun matching(prefix: String): List<TerminalFileEntry> {
         if (entries.isEmpty()) return emptyList()
-        val matches = ArrayList<TerminalFileEntry>(minOf(entries.size, limit))
+        val matches = ArrayList<TerminalFileEntry>(entries.size)
         for (entry in entries) {
             if (!entry.name.startsWith(prefix, ignoreCase = true)) continue
             matches += entry
-            if (matches.size == limit) break
         }
         return matches
     }

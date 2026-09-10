@@ -16,6 +16,8 @@ The plugin adapts reusable KetraTerm modules to IntelliJ IDE services:
 - terminal rendering and input through `ketraterm-ui-swing`.
 - completion parsing and ranking through `ketraterm-completion`.
 - bounded completion snapshots through `ketraterm-completion-host`.
+- source-count-aware project-file, Git, and Gradle loaders that stop after the
+  shared engine's requested number of usable rows.
 - sanitized completion statistics through `ketraterm-completion-persistence`.
 - completion/Swing adaptation through `ketraterm-ui-swing-host`.
 - workspace and session state through `ketraterm-workspace` and

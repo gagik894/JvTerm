@@ -89,8 +89,9 @@ import java.util.*
  * @property lineHeight vertical line height scaling factor.
  * @property shellRequestResizeWindow whether the terminal panel requests window resizing.
  * @property shellRequestWindowManipulation whether the terminal panel allows shell window manipulation.
+ * @property smartSuggestionsEnabled master switch for all shell suggestion requests and presentation.
  * @property shellSuggestionsEnabled whether hosts may request shell suggestion
- * popups automatically. Explicit user requests remain available when disabled.
+ * popups automatically. Explicit requests require only [smartSuggestionsEnabled].
  * @property acceptSelectedSuggestionWithEnter whether an unmodified Enter key
  * accepts an already-selected shell suggestion. Enter remains terminal input
  * when the popup has no selection.
@@ -132,6 +133,7 @@ data class SwingSettings
         val lineHeight: Float = 1.0f,
         val shellRequestResizeWindow: Boolean = false,
         val shellRequestWindowManipulation: Boolean = false,
+        val smartSuggestionsEnabled: Boolean = false,
         val shellSuggestionsEnabled: Boolean = true,
         val acceptSelectedSuggestionWithEnter: Boolean = true,
         val scrollOnOutput: Boolean = true,
@@ -390,6 +392,14 @@ enum class TerminalTheme {
     TOKYO_NIGHT,
     EVERFOREST,
     ;
+
+    /** Stable identifier used by host configuration files. */
+    val id: String get() = name.lowercase(Locale.ROOT).replace('_', '-')
+
+    companion object {
+        /** Resolves a persisted identifier or a legacy enum name, ignoring case. */
+        fun fromId(id: String): TerminalTheme? = entries.firstOrNull { it.id.equals(id.replace('_', '-'), ignoreCase = true) }
+    }
 
     /**
      * Creates the [TerminalColorPalette] for this theme.

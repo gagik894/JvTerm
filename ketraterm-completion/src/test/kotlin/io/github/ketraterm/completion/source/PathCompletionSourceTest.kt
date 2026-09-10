@@ -18,6 +18,7 @@ package io.github.ketraterm.completion.source
 import io.github.ketraterm.completion.api.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.runBlocking
+import java.io.IOException
 import kotlin.test.*
 
 class PathCompletionSourceTest {
@@ -65,6 +66,26 @@ class PathCompletionSourceTest {
             assertEquals("README.md", candidate.displayText)
             assertEquals(TerminalCompletionCandidateKind.PATH, candidate.kind)
             assertEquals("file", candidate.detail)
+            assertEquals(1, candidate.matchedRanges.rangeCount)
+            assertEquals(0, candidate.matchedRanges.startOffset(0))
+            assertEquals(1, candidate.matchedRanges.endOffset(0))
+        }
+
+    @Test
+    fun `completes path with camel hump and word boundary match ranges`() =
+        runBlocking {
+            val request = request("cd IP", "file:///project")
+            val candidates = source.complete(request)
+
+            assertEquals(1, candidates.size)
+            val candidate = candidates.first()
+            assertEquals("Idea\\ Projects/", candidate.replacementText)
+            assertEquals("Idea Projects/", candidate.displayText)
+            assertEquals(2, candidate.matchedRanges.rangeCount)
+            assertEquals(0, candidate.matchedRanges.startOffset(0))
+            assertEquals(1, candidate.matchedRanges.endOffset(0))
+            assertEquals(5, candidate.matchedRanges.startOffset(1))
+            assertEquals(6, candidate.matchedRanges.endOffset(1))
         }
 
     @Test
@@ -76,6 +97,23 @@ class PathCompletionSourceTest {
             assertEquals(listOf("src/", "Idea\\ Projects/", "O\\'Brien/"), candidates.map { it.replacementText })
             assertEquals(listOf("src/", "Idea Projects/", "O'Brien/"), candidates.map { it.displayText })
             assertTrue(candidates.all { it.detail == "directory" })
+        }
+
+    @Test
+    fun `directory eligibility is applied before the final candidate limit`() =
+        runBlocking {
+            val entries =
+                buildList {
+                    repeat(300) { index ->
+                        add(TerminalFileEntry("a-file-${index.toString().padStart(3, '0')}", isDirectory = false))
+                    }
+                    add(TerminalFileEntry("a-target-directory", isDirectory = true))
+                }
+            val source = PathCompletionSource(TerminalFileSystemProvider { entries })
+
+            val candidates = source.complete(request("cd a", "file:///project"))
+
+            assertEquals(listOf("a-target-directory/"), candidates.map { it.replacementText })
         }
 
     @Test
@@ -412,6 +450,20 @@ class PathCompletionSourceTest {
                 }
 
             assertSame(cancellation, thrown)
+        }
+
+    @Test
+    fun `propagates operational file-system provider failure`() =
+        runBlocking {
+            val failure = IOException("directory access failed")
+            val failingSource = PathCompletionSource(TerminalFileSystemProvider { throw failure })
+
+            val thrown =
+                assertFailsWith<IOException> {
+                    failingSource.complete(request("cat R", "file:///project"))
+                }
+
+            assertSame(failure, thrown)
         }
 
     @Test

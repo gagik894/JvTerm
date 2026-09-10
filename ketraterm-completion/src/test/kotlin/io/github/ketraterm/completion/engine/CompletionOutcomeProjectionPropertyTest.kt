@@ -119,7 +119,7 @@ class CompletionOutcomeProjectionPropertyTest {
                                     0,
                                     commandLine.length,
                                     "history",
-                                    TerminalCompletionCandidateKind.HISTORY,
+                                    TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             listOf(

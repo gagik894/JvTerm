@@ -31,15 +31,8 @@ to color 15 and pretend that is correct.
 ## TODO Discipline
 
 Every intentionally unwired feature should say why and where the real work
-belongs:
-
-- `TODO(core-gap)`: core API/storage does not exist yet.
-- `TODO(parser-gap)`: parser does not emit the semantic command yet.
-- `TODO(host)`: both sides exist, adapter mapping is missing.
-- `TODO(policy)`: security or compatibility policy is required.
-
-Also update `docs/terminal-feature-map.md` and `docs/terminal-feature-gap-map.md`
-when a gap is discovered, closed, or reclassified.
+belongs. Use the exact ownership markers defined by the canonical gap map; do
+not reproduce or extend that taxonomy here.
 
 ## Testing
 

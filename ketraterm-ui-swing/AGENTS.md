@@ -41,21 +41,21 @@ interfaces rather than assembling internal painting/cursor pieces themselves.
 
 ## Allowed Dependencies
 
-`jvtetrm-ui-swing` may depend on:
+`ketraterm-ui-swing` may depend on:
 
-- `jvtetrm-session`
-- `jvtetrm-input`
-- `jvtetrm-render-api`
-- `jvtetrm-render-cache`
+- `ketraterm-session`
+- `ketraterm-input`
+- `ketraterm-render-api`
+- `ketraterm-render-cache`
 
 It may also use standard JDK/Swing/AWT APIs.
 
 ## Forbidden Dependencies
 
-`jvtetrm-ui-swing` must not depend on:
+`ketraterm-ui-swing` must not depend on:
 
 - IntelliJ Platform APIs.
-- `jvtetrm-pty`.
+- `ketraterm-pty`.
 - SSH, WebSocket, or other transport implementations.
 - standalone application modules.
 - plugin modules.
@@ -64,7 +64,7 @@ Transport selection belongs outside this module.
 
 ## Boundary Rules
 
-`jvtetrm-ui-swing` must not:
+`ketraterm-ui-swing` must not:
 
 - parse ANSI, VT, OSC, DCS, or terminal output protocols.
 - implement terminal grid mutation rules.
@@ -191,7 +191,7 @@ Examples:
 - Standalone host can provide window assembly, system clipboard, system
   font fallback, local config, PTY startup, and app lifecycle.
 
-Those host concepts must enter `jvtetrm-ui-swing` only through small
+Those host concepts must enter `ketraterm-ui-swing` only through small
 interfaces.
 
 ## Testing

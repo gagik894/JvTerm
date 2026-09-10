@@ -18,12 +18,15 @@ package io.github.ketraterm.completion.engine
 import io.github.ketraterm.completion.api.*
 import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
 import io.github.ketraterm.completion.commandline.TerminalCompletionContextResolver
+import io.github.ketraterm.completion.internal.TERMINAL_COMPLETION_CANDIDATE_ORDER
 import io.github.ketraterm.completion.internal.boundedTo
 import io.github.ketraterm.completion.internal.hasValidReplacementRangeFor
 import io.github.ketraterm.completion.model.TerminalCommandSpec
 import io.github.ketraterm.completion.model.TerminalCommandSpecs
 import io.github.ketraterm.completion.ranking.CompletionSourceCandidates
 import io.github.ketraterm.completion.ranking.GlobalCompletionRanker
+import io.github.ketraterm.completion.source.appendLearnedHistoryCandidates
+import io.github.ketraterm.completion.spec.PathCommandSpecCandidateProjector
 import io.github.ketraterm.completion.spec.SpecCompletionSource
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
@@ -36,30 +39,22 @@ import kotlinx.coroutines.supervisorScope
 /** Coordinates bounded source collection and delegates deterministic fusion to [GlobalCompletionRanker]. */
 internal class MergedCompletionEngine(
     sources: List<TerminalCompletionSourceEntry>,
-    commandSpecs: List<TerminalCommandSpec> = TerminalCommandSpecs.defaults(),
-    learningStore: TerminalCompletionLearningStore? = null,
-    clockEpochMillis: () -> Long = System::currentTimeMillis,
+    private val commandSpecs: List<TerminalCommandSpec> = TerminalCommandSpecs.defaults(),
+    private val learningStore: TerminalCompletionLearningStore? = null,
+    private val clockEpochMillis: () -> Long = System::currentTimeMillis,
     private val sourceFailureHandler: TerminalCompletionSourceFailureHandler =
         TerminalCompletionSourceFailureHandler.SYSTEM_LOGGER,
 ) : TerminalCompletionEngine {
-    private val commandSpecs = commandSpecs.toList()
-    private val sources =
-        buildList(sources.size + 1) {
-            if (this@MergedCompletionEngine.commandSpecs.isNotEmpty()) {
-                add(
-                    TerminalCompletionSourceEntry(
-                        source = SpecCompletionSource(this@MergedCompletionEngine.commandSpecs),
-                        priority = TerminalCompletionSourcePrior.STATIC_SPECIFICATION,
-                    ),
-                )
-            }
-            addAll(sources)
-        }
-    private val ranker = GlobalCompletionRanker(this.commandSpecs, learningStore, clockEpochMillis)
+    private val specSource = commandSpecs.takeIf { it.isNotEmpty() }?.let(::SpecCompletionSource)
+    private val sources = sources.toList()
+    private val hostSourceIndexOffset = if (specSource == null) 0 else 1
+    private val learnedSourceIndex = hostSourceIndexOffset + sources.size
+    private val ranker = GlobalCompletionRanker()
+    private val pathCommandSpecCandidateProjector = PathCommandSpecCandidateProjector(this.commandSpecs)
 
     override fun completions(request: TerminalCompletionRequest): Flow<List<TerminalCompletionCandidate>> =
         channelFlow {
-            if (sources.isEmpty()) {
+            if (specSource == null && sources.isEmpty() && learningStore == null) {
                 send(emptyList())
                 return@channelFlow
             }
@@ -80,97 +75,119 @@ internal class MergedCompletionEngine(
                 send(emptyList())
                 return@channelFlow
             }
+            val learningIndexes = learningStore?.indexesFor(request.shellCapabilities.syntax)
+            val nowEpochMillis = clockEpochMillis().coerceAtLeast(0L)
             val rankingState =
                 ranker.createRequestState(
                     request = request,
                     context = completionContext,
                     resultLimit = REQUEST_CANDIDATE_LIMIT,
+                    learnedIndex = learningIndexes?.evidence,
+                    nowEpochMillis = nowEpochMillis,
                 )
             var lastPublished: List<TerminalCompletionCandidate>? = null
 
-            // 1. Fast in-memory evaluation (Synchronous on the caller coroutine)
-            var hasAsyncSources = false
-            for (sourceIndex in sources.indices) {
-                val entry = sources[sourceIndex]
-                if (entry.source.isFastInMemory) {
-                    val candidates =
-                        try {
-                            entry.source
-                                .complete(request, completionContext, SOURCE_CANDIDATE_LIMIT)
-                                .filter { it.hasValidReplacementRangeFor(request) }
-                                .boundedTo(SOURCE_CANDIDATE_LIMIT)
-                        } catch (cancellation: CancellationException) {
-                            if (!coroutineContext.isActive) throw cancellation
-                            emptyList()
-                        } catch (failure: Exception) {
-                            reportSourceFailure(sourceIndex, entry, failure)
-                            emptyList()
-                        }
-                    if (candidates.isNotEmpty()) {
+            learningIndexes
+                ?.takeUnless { completionContext.commandLineContext.precededByOperator }
+                ?.let { indexes ->
+                    val learnedCandidates =
+                        ArrayList<TerminalCompletionCandidate>()
+                            .apply {
+                                appendLearnedHistoryCandidates(
+                                    request = request,
+                                    lineContext = completionContext.commandLineContext,
+                                    completionContext = completionContext,
+                                    index = indexes.history,
+                                    nowEpochMillis = nowEpochMillis,
+                                    destination = this,
+                                )
+                                indexes.observed.appendCandidates(
+                                    request = request,
+                                    context = completionContext,
+                                    destination = this,
+                                )
+                                sortWith(TERMINAL_COMPLETION_CANDIDATE_ORDER)
+                            }.let { candidates ->
+                                pathCommandSpecCandidateProjector
+                                    .project(request, completionContext, candidates)
+                                    .filter { it.hasValidReplacementRangeFor(request) }
+                                    .boundedTo(SOURCE_CANDIDATE_LIMIT)
+                            }
+                    if (learnedCandidates.isNotEmpty()) {
                         rankingState.ingest(
                             CompletionSourceCandidates(
-                                sourceIndex = sourceIndex,
-                                priority = entry.priority,
-                                candidates = candidates,
+                                sourceIndex = learnedSourceIndex,
+                                priority = LEARNED_PRIORITY,
+                                isFallback = true,
+                                candidates = learnedCandidates,
                             ),
                         )
                     }
-                } else {
-                    hasAsyncSources = true
+                }
+
+            specSource?.let { source ->
+                val candidates = completeSource(source, request, completionContext)
+                if (candidates.isNotEmpty()) {
+                    rankingState.ingest(
+                        CompletionSourceCandidates(
+                            sourceIndex = 0,
+                            priority = STATIC_SPECIFICATION_PRIORITY,
+                            candidates = candidates,
+                        ),
+                    )
                 }
             }
 
-            // Immediately emit the initial synchronous ranking (specs + MRU history)
+            // Immediately emit the initial synchronous ranking from specs and learned data.
             val initialRanked = rankingState.rankedCandidates()
-            if (initialRanked.isNotEmpty() || !hasAsyncSources) {
+            if (initialRanked.isNotEmpty() || sources.isEmpty()) {
                 lastPublished = initialRanked
                 send(initialRanked)
             }
 
-            // If there are no async/suspending sources (e.g. pure CLI spec / history typing), finish immediately!
-            if (!hasAsyncSources) {
+            if (sources.isEmpty()) {
                 return@channelFlow
             }
 
-            // 2. Asynchronous background evaluation strictly for suspending/IO sources (paths, Git branches, etc.)
-            val asyncSources = ArrayList<IndexedSourceEntry>(sources.size)
-            for (sourceIndex in sources.indices) {
-                val entry = sources[sourceIndex]
-                if (!entry.source.isFastInMemory) {
-                    asyncSources += IndexedSourceEntry(sourceIndex, entry)
-                }
-            }
-
-            val completions = Channel<SourceCompletion>(asyncSources.size)
+            val completions = Channel<SourceCompletion>(sources.size)
             try {
                 supervisorScope {
-                    for (asyncEntry in asyncSources) {
+                    for (localSourceIndex in sources.indices) {
+                        val entry = sources[localSourceIndex]
+                        val sourceIndex = localSourceIndex + hostSourceIndexOffset
                         launch {
                             val candidates =
                                 try {
-                                    asyncEntry.entry.source
-                                        .complete(request, completionContext, SOURCE_CANDIDATE_LIMIT)
-                                        .filter { it.hasValidReplacementRangeFor(request) }
-                                        .boundedTo(SOURCE_CANDIDATE_LIMIT)
+                                    completeSource(
+                                        source = entry.source,
+                                        request = request,
+                                        context = completionContext,
+                                    )
                                 } catch (cancellation: CancellationException) {
                                     if (!coroutineContext.isActive) throw cancellation
                                     emptyList()
                                 } catch (failure: Exception) {
-                                    reportSourceFailure(asyncEntry.sourceIndex, asyncEntry.entry, failure)
+                                    reportSourceFailure(sourceIndex, entry, failure)
                                     emptyList()
                                 }
-                            completions.send(SourceCompletion(asyncEntry.sourceIndex, asyncEntry.entry.priority, candidates))
+                            completions.send(
+                                SourceCompletion(
+                                    sourceIndex = sourceIndex,
+                                    priority = entry.priority,
+                                    candidates = candidates,
+                                ),
+                            )
                         }
                     }
 
-                    repeat(asyncSources.size) {
+                    repeat(sources.size) {
                         val completed = completions.receive()
                         if (completed.candidates.isNotEmpty()) {
                             rankingState.ingest(
                                 CompletionSourceCandidates(
-                                    completed.sourceIndex,
-                                    completed.priority,
-                                    completed.candidates,
+                                    sourceIndex = completed.sourceIndex,
+                                    priority = completed.priority,
+                                    candidates = completed.candidates,
                                 ),
                             )
                         }
@@ -185,6 +202,18 @@ internal class MergedCompletionEngine(
                 completions.cancel()
             }
         }
+
+    private suspend fun completeSource(
+        source: TerminalCompletionSource,
+        request: TerminalCompletionRequest,
+        context: TerminalCompletionContext,
+    ): List<TerminalCompletionCandidate> {
+        val candidates = source.complete(request, context, SOURCE_CANDIDATE_LIMIT)
+        return pathCommandSpecCandidateProjector
+            .project(request, context, candidates)
+            .filter { it.hasValidReplacementRangeFor(request) }
+            .boundedTo(SOURCE_CANDIDATE_LIMIT)
+    }
 
     private fun reportSourceFailure(
         sourceIndex: Int,
@@ -205,12 +234,9 @@ internal class MergedCompletionEngine(
         val candidates: List<TerminalCompletionCandidate>,
     )
 
-    private data class IndexedSourceEntry(
-        val sourceIndex: Int,
-        val entry: TerminalCompletionSourceEntry,
-    )
-
     private companion object {
+        private const val STATIC_SPECIFICATION_PRIORITY = 0
+        private const val LEARNED_PRIORITY = 8
         private const val SOURCE_CANDIDATE_LIMIT = 256
         private const val REQUEST_CANDIDATE_LIMIT = 256
     }

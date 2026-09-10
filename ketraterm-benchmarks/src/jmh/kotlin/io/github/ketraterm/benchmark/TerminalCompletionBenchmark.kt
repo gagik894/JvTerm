@@ -16,9 +16,9 @@
 package io.github.ketraterm.benchmark
 
 import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
 import io.github.ketraterm.completion.model.TerminalCommandSpecs
+import io.github.ketraterm.completion.model.TerminalCompletionFeedbackKind
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
@@ -48,10 +48,10 @@ open class TerminalCompletionBenchmark {
     private lateinit var unclosedQuoteRequest: TerminalCompletionRequest
     private lateinit var fusionRequest: TerminalCompletionRequest
     private lateinit var realisticSources: List<TerminalCompletionSourceEntry>
-    private lateinit var learnedSnapshot: TerminalCommandCompletionStatsSnapshot
+    private lateinit var learnedSnapshot: TerminalCompletionLearningSnapshot
     private lateinit var coldStartFusionEngine: TerminalCompletionEngine
     private lateinit var learnedFusionEngine: TerminalCompletionEngine
-    private lateinit var indexedPersistedHistoryEngine: TerminalCompletionEngine
+    private lateinit var indexedLearnedHistoryEngine: TerminalCompletionEngine
     private lateinit var duplicateFusionEngine: TerminalCompletionEngine
     private lateinit var hostileFusionEngine: TerminalCompletionEngine
     private lateinit var fuzzyPathEngine: TerminalCompletionEngine
@@ -71,58 +71,54 @@ open class TerminalCompletionBenchmark {
             )
         realisticSources = List(8) { sourceIndex -> sourceEntry(sourceIndex, 32, duplicateMain = true) }
         coldStartFusionEngine = TerminalCompletionEngines.fromSources(realisticSources, commandSpecs)
-        learnedSnapshot =
-            TerminalCommandCompletionStatsSnapshot(
-                commandStats =
-                    List(2_048) { index ->
-                        TerminalCommandCompletionStats(
-                            commandLine = if (index == 0) "git switch main" else "git switch branch-$index",
-                            profileId = "benchmark",
-                            workingDirectoryUri = "file:///repo",
-                            useCount = index % 20,
-                            successCount = index % 17,
-                            acceptedCount = index % 7,
-                            lastUsedEpochMillis = 2_000_000_000_000L - index,
-                        )
-                    },
-            )
+        val learnedSeed = TerminalCompletionLearningStore(capacity = 2_048)
+        repeat(2_048) { index ->
+            val commandLine = if (index == 0) "git switch main" else "git switch branch-$index"
+            val eventTime = 2_000_000_000_000L - index
+            val executionCount = (index % 20) + 1
+            val successCount = if (index == 0) executionCount else minOf(executionCount, index % 17)
+            repeat(executionCount) { eventIndex ->
+                learnedSeed.recordCommandResult(
+                    commandLine = commandLine,
+                    successful = eventIndex < successCount,
+                    profileId = "benchmark",
+                    workingDirectoryUri = "file:///repo",
+                    usedAtEpochMillis = eventTime,
+                )
+            }
+            val acceptedCount = if (index == 0) 4 else index % 7
+            repeat(acceptedCount) {
+                learnedSeed.recordSuggestionFeedback(
+                    commandLine = commandLine,
+                    feedback = TerminalCompletionFeedbackKind.ACCEPTED,
+                    profileId = "benchmark",
+                    workingDirectoryUri = "file:///repo",
+                    feedbackAtEpochMillis = eventTime,
+                )
+            }
+        }
+        learnedSnapshot = learnedSeed.snapshot()
         learnedFusionEngine =
             TerminalCompletionEngines.fromSources(
                 realisticSources,
                 commandSpecs,
-                learningStore = TerminalCompletionLearningStore(commandSpecs = commandSpecs).apply { replaceSnapshot(learnedSnapshot) },
+                learningStore = TerminalCompletionLearningStore().apply { mergeSnapshot(learnedSnapshot) },
             )
-        val persistedStatsSource = TerminalCompletionLearningStore(capacity = 2_048, commandSpecs = commandSpecs)
-        persistedStatsSource.replaceSnapshot(learnedSnapshot)
-        val sessionMru =
-            TerminalCompletionSources.sessionMru(
-                commandSpecs = commandSpecs,
-                learningStore = persistedStatsSource,
-            )
-        sessionMru.recordSuccessfulCommand(
-            commandLine = "git switch main",
-            profileId = "benchmark",
-            workingDirectoryUri = "file:///repo",
-        )
-        indexedPersistedHistoryEngine =
+        val persistedStatsSource = TerminalCompletionLearningStore(capacity = 2_048)
+        persistedStatsSource.mergeSnapshot(learnedSnapshot)
+        indexedLearnedHistoryEngine =
             TerminalCompletionEngines.fromSources(
-                sources =
-                    listOf(
-                        TerminalCompletionSourceEntry(
-                            source = sessionMru,
-                            priority = TerminalCompletionSourcePrior.SESSION_MRU,
-                        ),
-                    ),
+                sources = emptyList(),
                 commandSpecs = commandSpecs,
                 learningStore = persistedStatsSource,
             )
-        runBlocking { indexedPersistedHistoryEngine.completions(fusionRequest).last() }
+        runBlocking { indexedLearnedHistoryEngine.completions(fusionRequest).last() }
         duplicateFusionEngine = TerminalCompletionEngines.fromSources(List(8) { sourceEntry(it, 32, duplicateMain = true) }, commandSpecs)
         hostileFusionEngine = TerminalCompletionEngines.fromSources(List(10) { sourceEntry(it, 256, duplicateMain = false) }, commandSpecs)
-        val fuzzyPaths =
-            List(FUZZY_PATH_ENTRY_COUNT) { index ->
+        val fuzzyPathMatches =
+            List(FUZZY_PATH_MATCH_COUNT) { index ->
                 TerminalFuzzyPathEntry(
-                    path = "src/module-${index and 63}/GeneratedFile$index.kt",
+                    path = "src/module-${index and 63}/GenF327Match$index.kt",
                     isDirectory = false,
                 )
             }
@@ -133,7 +129,7 @@ open class TerminalCompletionBenchmark {
                         TerminalCompletionSourceEntry(
                             TerminalCompletionSources.fuzzyPath(
                                 sourceId = "benchmark-project-path",
-                                entriesProvider = { _ -> fuzzyPaths },
+                                entriesProvider = { _, _ -> fuzzyPathMatches },
                             ),
                         ),
                     ),
@@ -169,22 +165,22 @@ open class TerminalCompletionBenchmark {
         blackhole.consume(runBlocking { learnedFusionEngine.completions(fusionRequest).last() })
     }
 
-    /** Measures cold construction of the 2,048-row learned-evidence index and one ranked completion. */
+    /** Measures cold construction of the full 2,048-row learned view and its indexes, then one ranked completion. */
     @Benchmark
     open fun buildLearnedIndexAndComplete(blackhole: Blackhole) {
         val coldEngine =
             TerminalCompletionEngines.fromSources(
                 sources = realisticSources,
                 commandSpecs = commandSpecs,
-                learningStore = TerminalCompletionLearningStore(commandSpecs = commandSpecs).apply { replaceSnapshot(learnedSnapshot) },
+                learningStore = TerminalCompletionLearningStore().apply { mergeSnapshot(learnedSnapshot) },
             )
         blackhole.consume(runBlocking { coldEngine.completions(fusionRequest).last() })
     }
 
     /** Measures hot indexed lookup across a full 2,048-row learned snapshot. */
     @Benchmark
-    open fun completeIndexedPersistedHistory(blackhole: Blackhole) {
-        blackhole.consume(runBlocking { indexedPersistedHistoryEngine.completions(fusionRequest).last() })
+    open fun completeIndexedLearnedHistory(blackhole: Blackhole) {
+        blackhole.consume(runBlocking { indexedLearnedHistoryEngine.completions(fusionRequest).last() })
     }
 
     @Benchmark
@@ -247,6 +243,6 @@ open class TerminalCompletionBenchmark {
     }
 
     private companion object {
-        private const val FUZZY_PATH_ENTRY_COUNT = 32_768
+        private const val FUZZY_PATH_MATCH_COUNT = 8_192
     }
 }

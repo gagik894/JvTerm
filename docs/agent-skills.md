@@ -7,6 +7,8 @@ same terminal-emulator workflows instead of rediscovering the architecture.
 
 Available skills:
 
+- `.agents/skills/kotlin-idioms/SKILL.md`
+- `.agents/skills/terminal-architecture-review/SKILL.md`
 - `.agents/skills/terminal-feature-work/SKILL.md`
 - `.agents/skills/terminal-parser-fsm/SKILL.md`
 - `.agents/skills/terminal-core-grid-physics/SKILL.md`
@@ -18,5 +20,6 @@ Available skills:
 - `.agents/skills/terminal-ui-rendering/SKILL.md`
 - `.agents/skills/terminal-naming-convention/SKILL.md`
 
-`AGENTS.md` and module-level `AGENTS.md` files remain the always-read project
-context. The skill packages are task-specific playbooks.
+`AGENTS.md` and module-level `AGENTS.md` files remain the always-read source of
+ownership and local invariants. Skills add task-specific workflows and must
+reference those rules rather than copying them.

@@ -15,10 +15,6 @@
  */
 package io.github.ketraterm.ui.swing.host
 
-import io.github.ketraterm.completion.api.TerminalCompletionCandidateKind
-import io.github.ketraterm.completion.api.TerminalCompletionLearningStore
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
-import io.github.ketraterm.completion.model.TerminalCompletionFeedbackContext
 import io.github.ketraterm.completion.model.TerminalCompletionFeedbackKind
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedback
 import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionFeedbackHandler
@@ -28,79 +24,53 @@ import io.github.ketraterm.ui.swing.suggestion.commandTextAfterReplacement
 /**
  * Shared adapter from Swing suggestion feedback to completion statistics.
  *
- * Hosts inject privacy policy, mutation scheduling, and post-mutation snapshot
- * handling. This keeps Swing-to-completion vocabulary mapping identical while
- * leaving persistence and thread ownership in the product host.
+ * Hosts inject the exact-feedback sink. This keeps Swing-to-completion
+ * vocabulary mapping identical while leaving learning, privacy, persistence,
+ * and thread ownership in the product host.
  *
- * @param statsSource mutable completion statistics source.
- * @param submitMutation dispatcher for one bounded stats mutation.
- * @param afterMutation optional callback receiving the stable snapshot after mutation.
- * @param allowsCommand host privacy policy for the resulting command line.
+ * @param recordSuggestionFeedback host-owned exact-feedback sink.
  * @param clockEpochMillis host wall-clock supplier.
  */
-class SwingCompletionFeedbackRecorder
-    @JvmOverloads
-    constructor(
-        private val statsSource: TerminalCompletionLearningStore,
-        private val submitMutation: (() -> Unit) -> Unit = { mutation -> mutation() },
-        private val afterMutation: ((TerminalCommandCompletionStatsSnapshot) -> Unit)? = null,
-        private val allowsCommand: (String) -> Boolean = { true },
-        private val clockEpochMillis: () -> Long = System::currentTimeMillis,
-    ) {
-        /**
-         * Creates a feedback handler that reads current context per event.
-         *
-         * @param contextProvider supplier for current profile and directory state.
-         * @return reusable Swing feedback handler.
-         */
-        fun createHandler(contextProvider: () -> SwingCompletionContext): SwingShellSuggestionFeedbackHandler =
-            SwingShellSuggestionFeedbackHandler { feedback -> record(feedback, contextProvider()) }
+class SwingCompletionFeedbackRecorder(
+    private val recordSuggestionFeedback: (
+        commandLine: String,
+        feedback: TerminalCompletionFeedbackKind,
+        profileId: String?,
+        workingDirectoryUri: String?,
+        feedbackAtEpochMillis: Long,
+    ) -> Unit,
+    private val clockEpochMillis: () -> Long = System::currentTimeMillis,
+) {
+    /** Creates a handler that records feedback against each suggestion's immutable request context. */
+    fun createHandler(): SwingShellSuggestionFeedbackHandler = SwingShellSuggestionFeedbackHandler(::record)
 
-        /**
-         * Validates and records one accepted or dismissed suggestion.
-         *
-         * @param feedback Swing popup feedback event.
-         * @param context host metadata active for the event.
-         */
-        fun record(
-            feedback: SwingShellSuggestionFeedback,
-            context: SwingCompletionContext,
-        ) {
-            val commandLine =
-                feedback.suggestion
-                    .commandTextAfterReplacement(feedback.request)
-                    ?.takeUnless(String::isBlank)
-                    ?: return
-            if (!allowsCommand(commandLine)) return
-            val completionContext = feedback.completionContext()
-            submitMutation {
-                statsSource.recordSuggestionFeedback(
-                    commandLine = commandLine,
-                    feedback = feedback.kind.toCompletionKind(),
-                    profileId = context.profileId,
-                    workingDirectoryUri = context.workingDirectoryUri,
-                    feedbackAtEpochMillis = clockEpochMillis(),
-                    context = completionContext,
-                )
-                afterMutation?.invoke(statsSource.snapshot())
-            }
-        }
-
-        private companion object {
-            private fun SwingShellSuggestionFeedbackKind.toCompletionKind(): TerminalCompletionFeedbackKind =
-                when (this) {
-                    SwingShellSuggestionFeedbackKind.ACCEPTED -> TerminalCompletionFeedbackKind.ACCEPTED
-                    SwingShellSuggestionFeedbackKind.DISMISSED -> TerminalCompletionFeedbackKind.DISMISSED
-                }
-
-            private fun SwingShellSuggestionFeedback.completionContext(): TerminalCompletionFeedbackContext? {
-                val source = suggestion.source.takeIf(String::isNotBlank) ?: return null
-                val candidateKind =
-                    runCatching { TerminalCompletionCandidateKind.valueOf(suggestion.kind) }.getOrNull() ?: return null
-                return TerminalCompletionFeedbackContext(
-                    source = source,
-                    candidateKind = candidateKind,
-                )
-            }
-        }
+    /**
+     * Validates and records one accepted or dismissed suggestion.
+     *
+     * @param feedback Swing popup feedback event.
+     */
+    fun record(feedback: SwingShellSuggestionFeedback) {
+        val context = feedback.suggestion.interactionContext as? SwingCompletionContext ?: return
+        val commandLine =
+            feedback.suggestion
+                .commandTextAfterReplacement(feedback.request)
+                ?.takeUnless(String::isBlank)
+                ?: return
+        val feedbackAtEpochMillis = clockEpochMillis()
+        recordSuggestionFeedback(
+            commandLine,
+            feedback.kind.toCompletionKind(),
+            context.profileId,
+            context.workingDirectoryUri,
+            feedbackAtEpochMillis,
+        )
     }
+
+    private companion object {
+        private fun SwingShellSuggestionFeedbackKind.toCompletionKind(): TerminalCompletionFeedbackKind =
+            when (this) {
+                SwingShellSuggestionFeedbackKind.ACCEPTED -> TerminalCompletionFeedbackKind.ACCEPTED
+                SwingShellSuggestionFeedbackKind.DISMISSED -> TerminalCompletionFeedbackKind.DISMISSED
+            }
+    }
+}

@@ -15,284 +15,93 @@
  */
 package io.github.ketraterm.completion.persistence
 
-import io.github.ketraterm.completion.api.TerminalCompletionCandidateKind
 import io.github.ketraterm.completion.api.TerminalCompletionLearningStore
-import io.github.ketraterm.completion.model.*
-import java.nio.charset.StandardCharsets
-import java.nio.file.Files
-import java.nio.file.Path
-import java.nio.file.Paths
-import java.util.*
-import kotlin.io.path.createTempDirectory
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
 import kotlin.test.*
 
 class CompletionLearningSnapshotCodecTest {
     @Test
-    fun `current file name header and docs share the same format version`() {
-        val encodedHeader = CompletionLearningSnapshotCodec.encode(TerminalCommandCompletionStatsSnapshot()).first()
-        val storageDoc = Files.readString(repositoryRoot.resolve("docs/persistent-terminal-storage.md"))
-
-        assertEquals("command-completion-stats-v1.tsv", TerminalCompletionLearningRepository.currentFileName())
-        assertEquals("KetraTerm_COMMAND_COMPLETION_STATS\t1", encodedHeader)
-        assertTrue(storageDoc.contains("`${TerminalCompletionLearningRepository.currentFileName()}`"))
-        assertTrue(storageDoc.contains(encodedHeader))
+    fun `current file name and header use the split schema version`() {
+        assertEquals("command-completion-learning-v3.tsv", TerminalCompletionLearningCoordinator.currentFileName())
+        assertEquals(listOf(HEADER), CompletionLearningSnapshotCodec.encode(TerminalCompletionLearningSnapshot.EMPTY))
     }
 
     @Test
-    fun `round trips command shape and feedback stats with unicode text`() {
-        val commandRecord =
-            commandStats(
-                commandLine = "echo cafe \uD83D\uDE80",
-                profileId = "pwsh",
-                workingDirectoryUri = "file:///C:/work space",
-            )
-        val shapeRecord =
-            TerminalCommandShapeStats(
-                shape =
-                    TerminalCommandLineShape(
-                        executable = "git",
-                        subcommands = listOf("log"),
-                        optionNames = listOf("--stat"),
-                        positionalArgumentCount = 1,
-                    ),
-                profileId = "bash",
-                workingDirectoryUri = "file:///repo",
-                useCount = 3,
-                successCount = 2,
-                failureCount = 1,
-                acceptedCount = 1,
-                dismissedCount = 1,
-                lastUsedEpochMillis = 200,
-            )
-        val feedbackRecord =
-            TerminalCompletionFeedbackStats(
-                source = "spec",
-                candidateKind = TerminalCompletionCandidateKind.SUBCOMMAND,
-                profileId = "bash",
-                workingDirectoryUri = "file:///repo",
-                acceptedCount = 2,
-                dismissedCount = 1,
-                lastUsedEpochMillis = 900,
-            )
+    fun `round trips opaque evidence and replay text with unicode`() {
+        val snapshot = snapshot("git commit -m 'Բարև աշխարհ'")
+
+        assertEquals(snapshot, CompletionLearningSnapshotCodec.decode(CompletionLearningSnapshotCodec.encode(snapshot)))
+    }
+
+    @Test
+    fun `credential commands encode only opaque ranking rows`() {
         val snapshot =
-            TerminalCommandCompletionStatsSnapshot(
-                commandStats = listOf(commandRecord),
-                shapeStats = listOf(shapeRecord),
-                feedbackStats = listOf(feedbackRecord),
+            snapshot(
+                "curl -u alice:s3cr3t https://example.test",
+                "mysql -p hunter2",
             )
 
-        val lines = CompletionLearningSnapshotCodec.encode(snapshot)
+        val encoded = CompletionLearningSnapshotCodec.encode(snapshot)
+        val decoded = requireNotNull(CompletionLearningSnapshotCodec.decode(encoded))
 
-        assertEquals("KetraTerm_COMMAND_COMPLETION_STATS\t1", lines.first())
-        assertFalse(lines.joinToString("\n").contains(commandRecord.commandLine))
-        assertEquals(8, lines.last().split('\t').size)
-        assertEquals(snapshot, CompletionLearningSnapshotCodec.decode(lines))
+        assertEquals(2, decoded.rankingStats.size)
+        assertTrue(decoded.replayCommands.isEmpty())
+        assertTrue(encoded.drop(1).all { it.startsWith("R\t") })
+        assertFalse(encoded.any { "s3cr3t" in it || "hunter2" in it })
     }
 
     @Test
-    fun `legacy feedback position is ignored while the remaining provider context is retained`() {
-        val legacyRow = legacyFeedbackRow(position = "REMOVED_POSITION", acceptedCount = 2, lastUsedEpochMillis = 900)
+    fun `malformed rows reject the complete snapshot`() {
+        val validLines = CompletionLearningSnapshotCodec.encode(snapshot("git status"))
+        val ranking = validLines.first { it.startsWith("R\t") }
+        val replay = validLines.first { it.startsWith("H\t") }
+        val malformedCount =
+            ranking
+                .split('\t')
+                .toMutableList()
+                .also { it[4] = "invalid" }
+                .joinToString("\t")
+        val malformedReplay =
+            replay
+                .split('\t')
+                .toMutableList()
+                .also { it[1] = OTHER_DIGEST }
+                .joinToString("\t")
 
-        assertEquals(
-            listOf(
-                TerminalCompletionFeedbackStats(
-                    source = "spec",
-                    candidateKind = TerminalCompletionCandidateKind.SUBCOMMAND,
-                    profileId = "bash",
-                    workingDirectoryUri = "file:///repo",
-                    acceptedCount = 2,
-                    dismissedCount = 1,
-                    lastUsedEpochMillis = 900,
-                ),
-            ),
-            CompletionLearningSnapshotCodec.decode(listOf(HEADER, legacyRow)).feedbackStats,
-        )
+        for (invalidRow in listOf(malformedCount, malformedReplay, "R\ttoo-short", "H\ttoo-short", "X\tunknown")) {
+            assertNull(CompletionLearningSnapshotCodec.decode(listOf(HEADER, invalidRow)))
+        }
+        assertNull(CompletionLearningSnapshotCodec.decode(listOf(HEADER, replay, ranking)))
     }
 
     @Test
-    fun `legacy rows differing only by position collapse to the newest provider feedback`() {
-        val path = createTempDirectory("completion-legacy-feedback").resolve(TerminalCompletionLearningRepository.currentFileName())
-        Files.write(
-            path,
-            listOf(
-                HEADER,
-                legacyFeedbackRow(position = "SUBCOMMAND", acceptedCount = 1, lastUsedEpochMillis = 100),
-                legacyFeedbackRow(position = "ARGUMENT", acceptedCount = 3, lastUsedEpochMillis = 300),
-            ),
-            StandardCharsets.UTF_8,
-        )
+    fun `malformed UTF-8 replay text rejects the complete snapshot`() {
+        val invalidUtf8Replay = "H\t$OTHER_DIGEST\twyg\t\t"
+
+        assertNull(CompletionLearningSnapshotCodec.decode(listOf(HEADER, invalidUtf8Replay)))
+    }
+
+    @Test
+    fun `legacy and unknown schemas are rejected`() {
+        assertNull(CompletionLearningSnapshotCodec.decode(listOf("KetraTerm_COMMAND_COMPLETION_STATS\t2")))
+        assertNull(CompletionLearningSnapshotCodec.decode(listOf("KetraTerm_COMMAND_COMPLETION_LEARNING\t999")))
+    }
+
+    @Test
+    fun `header-only file decodes to an empty snapshot`() {
+        assertEquals(CompletionLearningSnapshotCodec.decode(listOf(HEADER)), TerminalCompletionLearningSnapshot.EMPTY)
+    }
+
+    private fun snapshot(vararg commands: String): TerminalCompletionLearningSnapshot {
         val learning = TerminalCompletionLearningStore()
-
-        val loaded = assertIs<CompletionLearningFileLoadOutcome.Loaded>(CompletionLearningFileStore(path).loadSnapshot())
-        learning.replaceSnapshot(loaded.snapshot)
-
-        assertEquals(1, learning.snapshot().feedbackStats.size)
-        assertEquals(
-            3,
-            learning
-                .snapshot()
-                .feedbackStats
-                .single()
-                .acceptedCount,
-        )
-        assertEquals(
-            300,
-            learning
-                .snapshot()
-                .feedbackStats
-                .single()
-                .lastUsedEpochMillis,
-        )
+        for ((index, command) in commands.withIndex()) {
+            learning.recordCommandResult(command, true, "bash", "file:///repo", index + 1L)
+        }
+        return learning.snapshot()
     }
-
-    @Test
-    fun `unknown header returns empty snapshot`() {
-        val lines = listOf("KetraTerm_COMMAND_COMPLETION_STATS\t999", commandRow(commandStats("git status")))
-
-        assertEquals(TerminalCommandCompletionStatsSnapshot(), CompletionLearningSnapshotCodec.decode(lines))
-    }
-
-    @Test
-    fun `unknown malformed and invalid rows are ignored independently`() {
-        val valid = commandStats("git status")
-        val invalidBase64 =
-            listOf("C", "$$$", "", "", "1", "1", "0", "0", "0", "100").joinToString("\t")
-        val invalidCounter =
-            listOf("C", encodeText("bad"), "", "", "-1", "0", "0", "0", "0", "100").joinToString("\t")
-        val invalidFeedback =
-            listOf("F", encodeText("spec"), "NOT_A_KIND", "", "", "1", "0", "100").joinToString("\t")
-        val lines =
-            listOf(
-                HEADER,
-                "X\tignored",
-                "malformed",
-                invalidBase64,
-                invalidCounter,
-                invalidFeedback,
-                commandRow(valid),
-            )
-
-        assertEquals(
-            TerminalCommandCompletionStatsSnapshot(commandStats = listOf(valid)),
-            CompletionLearningSnapshotCodec.decode(lines),
-        )
-    }
-
-    @Test
-    fun `encoded rows omit derived command and shape keys`() {
-        val commandRecord = commandStats("Git Status")
-        val shapeRecord =
-            TerminalCommandShapeStats(
-                shape =
-                    TerminalCommandLineShape(
-                        executable = "git",
-                        subcommands = listOf("log"),
-                        optionNames = listOf("--stat"),
-                        positionalArgumentCount = 1,
-                    ),
-                lastUsedEpochMillis = 100,
-            )
-
-        val lines =
-            CompletionLearningSnapshotCodec.encode(
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats = listOf(commandRecord),
-                    shapeStats = listOf(shapeRecord),
-                ),
-            )
-
-        assertEquals(10, lines[1].split('\t').size)
-        assertEquals(14, lines[2].split('\t').size)
-        assertFalse(lines[1].contains(encodeText(commandRecord.normalizedCommandLine)))
-        assertFalse(lines[2].contains(encodeText(shapeRecord.shape.normalizedShapeKey)))
-    }
-
-    @Test
-    fun `sensitive argument text is not written by shape rows`() {
-        val privateArgument = "secret-branch"
-        val shapeRecord =
-            TerminalCommandShapeStats(
-                shape =
-                    TerminalCommandLineShape(
-                        executable = "git",
-                        subcommands = listOf("log"),
-                        optionNames = listOf("--stat"),
-                        positionalArgumentCount = 1,
-                    ),
-                lastUsedEpochMillis = 200,
-            )
-
-        val lines =
-            CompletionLearningSnapshotCodec.encode(
-                TerminalCommandCompletionStatsSnapshot(shapeStats = listOf(shapeRecord)),
-            )
-
-        assertTrue(lines.none { it.contains(privateArgument) })
-        assertEquals(
-            TerminalCommandCompletionStatsSnapshot(shapeStats = listOf(shapeRecord)),
-            CompletionLearningSnapshotCodec.decode(lines),
-        )
-    }
-
-    private fun commandStats(
-        commandLine: String,
-        profileId: String? = "bash",
-        workingDirectoryUri: String? = "file:///repo",
-    ): TerminalCommandCompletionStats =
-        TerminalCommandCompletionStats(
-            commandLine = commandLine,
-            profileId = profileId,
-            workingDirectoryUri = workingDirectoryUri,
-            useCount = 4,
-            successCount = 3,
-            failureCount = 1,
-            acceptedCount = 2,
-            dismissedCount = 1,
-            lastUsedEpochMillis = 1234,
-        )
-
-    private fun commandRow(record: TerminalCommandCompletionStats): String =
-        listOf(
-            "C",
-            encodeText(record.commandLine),
-            encodeText(record.profileId.orEmpty()),
-            encodeText(record.workingDirectoryUri.orEmpty()),
-            record.useCount.toString(),
-            record.successCount.toString(),
-            record.failureCount.toString(),
-            record.acceptedCount.toString(),
-            record.dismissedCount.toString(),
-            record.lastUsedEpochMillis.toString(),
-        ).joinToString("\t")
-
-    private fun legacyFeedbackRow(
-        position: String,
-        acceptedCount: Int,
-        lastUsedEpochMillis: Long,
-    ): String =
-        listOf(
-            "F",
-            encodeText("spec"),
-            TerminalCompletionCandidateKind.SUBCOMMAND.name,
-            position,
-            encodeText("bash"),
-            encodeText("file:///repo"),
-            acceptedCount.toString(),
-            "1",
-            lastUsedEpochMillis.toString(),
-        ).joinToString("\t")
-
-    private fun encodeText(value: String): String =
-        Base64.getUrlEncoder().withoutPadding().encodeToString(value.toByteArray(StandardCharsets.UTF_8))
 
     private companion object {
-        private const val HEADER = "KetraTerm_COMMAND_COMPLETION_STATS\t1"
-        private val workingDirectory: Path = Paths.get("").toAbsolutePath()
-        private val repositoryRoot: Path =
-            if (Files.isRegularFile(workingDirectory.resolve("docs/persistent-terminal-storage.md"))) {
-                workingDirectory
-            } else {
-                workingDirectory.parent
-            }
+        private const val HEADER = "KetraTerm_COMMAND_COMPLETION_LEARNING\t3"
+        private const val OTHER_DIGEST = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
     }
 }

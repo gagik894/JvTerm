@@ -15,14 +15,15 @@
  */
 package io.github.ketraterm.ui.swing.host
 
-import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestion
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionAccentRole
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionProvider
-import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
+import io.github.ketraterm.completion.api.TerminalCompletionCandidate
+import io.github.ketraterm.completion.api.TerminalCompletionEngine
+import io.github.ketraterm.completion.api.TerminalCompletionRequest
+import io.github.ketraterm.completion.api.TerminalShellCapabilities
+import io.github.ketraterm.ui.swing.suggestion.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import java.util.*
 
 /**
  * Host-neutral adapter from the pure completion engine to Swing suggestions.
@@ -45,43 +46,97 @@ class SwingCompletionSuggestionProvider(
      * @return cold ordered Swing suggestion snapshots, or one empty snapshot when conversion is invalid.
      */
     override fun suggestions(request: SwingShellSuggestionRequest): Flow<List<SwingShellSuggestion>> {
-        val context = contextProvider()
+        val requestContext = contextProvider()
         val completionRequest =
             try {
                 TerminalCompletionRequest(
                     commandLine = request.commandText,
                     cursorOffset = request.cursorOffset,
-                    workingDirectoryUri = context.workingDirectoryUri,
-                    profileId = context.profileId,
-                    shellCapabilities = context.shellCapabilities,
+                    workingDirectoryUri = requestContext.workingDirectoryUri,
+                    profileId = requestContext.profileId,
+                    shellCapabilities = requestContext.shellCapabilities,
                 )
             } catch (_: IllegalArgumentException) {
                 return flowOf(emptyList())
             }
-        return engine.completions(completionRequest).map { candidates -> candidates.map { it.toSwingSuggestion() } }
+        return engine
+            .completions(completionRequest)
+            .map { candidates -> candidates.map { it.toSwingSuggestion(requestContext) } }
     }
 
     private companion object {
-        private fun TerminalCompletionCandidate.toSwingSuggestion(): SwingShellSuggestion =
+        private fun TerminalCompletionCandidate.toSwingSuggestion(requestContext: SwingCompletionContext): SwingShellSuggestion =
             SwingShellSuggestion(
                 replacementText = replacementText,
                 replacementStartOffset = replacementStartOffset,
                 replacementEndOffset = replacementEndOffset,
                 source = source,
+                sourceDisplayText = source.toDisplayText(),
                 kind = kind.name,
                 displayText = displayText,
                 detail = detail,
-                accentRole =
-                    when (kind) {
-                        TerminalCompletionCandidateKind.COMMAND,
-                        TerminalCompletionCandidateKind.SUBCOMMAND,
-                        -> SwingShellSuggestionAccentRole.COMMAND
+                accentRole = SwingShellSuggestionAccentRole.from(kind.name, source),
+                interactionContext = requestContext,
+                matchedRanges =
+                    SwingShellSuggestionMatchRanges.fromPackedOffsets(
+                        displayText,
+                        matchedRanges.copyPackedOffsets(),
+                    ),
+            )
 
-                        TerminalCompletionCandidateKind.PATH -> SwingShellSuggestionAccentRole.PATH
-                        TerminalCompletionCandidateKind.OPTION -> SwingShellSuggestionAccentRole.OPTION
-                        TerminalCompletionCandidateKind.HISTORY -> SwingShellSuggestionAccentRole.HISTORY
-                        else -> SwingShellSuggestionAccentRole.OTHER
-                    },
+        private fun String.toDisplayText(): String {
+            val normalized = trim().boundedSourceLabel().lowercase(Locale.ROOT).boundedSourceLabel()
+            return SOURCE_DISPLAY_TEXT[normalized]
+                ?: run {
+                    normalized
+                        .removePrefix("intellij-")
+                        .humanizeSourceIdentifier()
+                        .replaceFirstChar { character -> character.titlecase(Locale.ROOT) }
+                        .boundedSourceLabel()
+                }
+        }
+
+        private fun String.humanizeSourceIdentifier(): String {
+            val result = StringBuilder(length.coerceAtMost(MAXIMUM_SOURCE_LABEL_CODE_UNITS))
+            var separatorPending = false
+            for (character in this) {
+                if (character == '-' || character == '_' || character.isWhitespace()) {
+                    separatorPending = result.isNotEmpty()
+                } else {
+                    if (separatorPending) result.append(' ')
+                    result.append(character)
+                    separatorPending = false
+                }
+            }
+            return result.toString().ifEmpty { "other" }
+        }
+
+        private fun String.boundedSourceLabel(): String {
+            if (length <= MAXIMUM_SOURCE_LABEL_CODE_UNITS) return this
+            var retainedLength = MAXIMUM_SOURCE_LABEL_CODE_UNITS - ELLIPSIS.length
+            if (
+                Character.isHighSurrogate(this[retainedLength - 1]) && Character.isLowSurrogate(this[retainedLength])
+            ) {
+                retainedLength--
+            }
+            return substring(0, retainedLength).trimEnd() + ELLIPSIS
+        }
+
+        private const val MAXIMUM_SOURCE_LABEL_CODE_UNITS = 128
+        private const val ELLIPSIS = "…"
+        private val SOURCE_DISPLAY_TEXT =
+            mapOf(
+                "spec" to "Built-in",
+                "learned" to "Learned",
+                "observed" to "Learned",
+                "path" to "Path",
+                "intellij-project-file" to "Project",
+                "intellij-gradle-task" to "Gradle",
+                "intellij-git-branch" to "Git",
+                "intellij-git-remote-branch" to "Git",
+                "intellij-git-tag" to "Git",
+                "intellij-git-commit" to "Git",
+                "intellij-git-status-path" to "Git",
             )
     }
 }

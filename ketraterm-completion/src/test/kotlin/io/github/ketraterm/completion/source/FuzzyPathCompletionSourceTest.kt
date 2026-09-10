@@ -21,26 +21,35 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-/** Tests context-aware completion from a host-owned ready fuzzy path snapshot. */
+/** Tests context-aware completion from host-owned ready fuzzy path matches. */
 class FuzzyPathCompletionSourceTest {
+    private val entriesByPrefix =
+        mapOf(
+            "FzT" to
+                listOf(
+                    TerminalFuzzyPathEntry("src/main/kotlin/FuzzyTarget.kt", isDirectory = false),
+                    TerminalFuzzyPathEntry("src/test/kotlin/FuzzyTargetTest.kt", isDirectory = false),
+                ),
+            "rs" to
+                listOf(
+                    TerminalFuzzyPathEntry("src/main/result.txt", isDirectory = false),
+                    TerminalFuzzyPathEntry("src/main/resources", isDirectory = true),
+                ),
+            "Hidden" to listOf(TerminalFuzzyPathEntry("src/main/.generated/Hidden.kt", isDirectory = false)),
+            "src/main/.g" to listOf(TerminalFuzzyPathEntry("src/main/.generated/Hidden.kt", isDirectory = false)),
+            "NbySib" to listOf(TerminalFuzzyPathEntry("../shared/NearbySibling.kt", isDirectory = false)),
+            "NbySec" to listOf(TerminalFuzzyPathEntry("../.private/NearbySecret.kt", isDirectory = false)),
+            "../.p" to listOf(TerminalFuzzyPathEntry("../.private/NearbySecret.kt", isDirectory = false)),
+            "MyF" to listOf(TerminalFuzzyPathEntry("notes/My File.txt", isDirectory = false)),
+        )
     private val source =
         TerminalCompletionSources.fuzzyPath(
             sourceId = "project-file",
-            entriesProvider = { _ ->
-                listOf(
-                    TerminalFuzzyPathEntry("src/main/kotlin/FuzzyTarget.kt", isDirectory = false),
-                    TerminalFuzzyPathEntry("src/main/resources", isDirectory = true),
-                    TerminalFuzzyPathEntry("src/main/.generated/Hidden.kt", isDirectory = false),
-                    TerminalFuzzyPathEntry("src/test/kotlin/FuzzyTargetTest.kt", isDirectory = false),
-                    TerminalFuzzyPathEntry("notes/My File.txt", isDirectory = false),
-                    TerminalFuzzyPathEntry("../shared/NearbySibling.kt", isDirectory = false),
-                    TerminalFuzzyPathEntry("../.private/NearbySecret.kt", isDirectory = false),
-                )
-            },
+            entriesProvider = TerminalFuzzyPathProvider { _, context -> entriesByPrefix[context.activePrefix].orEmpty() },
         )
 
     @Test
-    fun `finds a project file from a basename subsequence in a declared path argument`() =
+    fun `materializes ready project file matches in provider order`() =
         runBlocking {
             val candidates = source.complete(request("cat FzT"))
 
@@ -60,9 +69,9 @@ class FuzzyPathCompletionSourceTest {
                 TerminalCompletionSources.fuzzyPath(
                     sourceId = "query-aware-project-file",
                     entriesProvider =
-                        TerminalFuzzyPathProvider { request, prefix ->
+                        TerminalFuzzyPathProvider { request, context ->
                             requestedDirectory = request.workingDirectoryUri
-                            requestedPrefix = prefix
+                            requestedPrefix = context.activePrefix
                             listOf(TerminalFuzzyPathEntry("settings.gradle.kts", isDirectory = false))
                         },
                 )
@@ -72,6 +81,27 @@ class FuzzyPathCompletionSourceTest {
             assertEquals("file:///project", requestedDirectory)
             assertEquals("sgk", requestedPrefix)
             assertEquals(listOf("settings.gradle.kts"), candidates.map(TerminalCompletionCandidate::replacementText))
+        }
+
+    @Test
+    fun `applies directory filtering before the final candidate limit`() =
+        runBlocking {
+            val queryAwareSource =
+                TerminalCompletionSources.fuzzyPath(
+                    sourceId = "query-aware-project-file",
+                    entriesProvider =
+                        TerminalFuzzyPathProvider { _, _ ->
+                            buildList {
+                                repeat(300) { index -> add(TerminalFuzzyPathEntry("files/match-$index.kt", false)) }
+                                add(TerminalFuzzyPathEntry("matching-directory", true))
+                            }
+                        },
+                )
+
+            assertEquals(
+                listOf("matching-directory/"),
+                queryAwareSource.complete(request("cd match")).map(TerminalCompletionCandidate::replacementText),
+            )
         }
 
     @Test
@@ -90,12 +120,15 @@ class FuzzyPathCompletionSourceTest {
         }
 
     @Test
-    fun `can opt into an empty prefix for a small context-specific path snapshot`() =
+    fun `can opt into an empty prefix for a small context-specific provider`() =
         runBlocking {
             val statusSource =
                 TerminalCompletionSources.fuzzyPath(
                     sourceId = "git-status-path",
-                    entriesProvider = { _ -> listOf(TerminalFuzzyPathEntry("src/Changed.kt", isDirectory = false)) },
+                    entriesProvider =
+                        TerminalFuzzyPathProvider { _, _ ->
+                            listOf(TerminalFuzzyPathEntry("src/Changed.kt", isDirectory = false))
+                        },
                     requiresNonEmptyPrefix = false,
                     allowedCommandNames = setOf("add", "restore", "rm", "diff"),
                 )

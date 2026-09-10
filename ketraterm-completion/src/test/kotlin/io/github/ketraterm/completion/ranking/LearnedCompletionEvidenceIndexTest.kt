@@ -15,108 +15,78 @@
  */
 package io.github.ketraterm.completion.ranking
 
-import io.github.ketraterm.completion.api.TerminalCompletionRequest
-import io.github.ketraterm.completion.api.TerminalShellCapabilities
 import io.github.ketraterm.completion.api.TerminalShellSyntax
-import io.github.ketraterm.completion.commandline.TerminalCommandLineTokenizer
 import io.github.ketraterm.completion.internal.CompletionLearningContextKey
 import io.github.ketraterm.completion.internal.CompletionLearningIndexCache
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStats
-import io.github.ketraterm.completion.model.TerminalCommandCompletionStatsSnapshot
-import io.github.ketraterm.completion.model.TerminalCommandSpecs
+import io.github.ketraterm.completion.internal.terminalCompletionRankingIdentity
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
+import io.github.ketraterm.completion.testing.commandLearning
+import io.github.ketraterm.completion.testing.learningSnapshot
 import kotlin.test.Test
-import kotlin.test.assertNotSame
-import kotlin.test.assertSame
+import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class LearnedCompletionEvidenceIndexTest {
     @Test
-    fun `textual path variants merge counters and retain newest timestamp`() {
-        val resolver = TerminalCompletionOutcomeKeyResolver(TerminalCommandSpecs.defaults())
-        val snapshot =
-            TerminalCommandCompletionStatsSnapshot(
-                commandStats =
-                    listOf(
-                        stats("cd build", lastUsedEpochMillis = NOW - FORTY_DAYS),
-                        stats("cd build/", lastUsedEpochMillis = NOW),
-                    ),
-            )
-        val index = LearnedCompletionEvidenceIndex.build(snapshot, TerminalShellSyntax.POSIX, resolver)
-        val tokens = TerminalCommandLineTokenizer.parse("cd build", "cd build".length, TerminalShellSyntax.POSIX).tokens
-        val key = requireNotNull(resolver.learnedKey(tokens, 1, pathAware = true))
+    fun `empty evidence has a zero adjustment`() {
+        val index = CompletionLearningIndexCache().indexesFor(TerminalCompletionLearningSnapshot.EMPTY, TerminalShellSyntax.POSIX).evidence
 
-        val adjustment = index.exactAdjustment(key, CompletionLearningContextKey.from(request()), NOW)
-        assertTrue(adjustment > 0)
-    }
-
-    @Test
-    fun `cache shares one compiled learning view until snapshot identity changes`() {
-        val specs = TerminalCommandSpecs.defaults()
-        val snapshot = TerminalCommandCompletionStatsSnapshot.EMPTY
-        val cache = CompletionLearningIndexCache()
-
-        val firstPosix = cache.indexesFor(snapshot, TerminalShellSyntax.POSIX, specs)
-
-        assertSame(firstPosix, cache.indexesFor(snapshot, TerminalShellSyntax.POSIX, specs.toList()))
-        assertNotSame(firstPosix, cache.indexesFor(snapshot, TerminalShellSyntax.POWERSHELL, specs))
-        assertNotSame(
-            firstPosix,
-            cache.indexesFor(TerminalCommandCompletionStatsSnapshot(), TerminalShellSyntax.POSIX, specs),
+        assertEquals(
+            0,
+            index.adjustment(
+                ResolvedCompletionOutcome(groupKey = listOf("git", "status"), exactCommandLine = "git status"),
+                CompletionLearningContextKey.of(null, null),
+                NOW,
+            ),
         )
     }
 
     @Test
     fun `exact evidence prefers directory context over profile context`() {
-        val resolver = TerminalCompletionOutcomeKeyResolver(TerminalCommandSpecs.defaults())
         val snapshot =
-            TerminalCommandCompletionStatsSnapshot(
-                commandStats =
-                    listOf(
-                        TerminalCommandCompletionStats(
-                            commandLine = "git status",
-                            profileId = "profile",
-                            dismissedCount = 100,
-                        ),
-                        TerminalCommandCompletionStats(
-                            commandLine = "git status",
-                            workingDirectoryUri = "file:///repo",
-                            acceptedCount = 10,
-                        ),
-                    ),
+            learningSnapshot(
+                commandLearning(commandLine = "git status", profileId = "profile", dismissedCount = 100),
+                commandLearning(commandLine = "git status", workingDirectoryUri = "file:///repo", acceptedCount = 10),
             )
-        val index = LearnedCompletionEvidenceIndex.build(snapshot, TerminalShellSyntax.POSIX, resolver)
-        val tokens = TerminalCommandLineTokenizer.parse("git status", "git status".length, TerminalShellSyntax.POSIX).tokens
-        val key = requireNotNull(resolver.learnedKey(tokens, -1, pathAware = false))
+        val index = CompletionLearningIndexCache().indexesFor(snapshot, TerminalShellSyntax.POSIX).evidence
 
-        val adjustment = index.exactAdjustment(key, CompletionLearningContextKey.from(request()), NOW)
+        val adjustment =
+            index.exactAdjustment(
+                terminalCompletionRankingIdentity("git status"),
+                CompletionLearningContextKey.of("profile", "file:///repo/"),
+                NOW,
+            )
 
         assertTrue(adjustment > 0)
     }
 
-    private fun stats(
-        commandLine: String,
-        lastUsedEpochMillis: Long,
-    ): TerminalCommandCompletionStats =
-        TerminalCommandCompletionStats(
-            commandLine = commandLine,
-            profileId = "profile",
-            workingDirectoryUri = "file:///repo",
-            useCount = 12,
-            successCount = 5,
-            lastUsedEpochMillis = lastUsedEpochMillis,
-        )
+    @Test
+    fun `exact evidence keeps case-distinct command arguments separate`() {
+        val snapshot =
+            learningSnapshot(
+                commandLearning(commandLine = "cat Foo", acceptedCount = 10),
+                commandLearning(commandLine = "cat foo", dismissedCount = 10),
+            )
+        val index = CompletionLearningIndexCache().indexesFor(snapshot, TerminalShellSyntax.POSIX).evidence
 
-    private fun request(): TerminalCompletionRequest =
-        TerminalCompletionRequest(
-            commandLine = "cd ",
-            cursorOffset = 3,
-            profileId = "profile",
-            workingDirectoryUri = "file:///repo/",
-            shellCapabilities = TerminalShellCapabilities.POSIX,
-        )
+        val upperAdjustment =
+            index.exactAdjustment(
+                terminalCompletionRankingIdentity("cat Foo"),
+                CompletionLearningContextKey.of(null, null),
+                NOW,
+            )
+        val lowerAdjustment =
+            index.exactAdjustment(
+                terminalCompletionRankingIdentity("cat foo"),
+                CompletionLearningContextKey.of(null, null),
+                NOW,
+            )
+
+        assertTrue(upperAdjustment > 0)
+        assertTrue(lowerAdjustment < 0)
+    }
 
     private companion object {
         private const val NOW = 2_000_000_000_000L
-        private const val FORTY_DAYS = 40L * 24L * 60L * 60L * 1_000L
     }
 }

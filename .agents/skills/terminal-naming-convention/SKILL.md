@@ -1,55 +1,30 @@
 ---
 name: terminal-naming-convention
-description: Naming conventions and file layout policy for JVM Terminal (KetraTerm) codebase. Use when creating new classes, renaming files, adding public APIs, application components, or internal adapters.
+description: Use when creating or renaming classes/files, introducing a public API, or choosing names for new application components and adapters. Do not invoke for ordinary edits that preserve existing names.
 ---
 
-# JVM Terminal Naming Conventions
+# KetraTerm Naming
 
-This guide defines the class and file naming conventions to preserve both public API clarity and clean internal module structures.
+Prefer established vocabulary in the owning module. Naming consistency serves
+API clarity; it is not a reason to churn correct existing code.
 
-## 1. Public Cross-Module APIs
-Public classes and interfaces that represent primary cross-module abstractions must remain explicit and recognizable. Use the `Terminal*` domain prefix to prevent name collisions (e.g., with standard JDK IO classes like `Reader` and `Writer`) and ensure clarity in user imports, documentation, and IDE autocompletion.
-- *Examples*: `TerminalBuffer`, `TerminalSession`, `TerminalWorkspace`, `TerminalReader`, `TerminalWriter`, `TerminalResponseChannel`, `TerminalInputEncoder`, `TerminalInputPolicy`.
-- *Reasoning*: A generic class name like `Session` or `Writer` is too ambiguous when imported into an external codebase.
+## Stable conventions
 
----
+- Cross-module terminal abstractions generally use `Terminal*`, such as
+  `TerminalSession` or `TerminalBuffer`.
+- Strong module/domain qualifiers replace `Terminal` when clearer:
+  `Swing*` for reusable Swing APIs, `Pty*` for PTY primitives, `Cell*` for
+  cell styling, and `Host*` for integration metadata or policy.
+- Reserve `KetraTerm*` for product/application entry points and branding.
+- Internal types use the shortest unambiguous local name. Use `Default` or
+  `Impl` only when it truthfully distinguishes an implementation.
+- Preserve an established public factory or internal name unless the requested
+  change materially improves ownership or clarity.
+- Match a file name to its primary top-level type.
 
-## 2. Module-Specific Public APIs (Distinguishing Prefixes)
-When a module has a strong distinguishing prefix, use it instead of the generic `Terminal` prefix to avoid verbosity and redundant stuttering.
-- **Swing UI (`ketraterm-ui-swing`)**: Use the `Swing*` prefix.
-  - *Yes*: `SwingTerminal`, `SwingHostServices`, `SwingSettings`, `SwingMetrics`.
-  - *No*: `SwingTerminal`, `SwingSettings`, `SwingMetrics`.
-- **PTY Processes (`ketraterm-pty`)**: Use the `Pty*` prefix.
-  - *Yes*: `PtyOptions`, `PtyEventListener`, `PtyConnector`, `PtyConnectors`.
-  - *No*: `PtyOptions`, `PtyEventListener`, `TerminalSessions` (as a PTY factory).
-  - *Note*: High-level public session creation should go through `TerminalSessions.localPty(...)` to provide a single, unified factory entry-point rather than exposing local PTY factories.
-- **Cell Styling (`ketraterm-core`)**: Use the `Cell*` prefix.
-  - *Yes*: `CellAttributes`, `CellColor`, `CellColorKind`.
-  - *No*: `TerminalAttributes`, `TerminalColor`, `TerminalColorKind`.
+## Rename checklist
 
----
-
-## 3. Host Bridge Layer
-Use the `Host*` prefix for parser-to-core host metadata and policy APIs to keep the mapping interface clear.
-- *Yes*: `HostCommandAdapter`, `HostEventSink`, `HostPolicy`.
-- *No*: `TerminalHostEventSink`, `TerminalHostPolicy`.
-
----
-
-## 4. Product/Application Layer
-Use the `KetraTerm*` prefix only for runnable applications, shell wrappers, or look-and-feel classes. Do not use it for library-level models or parsers.
-- *Yes*: `KetraTermApp`, `KetraTermLookAndFeel`, `KetraTermLauncher`.
-- *No*: `KetraTermBuffer`, `KetraTermParser`, `KetraTermSession`.
-
----
-
-## 5. Internal Implementations
-Internal classes, private managers, and helper components should avoid the redundant `Terminal` prefix. They should rely on standard implementation conventions:
-- Use the `Impl` suffix or a context descriptor for interface implementations:
-  - *Yes*: `WriterImpl` or `BufferTerminalWriter`, `InspectorImpl` or `BufferInspector`.
-  - *No*: `BufferWriter`, `BufferInspector`.
-- Use the `Default` prefix for default implementations of input or transport contracts:
-  - *Yes*: `DefaultInputEncoder`.
-  - *No*: `DefaultTerminalInputEncoder`.
-- Use domain-descriptive internal names:
-  - *Examples*: `SessionHostEventBridge`, `FixedInputState`.
+Before renaming, inspect nearby names and all usages. Update the declaration,
+file, tests, KDoc, imports, reflection/configuration strings, and public
+documentation together. Do not add deprecated aliases or compatibility wrappers
+unless the user explicitly requires a migration path.

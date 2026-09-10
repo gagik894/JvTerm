@@ -16,6 +16,8 @@
 package io.github.ketraterm.completion.host
 
 import java.net.URI
+import java.net.URISyntaxException
+import java.nio.file.FileSystemNotFoundException
 import java.nio.file.Path
 import java.nio.file.Paths
 
@@ -25,7 +27,7 @@ object TerminalLocalFileUriResolver {
      * Resolves [value] without reinterpreting remote file authorities locally.
      *
      * Empty authorities and `localhost` are accepted. Other schemes,
-     * authorities, malformed values, and missing paths return `null`.
+     * authorities, and malformed values return `null`.
      *
      * @param value candidate working-directory URI.
      * @return normalized absolute local path, or `null` when unsupported.
@@ -40,7 +42,11 @@ object TerminalLocalFileUriResolver {
             if (!authority.isNullOrEmpty() && !authority.equals("localhost", ignoreCase = true)) return null
             val localUri = URI("file", null, uri.path ?: return null, null)
             Paths.get(localUri).toAbsolutePath().normalize()
-        } catch (_: Exception) {
+        } catch (_: URISyntaxException) {
+            null
+        } catch (_: IllegalArgumentException) {
+            null
+        } catch (_: FileSystemNotFoundException) {
             null
         }
     }

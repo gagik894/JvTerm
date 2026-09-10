@@ -62,11 +62,29 @@ class IntellijProjectDirectoryScannerTest : BasePlatformTestCase() {
                 project = project,
                 virtualFileResolver = { directory },
                 maxVisitedEntries = 3,
-                maxMatchingEntries = 256,
             )
 
         val entries = runBlocking { scanner.scan(Path.of("project-content"), "") }
 
         assertTrue(entries.size <= 3)
+    }
+
+    /** Verifies matching entries are bounded only by the independent VFS visit budget. */
+    fun testProjectContentDoesNotApplyCandidateLimit() {
+        val directory = myFixture.tempDirFixture.findOrCreateDir("uncapped-completion")
+        repeat(257) { index ->
+            myFixture.tempDirFixture.createFile("uncapped-completion/entry-file-${index.toString().padStart(3, '0')}")
+        }
+        myFixture.tempDirFixture.findOrCreateDir("uncapped-completion/entry-target-directory")
+        val scanner =
+            IntellijProjectDirectoryScanner(
+                project = project,
+                virtualFileResolver = { directory },
+            )
+
+        val entries = runBlocking { scanner.scan(Path.of("project-content"), "entry") }
+
+        assertEquals(258, entries.size)
+        assertTrue(entries.contains(TerminalFileEntry("entry-target-directory", isDirectory = true)))
     }
 }

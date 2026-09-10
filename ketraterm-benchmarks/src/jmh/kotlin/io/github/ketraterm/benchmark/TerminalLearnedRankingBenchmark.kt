@@ -16,7 +16,9 @@
 package io.github.ketraterm.benchmark
 
 import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.completion.model.*
+import io.github.ketraterm.completion.model.TerminalCommandSpecs
+import io.github.ketraterm.completion.model.TerminalCompletionFeedbackKind
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
 import kotlinx.coroutines.flow.last
 import kotlinx.coroutines.runBlocking
 import org.openjdk.jmh.annotations.*
@@ -36,17 +38,31 @@ open class TerminalLearnedRankingBenchmark {
     private lateinit var learnedRequest: TerminalCompletionRequest
     private lateinit var hostileMergeRequest: TerminalCompletionRequest
     private lateinit var statsSource: TerminalCompletionLearningStore
+    private lateinit var mutationStatsSource: TerminalCompletionLearningStore
+    private lateinit var mutationEngine: TerminalCompletionEngine
+    private var mutationEpochMillis = STATS_CAPACITY.toLong()
 
     @Setup
     open fun setUp() {
+        mutationEpochMillis = STATS_CAPACITY.toLong()
         val commandSpecs = TerminalCommandSpecs.defaults()
-        statsSource = TerminalCompletionLearningStore(capacity = STATS_CAPACITY, commandSpecs = commandSpecs)
-        statsSource.replaceSnapshot(fullLearnedSnapshot())
+        val fullSnapshot = fullLearnedSnapshot()
+        statsSource = TerminalCompletionLearningStore(capacity = STATS_CAPACITY)
+        statsSource.mergeSnapshot(fullSnapshot)
         learnedEngine =
             TerminalCompletionEngines.fromSources(
                 sources = emptyList(),
                 commandSpecs = commandSpecs,
                 learningStore = statsSource,
+            )
+
+        mutationStatsSource = TerminalCompletionLearningStore(capacity = STATS_CAPACITY)
+        mutationStatsSource.mergeSnapshot(fullSnapshot)
+        mutationEngine =
+            TerminalCompletionEngines.fromSources(
+                sources = emptyList(),
+                commandSpecs = commandSpecs,
+                learningStore = mutationStatsSource,
             )
         learnedRequest =
             TerminalCompletionRequest(
@@ -90,51 +106,50 @@ open class TerminalLearnedRankingBenchmark {
         blackhole.consume(statsSource.snapshot())
     }
 
-    private fun fullLearnedSnapshot(): TerminalCommandCompletionStatsSnapshot {
-        val shapeStats = ArrayList<TerminalCommandShapeStats>(STATS_CAPACITY)
-        val feedbackStats = ArrayList<TerminalCompletionFeedbackStats>(STATS_CAPACITY)
+    /** Measures one mutation followed by the first request that compiles its new full learned view. */
+    @Benchmark
+    open fun mutateThenCompleteAgainstFullLearnedSnapshot(blackhole: Blackhole) {
+        mutationEpochMillis++
+        mutationStatsSource.recordCommandResult(
+            commandLine = "git status",
+            successful = true,
+            profileId = TARGET_PROFILE,
+            workingDirectoryUri = TARGET_DIRECTORY,
+            usedAtEpochMillis = mutationEpochMillis,
+        )
+        blackhole.consume(runBlocking { mutationEngine.completions(learnedRequest).last() })
+    }
+
+    private fun fullLearnedSnapshot(): TerminalCompletionLearningSnapshot {
+        val learningStore = TerminalCompletionLearningStore(capacity = STATS_CAPACITY)
         var index = 0
         while (index < STATS_CAPACITY - 1) {
-            shapeStats +=
-                TerminalCommandShapeStats(
-                    shape = TerminalCommandLineShape(executable = "tool-$index"),
-                    profileId = "profile-$index",
-                    workingDirectoryUri = "file:///workspace/$index",
-                    successCount = 1,
-                    lastUsedEpochMillis = index.toLong(),
-                )
-            feedbackStats +=
-                TerminalCompletionFeedbackStats(
-                    source = "provider-$index",
-                    candidateKind = TerminalCompletionCandidateKind.SUBCOMMAND,
-                    profileId = "profile-$index",
-                    workingDirectoryUri = "file:///workspace/$index",
-                    acceptedCount = 1,
-                    lastUsedEpochMillis = index.toLong(),
-                )
+            learningStore.recordCommandResult(
+                commandLine = "tool-$index command",
+                successful = true,
+                profileId = "profile-$index",
+                workingDirectoryUri = "file:///workspace/$index",
+                usedAtEpochMillis = index.toLong(),
+            )
             index++
         }
-        shapeStats +=
-            TerminalCommandShapeStats(
-                shape = TerminalCommandLineShape(executable = "git", subcommands = listOf("status")),
+        repeat(8) {
+            learningStore.recordCommandResult(
+                commandLine = "git status",
+                successful = true,
                 profileId = TARGET_PROFILE,
                 workingDirectoryUri = TARGET_DIRECTORY,
-                acceptedCount = 8,
-                lastUsedEpochMillis = STATS_CAPACITY.toLong(),
+                usedAtEpochMillis = STATS_CAPACITY.toLong(),
             )
-        feedbackStats +=
-            TerminalCompletionFeedbackStats(
-                source = "spec",
-                candidateKind = TerminalCompletionCandidateKind.SUBCOMMAND,
+            learningStore.recordSuggestionFeedback(
+                commandLine = "git status",
+                feedback = TerminalCompletionFeedbackKind.ACCEPTED,
                 profileId = TARGET_PROFILE,
                 workingDirectoryUri = TARGET_DIRECTORY,
-                acceptedCount = 8,
-                lastUsedEpochMillis = STATS_CAPACITY.toLong(),
+                feedbackAtEpochMillis = STATS_CAPACITY.toLong(),
             )
-        return TerminalCommandCompletionStatsSnapshot(
-            shapeStats = shapeStats,
-            feedbackStats = feedbackStats,
-        )
+        }
+        return learningStore.snapshot()
     }
 
     private fun fixedProvider(providerIndex: Int): TerminalCompletionSource {

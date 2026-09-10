@@ -315,6 +315,19 @@ class SwingSettingsTest {
     }
 
     @Test
+    fun terminalThemeIdsRoundTripAndAcceptLegacyNames() {
+        for (theme in TerminalTheme.entries) {
+            assertEquals(theme, TerminalTheme.fromId(theme.id))
+            assertEquals(theme, TerminalTheme.fromId(theme.name))
+            assertEquals(theme, TerminalTheme.fromId(theme.name.lowercase()))
+        }
+        assertEquals("one-dark", TerminalTheme.ONE_DARK.id)
+        assertEquals("tokyo-night", TerminalTheme.TOKYO_NIGHT.id)
+        assertEquals(null, TerminalTheme.fromId("intellij"))
+        assertEquals(null, TerminalTheme.fromId("unknown"))
+    }
+
+    @Test
     fun terminalThemesRemainPaletteFactoriesForHosts() {
         val palette = TerminalTheme.ONE_DARK.createPalette()
 

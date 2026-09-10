@@ -16,9 +16,8 @@
 package io.github.ketraterm.completion.source
 
 import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.completion.internal.TERMINAL_COMPLETION_CANDIDATE_ORDER
-import io.github.ketraterm.completion.internal.boundedTo
-import io.github.ketraterm.completion.internal.matchesCompletablePrefix
+import io.github.ketraterm.completion.internal.BoundedCompletionCandidateCollector
+import io.github.ketraterm.completion.matching.CompletionMatcher
 import io.github.ketraterm.completion.model.TerminalCompletionDomainValue
 import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 
@@ -38,7 +37,8 @@ import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
 internal class ValueDomainCompletionSource(
     private val domain: TerminalCompletionValueDomain,
     private val sourceId: String,
-    private val valuesProvider: suspend () -> List<TerminalCompletionDomainValue>,
+    private val valuesProvider:
+        suspend (TerminalCompletionRequest, TerminalCompletionContext) -> List<TerminalCompletionDomainValue>,
     private val allowedCommandNames: Set<String>,
 ) : TerminalCompletionSource {
     init {
@@ -61,13 +61,14 @@ internal class ValueDomainCompletionSource(
         context: TerminalCompletionContext,
         limit: Int,
     ): List<TerminalCompletionCandidate> {
+        require(limit > 0) { "limit must be > 0, was $limit" }
         if (context.expectedValueDomain != domain ||
             (allowedCommandNames.isNotEmpty() && context.currentCommand?.name !in allowedCommandNames)
         ) {
             return emptyList()
         }
 
-        val values = valuesProvider()
+        val values = valuesProvider(request, context)
         return projectValueDomainCandidates(request, context, domain, sourceId, values, limit)
     }
 }
@@ -83,17 +84,34 @@ internal fun projectValueDomainCandidates(
 ): List<TerminalCompletionCandidate> {
     if (context.expectedValueDomain != domain || values.isEmpty()) return emptyList()
     val prefix = context.activePrefix
-    val candidates = ArrayList<TerminalCompletionCandidate>(minOf(values.size, limit))
+    val candidates = BoundedCompletionCandidateCollector(limit)
     for (index in values.indices) {
         val value = values[index]
-        if (!matchesCompletablePrefix(value.value, prefix)) continue
+        if (prefix.isNotEmpty() && value.value.equals(prefix, ignoreCase = true)) continue
+        val match = CompletionMatcher.match(value.value, prefix) ?: continue
+        if (!ShellReplacementText.canEncode(value.value, context.activeTokenQuote, request.shellCapabilities.quoting)) {
+            continue
+        }
+        val candidateScore =
+            match.sourceScore(
+                baseScore = VALUE_DOMAIN_BASE_SCORE + value.scoreAdjustment,
+                query = prefix,
+                orderIndex = index,
+            )
+        if (!candidates.shouldMaterialize(candidateScore)) continue
+        val displayMatchRanges =
+            if (value.displayText == value.value) {
+                match.matchedRanges
+            } else {
+                CompletionMatcher.match(value.displayText, prefix)?.matchedRanges ?: TerminalCompletionMatchRanges.EMPTY
+            }
         val replacement =
             ShellReplacementText.encode(
                 value = value.value,
                 activeTokenQuote = context.activeTokenQuote,
                 policy = request.shellCapabilities.quoting,
             ) ?: continue
-        candidates +=
+        candidates.offer(
             TerminalCompletionCandidate(
                 replacementText = replacement,
                 replacementStartOffset = context.replacementStartOffset,
@@ -102,29 +120,13 @@ internal fun projectValueDomainCandidates(
                 detail = value.detail,
                 source = sourceId,
                 kind = TerminalCompletionCandidateKind.ARGUMENT,
-                score = valueDomainScore(value, prefix, index),
+                score = candidateScore,
                 valueDomain = domain,
-            )
+                matchedRanges = displayMatchRanges,
+            ),
+        )
     }
-    candidates.sortWith(TERMINAL_COMPLETION_CANDIDATE_ORDER)
-    return candidates.boundedTo(limit)
-}
-
-private fun valueDomainScore(
-    value: TerminalCompletionDomainValue,
-    prefix: String,
-    orderIndex: Int,
-): Int {
-    val caseBonus =
-        if (prefix.isEmpty()) {
-            0
-        } else if (value.value.startsWith(prefix)) {
-            40
-        } else {
-            20
-        }
-    val lengthPenalty = value.value.length - prefix.length
-    return VALUE_DOMAIN_BASE_SCORE + caseBonus - lengthPenalty - orderIndex + value.scoreAdjustment
+    return candidates.finish()
 }
 
 private const val VALUE_DOMAIN_BASE_SCORE = 260

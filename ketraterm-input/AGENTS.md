@@ -4,11 +4,9 @@
 paste, focus, and mouse events into bytes written to the terminal host input
 stream.
 
-Read `docs/ketraterm-input-contract.md` before changing public input behavior.
-
-Keyboard, paste, focus, and cell-coordinate mouse encoding are implemented.
-Richer keyboard protocols and pixel-coordinate mouse reporting remain future
-work.
+Read `docs/terminal-input-contract.md` before changing public input behavior.
+Use the canonical feature and gap maps for current capability status; do not
+maintain a second inventory here.
 
 ## Boundary
 
@@ -43,15 +41,10 @@ responses.
 For mode-dependent behavior, input should read packed mode bits once per event
 from core's input-readable API and then encode from that stable value.
 
-## Current Dependency Note
-
-The target plan refers to a future `:ketraterm-core-api` module. This repository
-currently exposes core API types from `:ketraterm-core`, so the scaffold depends
-on `:ketraterm-core` until that API split exists.
-
 ## Implementation Rules
 
-- Add `TerminalHostOutput` to `:ketraterm-protocol` before adding encoders.
+- Write host-bound bytes only through `TerminalHostOutput` from
+  `:ketraterm-protocol`.
 - Keep `KeyboardEncoder` stateless with respect to modes; pass packed mode bits
   into each encode call.
 - Do not add a `TerminalInputModeSnapshot` data class.

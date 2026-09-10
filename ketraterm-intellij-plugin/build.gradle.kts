@@ -101,6 +101,8 @@ dependencies {
         // from separately resolved platform modules rather than the plugin JARs.
         bundledModule("intellij.platform.vcs.dvcs")
         bundledModule("intellij.platform.vcs.dvcs.impl")
+        bundledModule("intellij.platform.vcs.log")
+        bundledModule("intellij.platform.vcs.log.graph")
         bundledModule("intellij.gradle")
         bundledModule("intellij.gradle.settings")
         testFramework(TestFrameworkType.Platform)

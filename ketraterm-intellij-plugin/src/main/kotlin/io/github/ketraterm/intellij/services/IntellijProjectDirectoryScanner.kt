@@ -42,23 +42,19 @@ import java.nio.file.Path
  * @property fallback scanner used for directories outside indexed project content.
  * @property virtualFileResolver resolver for an existing VFS directory snapshot.
  * @property maxVisitedEntries positive cap on inspected VFS children.
- * @property maxMatchingEntries positive cap on retained matching children.
- * @throws IllegalArgumentException if [maxVisitedEntries] or
- * [maxMatchingEntries] is not positive.
+ * @throws IllegalArgumentException if [maxVisitedEntries] is not positive.
  */
 internal class IntellijProjectDirectoryScanner(
     private val project: Project,
     private val fallback: TerminalDirectoryScanner = TerminalBoundedDirectoryScanner(),
     private val virtualFileResolver: (Path) -> VirtualFile? = VirtualFileManager.getInstance()::findFileByNioPath,
     private val maxVisitedEntries: Int = DEFAULT_MAX_VISITED_ENTRIES,
-    private val maxMatchingEntries: Int = DEFAULT_MAX_MATCHING_ENTRIES,
 ) : TerminalDirectoryScanner {
     @Volatile
     private var cachedSnapshot: VfsDirectorySnapshot? = null
 
     init {
         require(maxVisitedEntries > 0) { "maxVisitedEntries must be > 0, was $maxVisitedEntries" }
-        require(maxMatchingEntries > 0) { "maxMatchingEntries must be > 0, was $maxMatchingEntries" }
     }
 
     /**
@@ -78,7 +74,7 @@ internal class IntellijProjectDirectoryScanner(
         cancellationContext.ensureActive()
         if (project.isDisposed) return emptyList()
         val projectEntries =
-            readAction<List<TerminalFileEntry>?> {
+            readAction {
                 cancellationContext.ensureActive()
                 ProgressManager.checkCanceled()
                 if (project.isDisposed) return@readAction emptyList()
@@ -94,7 +90,7 @@ internal class IntellijProjectDirectoryScanner(
                         projectRootsModificationCount = ProjectRootManager.getInstance(project).modificationCount,
                     )
                 val cached = cachedSnapshot
-                if (cached?.version == version) return@readAction cached.entries.matching(entryNamePrefix, maxMatchingEntries)
+                if (cached?.version == version) return@readAction cached.entries.matching(entryNamePrefix)
                 val entries = ArrayList<TerminalFileEntry>(minOf(virtualDirectory.children.size, maxVisitedEntries))
                 val children = virtualDirectory.children
                 val limit = minOf(children.size, maxVisitedEntries)
@@ -114,14 +110,13 @@ internal class IntellijProjectDirectoryScanner(
                 if (children.size <= maxVisitedEntries && finalVersion == version) {
                     cachedSnapshot = VfsDirectorySnapshot(version, snapshotEntries)
                 }
-                snapshotEntries.matching(entryNamePrefix, maxMatchingEntries)
+                snapshotEntries.matching(entryNamePrefix)
             }
         return projectEntries ?: fallback.scan(directory, entryNamePrefix)
     }
 
     private companion object {
         private const val DEFAULT_MAX_VISITED_ENTRIES = 8_192
-        private const val DEFAULT_MAX_MATCHING_ENTRIES = 256
     }
 
     private data class VfsDirectoryVersion(

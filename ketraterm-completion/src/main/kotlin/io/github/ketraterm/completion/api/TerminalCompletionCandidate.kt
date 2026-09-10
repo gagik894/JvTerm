@@ -36,9 +36,6 @@ enum class TerminalCompletionCandidateKind {
 
     /** File-system path candidate. */
     PATH,
-
-    /** Candidate learned from local command history or session MRU. */
-    HISTORY,
 }
 
 /**
@@ -50,7 +47,7 @@ enum class TerminalCompletionCandidateKind {
  * the original request command line.
  * @property replacementEndOffset exclusive UTF-16 replacement end offset in the
  * original request command line.
- * @property source compact source label, such as `spec`, `mru`, or `history`.
+ * @property source compact source label, such as `spec`, `learned`, or `path`.
  * @property kind semantic candidate category.
  * @property displayText primary text shown in suggestion UI.
  * @property detail optional secondary text explaining the candidate.
@@ -59,8 +56,11 @@ enum class TerminalCompletionCandidateKind {
  * are better in either scope.
  * @property valueDomain dynamic value domain for argument candidates supplied by
  * host-owned providers.
- * @throws IllegalArgumentException if text/source fields are empty or replacement
- * offsets do not form a nonnegative ordered range.
+ * @property matchedRanges immutable ordered UTF-16 intervals relative to
+ * [displayText] used by UI components to highlight matching fragments.
+ * @throws IllegalArgumentException if text/source fields are empty, replacement
+ * offsets do not form a nonnegative ordered range, or [matchedRanges] do not
+ * address [displayText].
  */
 data class TerminalCompletionCandidate
     @JvmOverloads
@@ -74,6 +74,7 @@ data class TerminalCompletionCandidate
         val detail: String = "",
         val score: Int = 0,
         val valueDomain: TerminalCompletionValueDomain = TerminalCompletionValueDomain.NONE,
+        val matchedRanges: TerminalCompletionMatchRanges = TerminalCompletionMatchRanges.EMPTY,
     ) {
         init {
             require(replacementText.isNotEmpty()) { "replacementText must not be empty" }
@@ -85,5 +86,6 @@ data class TerminalCompletionCandidate
             require(replacementEndOffset >= replacementStartOffset) {
                 "replacementEndOffset must be >= replacementStartOffset, was $replacementEndOffset"
             }
+            matchedRanges.requireValidFor(displayText)
         }
     }

@@ -16,7 +16,12 @@
 package io.github.ketraterm.completion.engine
 
 import io.github.ketraterm.completion.api.*
-import io.github.ketraterm.completion.model.*
+import io.github.ketraterm.completion.model.TerminalCommandSpec
+import io.github.ketraterm.completion.model.TerminalCommandSpecs
+import io.github.ketraterm.completion.model.TerminalCompletionLearningSnapshot
+import io.github.ketraterm.completion.model.TerminalCompletionValueDomain
+import io.github.ketraterm.completion.testing.commandLearning
+import io.github.ketraterm.completion.testing.learningSnapshot
 import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,13 +29,13 @@ import kotlin.test.assertTrue
 
 class GlobalEvidenceFusionCompletionEngineTest {
     @Test
-    fun `mru and path outcomes fuse across quoting and trailing separator`() =
+    fun `learned and path outcomes fuse across quoting and trailing separator`() =
         runBlocking {
             val engine =
                 engine(
                     sources =
                         listOf(
-                            entry(source(candidate("cd build", 0, 3, "mru", TerminalCompletionCandidateKind.HISTORY)), 8),
+                            entry(source(candidate("cd build", 0, 3, "learned", TerminalCompletionCandidateKind.PATH)), 8),
                             entry(source(candidate("\"build/\"", 3, 3, "path", TerminalCompletionCandidateKind.PATH)), 12),
                         ),
                 )
@@ -49,7 +54,10 @@ class GlobalEvidenceFusionCompletionEngineTest {
                 engine(
                     sources =
                         listOf(
-                            entry(source(candidate("cd IdeaProjects/KetraTerm", 0, 2, "mru", TerminalCompletionCandidateKind.HISTORY)), 8),
+                            entry(
+                                source(candidate("cd IdeaProjects/KetraTerm", 0, 2, "learned", TerminalCompletionCandidateKind.PATH)),
+                                8,
+                            ),
                             entry(
                                 source(
                                     candidate(
@@ -57,7 +65,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                                         0,
                                         2,
                                         "learned",
-                                        TerminalCompletionCandidateKind.HISTORY,
+                                        TerminalCompletionCandidateKind.PATH,
                                     ),
                                 ),
                                 8,
@@ -72,31 +80,24 @@ class GlobalEvidenceFusionCompletionEngineTest {
         }
 
     @Test
-    fun `session and persisted copies produce one learned directory candidate`() =
+    fun `learning store produces one learned directory candidate without a provider source`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "cd IdeaProjects/KetraTerm/",
+                                profileId = "profile",
                                 workingDirectoryUri = "file:///home",
                                 successCount = 4,
                             ),
                         ),
                 )
-            val learningStore = TerminalCompletionLearningStore().apply { replaceSnapshot(snapshot) }
-            val learnedSource =
-                TerminalCompletionSources.sessionMru(
-                    learningStore = learningStore,
-                )
-            learnedSource.recordSuccessfulCommand(
-                commandLine = "cd IdeaProjects/KetraTerm",
-                workingDirectoryUri = "file:///home",
-            )
+            val learningStore = TerminalCompletionLearningStore().apply { mergeSnapshot(snapshot) }
             val engine =
                 TerminalCompletionEngines.fromSources(
-                    sources = listOf(entry(learnedSource, 8)),
+                    sources = emptyList(),
                     commandSpecs = TerminalCommandSpecs.defaults(),
                     learningStore = learningStore,
                 )
@@ -104,8 +105,8 @@ class GlobalEvidenceFusionCompletionEngineTest {
             val candidates = engine.complete(request("cd ", workingDirectoryUri = "file:///home"))
 
             assertEquals(1, candidates.size)
-            assertEquals("IdeaProjects/KetraTerm", candidates.single().replacementText)
-            assertEquals("mru", candidates.single().source)
+            assertEquals("IdeaProjects/KetraTerm/", candidates.single().replacementText)
+            assertEquals("learned", candidates.single().source)
             assertEquals(TerminalCompletionCandidateKind.PATH, candidates.single().kind)
         }
 
@@ -130,11 +131,11 @@ class GlobalEvidenceFusionCompletionEngineTest {
     fun `accepted exact outcome promotes matching path candidate`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
-                                commandLine = "cd build",
+                            commandLearning(
+                                commandLine = "cd build/",
                                 profileId = "profile",
                                 workingDirectoryUri = "file:///repo",
                                 acceptedCount = 8,
@@ -155,6 +156,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                             ),
                         ),
                     snapshot = snapshot,
+                    commandSpecs = TerminalCommandSpecs.defaults(),
                 )
 
             val candidates = engine.complete(request("cd ", workingDirectoryUri = "file:///repo"))
@@ -166,11 +168,12 @@ class GlobalEvidenceFusionCompletionEngineTest {
     fun `successful directory history promotes the equivalent path outcome`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "cd build",
+                                profileId = "profile",
                                 workingDirectoryUri = "file:///repo",
                                 useCount = 12,
                                 successCount = 12,
@@ -191,6 +194,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                             ),
                         ),
                     snapshot = snapshot,
+                    commandSpecs = TerminalCommandSpecs.defaults(),
                 ).complete(request("cd "))
 
             assertEquals("build/", candidates.first().replacementText)
@@ -214,8 +218,8 @@ class GlobalEvidenceFusionCompletionEngineTest {
                     "./gradlew :app:test",
                     0,
                     commandLine.length,
-                    "mru",
-                    TerminalCompletionCandidateKind.HISTORY,
+                    "learned",
+                    TerminalCompletionCandidateKind.SUBCOMMAND,
                 )
             val statistical = remembered.copy(source = "command-stats")
             val candidates =
@@ -232,14 +236,14 @@ class GlobalEvidenceFusionCompletionEngineTest {
         }
 
     @Test
-    fun `relative path learning does not cross working directories`() =
+    fun `learned command replay does not cross working directories`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
-                                commandLine = "cd build",
+                            commandLearning(
+                                commandLine = "tool deploy",
                                 profileId = "profile",
                                 workingDirectoryUri = "file:///other",
                                 acceptedCount = 100,
@@ -248,34 +252,21 @@ class GlobalEvidenceFusionCompletionEngineTest {
                             ),
                         ),
                 )
-            val engine =
-                engine(
-                    sources =
-                        listOf(
-                            entry(
-                                source(
-                                    candidate("cache/", 3, 3, "path", TerminalCompletionCandidateKind.PATH, score = 100),
-                                    candidate("build/", 3, 3, "path", TerminalCompletionCandidateKind.PATH, score = 1),
-                                ),
-                                12,
-                            ),
-                        ),
-                    snapshot = snapshot,
-                )
+            val engine = engine(sources = emptyList(), snapshot = snapshot)
 
-            val candidates = engine.complete(request("cd ", workingDirectoryUri = "file:///repo"))
+            val candidates = engine.complete(request("tool d", workingDirectoryUri = "file:///repo"))
 
-            assertEquals("cache/", candidates.first().replacementText)
+            assertTrue(candidates.isEmpty())
         }
 
     @Test
     fun `explicit dismissal lowers one exact outcome`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "git switch main",
                                 dismissedCount = 12,
                                 lastUsedEpochMillis = NOW,
@@ -319,23 +310,25 @@ class GlobalEvidenceFusionCompletionEngineTest {
         }
 
     @Test
-    fun `successful executions help and failed executions hurt`() =
+    fun `nonzero exits contribute usage without a ranking penalty`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "git switch main",
                                 useCount = 10,
                                 successCount = 10,
                                 lastUsedEpochMillis = NOW,
+                                replay = false,
                             ),
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "git switch maint",
                                 useCount = 10,
                                 failureCount = 10,
                                 lastUsedEpochMillis = NOW,
+                                replay = false,
                             ),
                         ),
                 )
@@ -354,17 +347,17 @@ class GlobalEvidenceFusionCompletionEngineTest {
                     snapshot = snapshot,
                 ).complete(request("git switch ma"))
 
-            assertEquals("main", candidates.first().replacementText)
+            assertEquals("maint", candidates.first().replacementText)
         }
 
     @Test
     fun `one learned event cannot overwhelm a stronger semantic context`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "cd remembered",
                                 acceptedCount = 1,
                                 lastUsedEpochMillis = NOW,
@@ -375,10 +368,6 @@ class GlobalEvidenceFusionCompletionEngineTest {
                 engine(
                     sources =
                         listOf(
-                            entry(
-                                source(candidate("cd remembered", 0, 3, "mru", TerminalCompletionCandidateKind.HISTORY)),
-                                8,
-                            ),
                             entry(source(candidate("src/", 3, 3, "path", TerminalCompletionCandidateKind.PATH)), 12),
                         ),
                     snapshot = snapshot,
@@ -389,169 +378,14 @@ class GlobalEvidenceFusionCompletionEngineTest {
         }
 
     @Test
-    fun `exact outcome evidence outweighs lower-weight command shape evidence`() =
-        runBlocking {
-            val statusShape =
-                TerminalCommandLineShape(
-                    executable = "git",
-                    subcommands = listOf("status"),
-                )
-            val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats = listOf(TerminalCommandCompletionStats(commandLine = "git switch main", acceptedCount = 1)),
-                    shapeStats = listOf(TerminalCommandShapeStats(shape = statusShape, acceptedCount = 1)),
-                )
-            val candidates =
-                engine(
-                    sources =
-                        listOf(
-                            entry(
-                                source(
-                                    candidate("git status", 0, 1, "history", TerminalCompletionCandidateKind.HISTORY, score = 100),
-                                    candidate("git switch main", 0, 1, "history", TerminalCompletionCandidateKind.HISTORY, score = 1),
-                                ),
-                                0,
-                            ),
-                        ),
-                    snapshot = snapshot,
-                ).complete(request("g"))
-
-            assertEquals("git switch main", candidates.first().replacementText)
-        }
-
-    @Test
-    fun `provider feedback is source and context specific`() =
-        runBlocking {
-            val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    feedbackStats =
-                        listOf(
-                            TerminalCompletionFeedbackStats(
-                                source = "branches",
-                                candidateKind = TerminalCompletionCandidateKind.ARGUMENT,
-                                profileId = "profile",
-                                acceptedCount = 20,
-                            ),
-                            TerminalCompletionFeedbackStats(
-                                source = "other",
-                                candidateKind = TerminalCompletionCandidateKind.ARGUMENT,
-                                profileId = "profile",
-                                dismissedCount = 20,
-                            ),
-                        ),
-                )
-            val engine =
-                engine(
-                    sources =
-                        listOf(
-                            entry(
-                                source(
-                                    candidate(
-                                        "main",
-                                        11,
-                                        13,
-                                        "branches",
-                                        TerminalCompletionCandidateKind.ARGUMENT,
-                                        domain = TerminalCompletionValueDomain.GIT_BRANCH,
-                                    ),
-                                ),
-                                0,
-                            ),
-                            entry(
-                                source(
-                                    candidate(
-                                        "maint",
-                                        11,
-                                        13,
-                                        "other",
-                                        TerminalCompletionCandidateKind.ARGUMENT,
-                                        domain = TerminalCompletionValueDomain.GIT_BRANCH,
-                                    ),
-                                ),
-                                0,
-                            ),
-                        ),
-                    snapshot = snapshot,
-                )
-
-            assertEquals("main", engine.complete(request("git switch ma")).first().replacementText)
-        }
-
-    @Test
-    fun `provider feedback uses only the most specific matching kind profile and directory`() =
-        runBlocking {
-            val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    feedbackStats =
-                        listOf(
-                            feedback(source = "target", dismissedCount = 100),
-                            feedback(
-                                source = "target",
-                                profileId = "profile",
-                                workingDirectoryUri = "file:///repo",
-                                acceptedCount = 20,
-                            ),
-                            feedback(
-                                source = "target",
-                                candidateKind = TerminalCompletionCandidateKind.COMMAND,
-                                profileId = "profile",
-                                workingDirectoryUri = "file:///repo",
-                                dismissedCount = Int.MAX_VALUE,
-                            ),
-                            feedback(
-                                source = "target",
-                                profileId = "profile",
-                                workingDirectoryUri = "file:///other",
-                                dismissedCount = Int.MAX_VALUE,
-                            ),
-                        ),
-                )
-            val candidates =
-                engine(
-                    sources =
-                        listOf(
-                            entry(
-                                source(
-                                    candidate(
-                                        "maint",
-                                        11,
-                                        13,
-                                        "neutral",
-                                        TerminalCompletionCandidateKind.ARGUMENT,
-                                        domain = TerminalCompletionValueDomain.GIT_BRANCH,
-                                    ),
-                                ),
-                                0,
-                            ),
-                            entry(
-                                source(
-                                    candidate(
-                                        "main",
-                                        11,
-                                        13,
-                                        "target",
-                                        TerminalCompletionCandidateKind.ARGUMENT,
-                                        domain = TerminalCompletionValueDomain.GIT_BRANCH,
-                                    ),
-                                ),
-                                0,
-                            ),
-                        ),
-                    snapshot = snapshot,
-                ).complete(request("git switch ma"))
-
-            assertEquals("main", candidates.first().replacementText)
-        }
-
-    @Test
     fun `recent evidence receives a larger boost than old evidence`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(commandLine = "git switch main", useCount = 1, lastUsedEpochMillis = NOW),
-                            TerminalCommandCompletionStats(
+                            commandLearning(commandLine = "git switch main", useCount = 1, lastUsedEpochMillis = NOW),
+                            commandLearning(
                                 commandLine = "git switch maint",
                                 useCount = 1,
                                 lastUsedEpochMillis =
@@ -599,7 +433,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
             val engine =
                 engine(
                     listOf(
-                        entry(source(candidate("Build/", 3, 3, "mru", TerminalCompletionCandidateKind.PATH)), 0),
+                        entry(source(candidate("Build/", 3, 3, "learned", TerminalCompletionCandidateKind.PATH)), 0),
                         entry(source(candidate("build/", 3, 3, "path", TerminalCompletionCandidateKind.PATH)), 0),
                     ),
                 )
@@ -633,9 +467,9 @@ class GlobalEvidenceFusionCompletionEngineTest {
                     listOf(
                         entry(
                             source(
-                                candidate("tool --alpha --beta one", 0, 1, "one", TerminalCompletionCandidateKind.HISTORY),
-                                candidate("tool --alpha --beta two", 0, 1, "two", TerminalCompletionCandidateKind.HISTORY),
-                                candidate("tool --beta --alpha one", 0, 1, "reordered", TerminalCompletionCandidateKind.HISTORY),
+                                candidate("tool --alpha --beta one", 0, 1, "one", TerminalCompletionCandidateKind.COMMAND),
+                                candidate("tool --alpha --beta two", 0, 1, "two", TerminalCompletionCandidateKind.COMMAND),
+                                candidate("tool --beta --alpha one", 0, 1, "reordered", TerminalCompletionCandidateKind.COMMAND),
                             ),
                             0,
                         ),
@@ -653,7 +487,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                 engine(
                     listOf(
                         entry(
-                            source(candidate("git status", 0, commandLine.length, "history", TerminalCompletionCandidateKind.HISTORY)),
+                            source(candidate("git status", 0, commandLine.length, "learned", TerminalCompletionCandidateKind.SUBCOMMAND)),
                             8,
                         ),
                         entry(
@@ -724,7 +558,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                                     0,
                                     commandLine.length,
                                     "whole-line",
-                                    TerminalCompletionCandidateKind.HISTORY,
+                                    TerminalCompletionCandidateKind.SUBCOMMAND,
                                 ),
                             ),
                             0,
@@ -762,7 +596,7 @@ class GlobalEvidenceFusionCompletionEngineTest {
                                     0,
                                     commandLine.length,
                                     "whole-line",
-                                    TerminalCompletionCandidateKind.HISTORY,
+                                    TerminalCompletionCandidateKind.ARGUMENT,
                                 ),
                             ),
                             0,
@@ -790,14 +624,13 @@ class GlobalEvidenceFusionCompletionEngineTest {
     fun `maximum counters future timestamps and extreme priorities remain bounded`() =
         runBlocking {
             val snapshot =
-                TerminalCommandCompletionStatsSnapshot(
-                    commandStats =
+                learningSnapshot(
+                    rows =
                         listOf(
-                            TerminalCommandCompletionStats(
+                            commandLearning(
                                 commandLine = "git switch main",
                                 useCount = Int.MAX_VALUE,
                                 successCount = Int.MAX_VALUE,
-                                failureCount = Int.MAX_VALUE,
                                 acceptedCount = Int.MAX_VALUE,
                                 dismissedCount = Int.MAX_VALUE,
                                 lastUsedEpochMillis = Long.MAX_VALUE,
@@ -820,13 +653,13 @@ class GlobalEvidenceFusionCompletionEngineTest {
 
     private fun engine(
         sources: List<TerminalCompletionSourceEntry>,
-        snapshot: TerminalCommandCompletionStatsSnapshot = TerminalCommandCompletionStatsSnapshot.EMPTY,
+        snapshot: TerminalCompletionLearningSnapshot = TerminalCompletionLearningSnapshot.EMPTY,
         commandSpecs: List<TerminalCommandSpec> = emptyList(),
     ): TerminalCompletionEngine =
         MergedCompletionEngine(
             sources = sources,
             commandSpecs = commandSpecs,
-            learningStore = TerminalCompletionLearningStore().apply { replaceSnapshot(snapshot) },
+            learningStore = TerminalCompletionLearningStore().apply { mergeSnapshot(snapshot) },
             clockEpochMillis = { NOW },
         )
 
@@ -869,23 +702,6 @@ class GlobalEvidenceFusionCompletionEngineTest {
             kind = TerminalCompletionCandidateKind.ARGUMENT,
             score = score,
             domain = TerminalCompletionValueDomain.GIT_BRANCH,
-        )
-
-    private fun feedback(
-        source: String,
-        candidateKind: TerminalCompletionCandidateKind = TerminalCompletionCandidateKind.ARGUMENT,
-        profileId: String? = null,
-        workingDirectoryUri: String? = null,
-        acceptedCount: Int = 0,
-        dismissedCount: Int = 0,
-    ): TerminalCompletionFeedbackStats =
-        TerminalCompletionFeedbackStats(
-            source = source,
-            candidateKind = candidateKind,
-            profileId = profileId,
-            workingDirectoryUri = workingDirectoryUri,
-            acceptedCount = acceptedCount,
-            dismissedCount = dismissedCount,
         )
 
     private fun commandLineAfter(

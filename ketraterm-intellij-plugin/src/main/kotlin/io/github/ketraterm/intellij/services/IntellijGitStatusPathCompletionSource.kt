@@ -82,18 +82,25 @@ internal class IntellijGitStatusPathLoader(
     constructor(project: Project) : this(IntellijGitStatusReadPort(project))
 
     /**
-     * Loads bounded, deterministic changed paths for one terminal directory.
+     * Loads bounded, relevance-ordered changed paths matching [prefix].
      *
      * Renamed paths use their post-rename path when available; deleted paths use their prior path.
      *
      * @param workingDirectoryUri local `file` URI used to select and relativize a repository.
-     * @return at most 2,048 changed paths, or an empty list for unusable project, URI, or repository state.
+     * @param prefix decoded active path prefix supplied by the completion context.
+     * @return query-matched paths within the independent visit budget, or an
+     * empty list for unusable project, URI, or repository state.
      */
-    suspend fun load(workingDirectoryUri: String?): List<TerminalFuzzyPathEntry> {
+    suspend fun load(
+        workingDirectoryUri: String?,
+        prefix: String,
+    ): List<TerminalFuzzyPathEntry> {
         val cancellationContext = currentCoroutineContext()
         cancellationContext.ensureActive()
+        val normalizedPrefix = prefix.replace('\\', '/')
         return readPort.read(workingDirectoryUri) { model ->
-            val retained = BoundedSnapshotCollector(MAX_RETAINED_PATHS, ENTRY_ORDER)
+            val retained = ArrayList<ScoredGitStatusPath>(INITIAL_RESULT_CAPACITY)
+            val retainedPaths = HashSet<String>(INITIAL_RESULT_CAPACITY)
             val visitBudget =
                 BoundedVisitBudget(MAX_VISITED_CHANGES) {
                     cancellationContext.ensureActive()
@@ -107,18 +114,31 @@ internal class IntellijGitStatusPathLoader(
             ) {
                 if (!path.startsWith(model.repositoryRoot)) return
                 val relativePath = relativePath(model.workingDirectory, path) ?: return
-                val entry = TerminalFuzzyPathEntry(relativePath, isDirectory = isDirectory, detail = detail)
-                retained.add(entry)
+                val score = gitStatusFuzzyScore(relativePath, normalizedPrefix) ?: return
+                if (retainedPaths.add(relativePath)) {
+                    retained +=
+                        ScoredGitStatusPath(
+                            entry = TerminalFuzzyPathEntry(relativePath, isDirectory = isDirectory, detail = detail),
+                            score = score,
+                        )
+                }
             }
             visitBudget.visit(model.changedPathValues) { pathValue ->
-                val path = pathValue?.let { runCatching { Path.of(it) }.getOrNull() } ?: return@visit
-                retain(path, isDirectory = false, detail = "changed file")
+                pathValue?.let { runCatching { Path.of(it) }.getOrNull() }?.let { path ->
+                    retain(path, isDirectory = false, detail = "changed file")
+                }
+                true
             }
             visitBudget.visit(model.unversionedPathValues) { pathValue ->
-                val path = pathValue?.let { runCatching { Path.of(it) }.getOrNull() } ?: return@visit
-                retain(path, isDirectory = false, detail = "untracked file")
+                pathValue?.let { runCatching { Path.of(it) }.getOrNull() }?.let { path ->
+                    retain(path, isDirectory = false, detail = "untracked file")
+                }
+                true
             }
-            retained.toSortedList()
+            retained.sortWith(GIT_STATUS_PATH_ORDER)
+            val entries = ArrayList<TerminalFuzzyPathEntry>(retained.size)
+            for (match in retained) entries += match.entry
+            entries
         } ?: emptyList()
     }
 
@@ -129,18 +149,57 @@ internal class IntellijGitStatusPathLoader(
 
     private companion object {
         private const val MAX_VISITED_CHANGES = 8_192
-        private const val MAX_RETAINED_PATHS = 2_048
-        private val ENTRY_ORDER =
-            compareBy<TerminalFuzzyPathEntry, String>(String.CASE_INSENSITIVE_ORDER) { it.path }
-                .thenBy { it.path }
+        private const val INITIAL_RESULT_CAPACITY = 64
     }
 }
 
 /** Creates changed-Git-path completion without exposing IntelliJ VCS APIs to the shared engine. */
-internal fun intellijGitStatusPathCompletionSource(loader: suspend (String?) -> List<TerminalFuzzyPathEntry>) =
+internal fun intellijGitStatusPathCompletionSource(loader: suspend (String?, String) -> List<TerminalFuzzyPathEntry>) =
     TerminalCompletionSources.fuzzyPath(
         sourceId = "intellij-git-status-path",
-        entriesProvider = { request -> loader(request.workingDirectoryUri) },
+        entriesProvider = { request, context -> loader(request.workingDirectoryUri, context.activePrefix) },
         requiresNonEmptyPrefix = false,
         allowedCommandNames = setOf("add", "restore", "rm", "diff"),
     )
+
+private fun gitStatusFuzzyScore(
+    path: String,
+    prefix: String,
+): Int? {
+    val fileNameStart = path.lastIndexOf('/') + 1
+    return when {
+        path.regionMatches(fileNameStart, prefix, 0, prefix.length, ignoreCase = true) -> 4_000 - path.length
+        path.startsWith(prefix, ignoreCase = true) -> 3_000 - path.length
+        else -> gitStatusSubsequenceScore(path, prefix, fileNameStart)?.plus(2_000) ?: gitStatusSubsequenceScore(path, prefix)
+    }
+}
+
+private fun gitStatusSubsequenceScore(
+    value: String,
+    query: String,
+    startIndex: Int = 0,
+): Int? {
+    var valueIndex = startIndex
+    var queryIndex = 0
+    var gaps = 0
+    var previousMatch = startIndex - 1
+    while (valueIndex < value.length && queryIndex < query.length) {
+        if (value[valueIndex].equals(query[queryIndex], ignoreCase = true)) {
+            gaps += valueIndex - previousMatch - 1
+            previousMatch = valueIndex
+            queryIndex++
+        }
+        valueIndex++
+    }
+    return if (queryIndex == query.length) 1_000 - gaps * 3 - value.length else null
+}
+
+private data class ScoredGitStatusPath(
+    val entry: TerminalFuzzyPathEntry,
+    val score: Int,
+)
+
+private val GIT_STATUS_PATH_ORDER =
+    compareByDescending<ScoredGitStatusPath> { it.score }
+        .thenBy(String.CASE_INSENSITIVE_ORDER) { it.entry.path }
+        .thenBy { it.entry.path }

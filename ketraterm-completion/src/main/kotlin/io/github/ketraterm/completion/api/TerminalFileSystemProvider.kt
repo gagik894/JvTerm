@@ -79,8 +79,10 @@ fun interface TerminalFileSystemProvider {
      * blocking host APIs when required.
      *
      * @param request lexical path request and host working-directory context.
-     * @return bounded matching children, or an empty list when unavailable,
-     * unreadable, or unsupported.
+     * @return bounded matching children, or an empty list when the request is
+     * unsupported or resolves to an absent/non-directory path. Operational
+     * filesystem failures must propagate to the completion engine's source
+     * failure boundary.
      */
     suspend fun listDirectory(request: TerminalDirectoryListingRequest): List<TerminalFileEntry>
 }

@@ -17,6 +17,15 @@ package io.github.ketraterm.ui.swing.input
 
 import java.awt.event.KeyEvent
 
+/** UI layer that owns a claimed physical key until release. */
+internal enum class ClaimedSwingKeyOwner {
+    /** Shell-suggestion handling owns the key and may receive auto-repeat presses. */
+    SUGGESTION,
+
+    /** Host shortcut handling owns the key and suppresses auto-repeat presses. */
+    HOST,
+}
+
 /**
  * Tracks physical keys claimed by UI actions until their matching release.
  *
@@ -26,27 +35,35 @@ import java.awt.event.KeyEvent
  */
 internal class ClaimedSwingKeyLifecycle {
     private val claimedKeys = IntArray(MAX_SIMULTANEOUS_CLAIMS)
+    private val claimedOwners = arrayOfNulls<ClaimedSwingKeyOwner>(MAX_SIMULTANEOUS_CLAIMS)
     private var claimedCount = 0
     private var suppressNextTypedEvent = false
 
-    /** Returns whether [event] belongs to an already-claimed physical key. */
-    fun ownsRepeatedPress(event: KeyEvent): Boolean {
+    /** Returns the owner when [event] repeats an already-claimed physical key. */
+    fun repeatedPressOwner(event: KeyEvent): ClaimedSwingKeyOwner? {
         val key = physicalKey(event)
         for (index in 0 until claimedCount) {
-            if (claimedKeys[index] == key) return true
+            if (claimedKeys[index] != key) continue
+            suppressNextTypedEvent = !event.isActionKey
+            return claimedOwners[index]
         }
         suppressNextTypedEvent = false
-        return false
+        return null
     }
 
-    /** Claims [event] through its matching release. */
-    fun claim(event: KeyEvent) {
+    /** Claims [event] for [owner] through its matching release. */
+    fun claim(
+        event: KeyEvent,
+        owner: ClaimedSwingKeyOwner,
+    ) {
         val key = physicalKey(event)
         for (index in 0 until claimedCount) {
             if (claimedKeys[index] == key) return
         }
         if (claimedCount < claimedKeys.size) {
-            claimedKeys[claimedCount++] = key
+            claimedKeys[claimedCount] = key
+            claimedOwners[claimedCount] = owner
+            claimedCount++
         }
         suppressNextTypedEvent = !event.isActionKey
     }
@@ -65,7 +82,9 @@ internal class ClaimedSwingKeyLifecycle {
             if (claimedKeys[index] != key) continue
             claimedCount--
             claimedKeys[index] = claimedKeys[claimedCount]
+            claimedOwners[index] = claimedOwners[claimedCount]
             claimedKeys[claimedCount] = 0
+            claimedOwners[claimedCount] = null
             suppressNextTypedEvent = false
             return true
         }
@@ -75,6 +94,7 @@ internal class ClaimedSwingKeyLifecycle {
     /** Clears ownership when focus loss invalidates the pending lifecycle. */
     fun clear() {
         claimedKeys.fill(0, 0, claimedCount)
+        claimedOwners.fill(null, 0, claimedCount)
         claimedCount = 0
         suppressNextTypedEvent = false
     }

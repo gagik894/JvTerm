@@ -81,6 +81,34 @@ class SwingTerminalSelectionTest {
     }
 
     @Test
+    fun `unrelated settings changes preserve the current text selection`() {
+        val frame = TestRenderFrame.text("hello")
+        val session = testSession(frame = frame)
+        var settings = SwingSettings(padding = Insets(0, 0, 0, 0))
+        val component = SwingTerminal(settingsProvider = { settings })
+        try {
+            SwingUtilities.invokeAndWait {
+                component.setSize(300, 80)
+                component.bind(session)
+                session.renderPublisher.updateAndPublish(StaticFrameReader(frame))
+                component.mouseListeners.forEach { it.mousePressed(mousePressed(component, x = 8, y = 8, clickCount = 1)) }
+                component.mouseMotionListeners.forEach { it.mouseDragged(mouseDragged(component, x = 299, y = 8)) }
+                component.mouseListeners.forEach { it.mouseReleased(mouseReleased(component, x = 299, y = 8)) }
+                val selected = component.currentSelection()
+                assertNotNull(selected)
+
+                settings = settings.copy(visualBellEnabled = false, scrollOnOutput = !settings.scrollOnOutput)
+                component.reloadSettings()
+
+                assertEquals(selected, component.currentSelection())
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
     fun `drag above viewport autoscrolls into scrollback`() {
         val renderReader = ScrollbackFrameReader()
         val session =
@@ -302,7 +330,7 @@ class SwingTerminalSelectionTest {
         val component =
             SwingTerminal(
                 settingsProvider = {
-                    SwingSettings(padding = Insets(0, 0, 0, 0))
+                    SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0))
                 },
                 hostServices =
                     SwingHostServices(
