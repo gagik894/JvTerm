@@ -183,6 +183,17 @@ internal class SettingsDialog(
     private val shellRequestResizeWindowCheckbox = JCheckBox("Allow window resize from shell", settings.config.shellRequestResizeWindow)
     private val shellRequestWindowManipulationCheckbox =
         JCheckBox("Allow window manipulation from shell", settings.config.shellRequestWindowManipulation)
+
+    // TODO(host/profile): SUGGESTION_SETTINGS: Uncomment all matching blocks in this file together
+    // when restoring the controls; see docs/terminal-feature-gap-map.md. Keep the master default off.
+    // private val smartSuggestionsCheckbox =
+    //     JCheckBox("Enable smart suggestions", settings.config.smartSuggestionsEnabled)
+    // private val shellSuggestionsCheckbox =
+    //     JCheckBox("Show shell suggestions automatically", settings.config.shellSuggestionsEnabled)
+    // private val acceptSelectedSuggestionWithEnterCheckbox =
+    //     JCheckBox("Accept selected suggestion with Enter", settings.config.acceptSelectedSuggestionWithEnter)
+    // private val persistentSuggestionLearningCheckbox =
+    //     JCheckBox("Persist suggestion learning", settings.config.persistentSuggestionLearningEnabled)
     private val scrollOnOutputCheckbox = JCheckBox("Scroll on output", settings.config.scrollOnOutput)
     private val cursorBlinkSpinner =
         createSpinner(settings.config.cursorBlinkMillis, TerminalConfig.CURSOR_BLINK_MIN, TerminalConfig.CURSOR_BLINK_MAX, 50, 70)
@@ -265,6 +276,11 @@ internal class SettingsDialog(
         registerChangeListener(pasteSanitizationCombo, updateApplyState)
         registerChangeListener(shellRequestResizeWindowCheckbox, updateApplyState)
         registerChangeListener(shellRequestWindowManipulationCheckbox, updateApplyState)
+        // TODO(host/profile): SUGGESTION_SETTINGS: Restore Apply-button tracking with the controls.
+        // registerChangeListener(smartSuggestionsCheckbox, updateApplyState)
+        // registerChangeListener(shellSuggestionsCheckbox, updateApplyState)
+        // registerChangeListener(acceptSelectedSuggestionWithEnterCheckbox, updateApplyState)
+        // registerChangeListener(persistentSuggestionLearningCheckbox, updateApplyState)
         registerChangeListener(scrollOnOutputCheckbox, updateApplyState)
         registerChangeListener(cursorBlinkSpinner, updateApplyState)
         registerChangeListener(cursorShapeCombo, updateApplyState)
@@ -477,6 +493,26 @@ internal class SettingsDialog(
             "Render East Asian ambiguous characters (e.g. smart quotes, emojis) with double cell width.",
         )
         panel.add(keyboardSection)
+
+        // TODO(host/profile): SUGGESTION_SETTINGS: Restore the section with its fields and bindings.
+        // panel.add(SectionHeader("Shell Suggestions"))
+        // val suggestionsSection = createSectionPanel()
+        // addCheckboxRow(suggestionsSection, 0, smartSuggestionsCheckbox, "Enable suggestions and local learning.")
+        // addCheckboxRow(
+        //     suggestionsSection,
+        //     2,
+        //     shellSuggestionsCheckbox,
+        //     "Show suggestions while typing. Ctrl+Space requests them manually when smart suggestions are enabled.",
+        // )
+        // addCheckboxRow(
+        //     suggestionsSection,
+        //     4,
+        //     acceptSelectedSuggestionWithEnterCheckbox,
+        //     "Insert the highlighted suggestion with Enter. With no selection, Enter runs the command normally.",
+        // )
+        // addCheckboxRow(suggestionsSection, 6, persistentSuggestionLearningCheckbox, "Save learning across app restarts.")
+        // panel.add(suggestionsSection)
+        // TODO(host/profile): Reconnect the host learning-reset callback before restoring its confirmation button.
 
         panel.add(SectionHeader("Mouse"))
         val mouseSection = createSectionPanel()
@@ -711,6 +747,11 @@ internal class SettingsDialog(
             }
         shellRequestResizeWindowCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_REQUEST_RESIZE_WINDOW
         shellRequestWindowManipulationCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_REQUEST_WINDOW_MANIPULATION
+        // TODO(host/profile): SUGGESTION_SETTINGS: Restore defaults only when these preferences are visible.
+        // smartSuggestionsCheckbox.isSelected = TerminalConfig.DEFAULT_SMART_SUGGESTIONS_ENABLED
+        // shellSuggestionsCheckbox.isSelected = TerminalConfig.DEFAULT_SHELL_SUGGESTIONS_ENABLED
+        // acceptSelectedSuggestionWithEnterCheckbox.isSelected = TerminalConfig.DEFAULT_ACCEPT_SELECTED_SUGGESTION_WITH_ENTER
+        // persistentSuggestionLearningCheckbox.isSelected = TerminalConfig.DEFAULT_PERSISTENT_SUGGESTION_LEARNING_ENABLED
         scrollOnOutputCheckbox.isSelected = TerminalConfig.DEFAULT_SCROLL_ON_OUTPUT
         cursorBlinkSpinner.value = TerminalConfig.DEFAULT_CURSOR_BLINK_MILLIS
         cursorShapeCombo.selectedItem = TerminalConfig.DEFAULT_CURSOR_SHAPE
@@ -817,6 +858,11 @@ internal class SettingsDialog(
             lineHeight = (lineHeightSpinner.value as Number).toFloat(),
             shellRequestResizeWindow = shellRequestResizeWindowCheckbox.isSelected,
             shellRequestWindowManipulation = shellRequestWindowManipulationCheckbox.isSelected,
+            // TODO(host/profile): SUGGESTION_SETTINGS: Restore with the controls; omitted fields preserve hidden preferences.
+            // smartSuggestionsEnabled = smartSuggestionsCheckbox.isSelected,
+            // shellSuggestionsEnabled = shellSuggestionsCheckbox.isSelected,
+            // acceptSelectedSuggestionWithEnter = acceptSelectedSuggestionWithEnterCheckbox.isSelected,
+            // persistentSuggestionLearningEnabled = persistentSuggestionLearningCheckbox.isSelected,
             clipboardLocalWrite = clipboardLocalWriteCombo.selectedItem as TerminalClipboardPermission,
             clipboardRemoteWrite = clipboardRemoteWriteCombo.selectedItem as TerminalClipboardPermission,
             clipboardRead = clipboardReadCombo.selectedItem as TerminalClipboardPermission,
