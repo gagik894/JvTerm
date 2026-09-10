@@ -15,7 +15,9 @@
  */
 package io.github.ketraterm.ui.swing.render.painter
 
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.forEachVisualCellSpan
 import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
@@ -33,6 +35,7 @@ internal class TerminalSearchPainter(
         highlights: TerminalSearchViewportHighlights?,
         matchBackground: Int,
         activeMatchBackground: Int,
+        bidi: TerminalBidiLayout.Row? = null,
     ) {
         if (highlights == null || highlights.segmentCount == 0) return
         val count = highlights.segmentCountForRow(row)
@@ -47,12 +50,14 @@ internal class TerminalSearchPainter(
                 colorCache.color(
                     if (highlights.isActive(segment)) activeMatchBackground else matchBackground,
                 )
-            g.fillRect(
-                startColumn * metrics.cellWidth,
-                row * metrics.cellHeight,
-                (endColumn - startColumn) * metrics.cellWidth,
-                metrics.cellHeight,
-            )
+            forEachVisualCellSpan(bidi, startColumn, endColumn) { visualStart, visualEnd ->
+                g.fillRect(
+                    visualStart * metrics.cellWidth,
+                    row * metrics.cellHeight,
+                    (visualEnd - visualStart) * metrics.cellWidth,
+                    metrics.cellHeight,
+                )
+            }
             segment++
         }
     }

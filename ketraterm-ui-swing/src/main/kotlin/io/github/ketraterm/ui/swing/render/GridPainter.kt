@@ -43,6 +43,7 @@ import kotlin.math.floor
  */
 internal class GridPainter(
     fontResolver: TerminalFontResolver? = null,
+    private val cellGeometry: TerminalBidiLayout = TerminalBidiLayout(),
 ) {
     private val colorCache = AwtColorCache()
     private val backgroundPainter = TerminalBackgroundPainter(colorCache)
@@ -50,7 +51,7 @@ internal class GridPainter(
     private val searchPainter = TerminalSearchPainter(colorCache)
     private val shellIntegrationDecorationPainter = TerminalShellIntegrationDecorationPainter(colorCache)
     private val decorationPainter = TerminalDecorationPainter(colorCache)
-    private val textPainter = TerminalTextPainter(colorCache, decorationPainter, fontResolver = fontResolver)
+    private val textPainter = TerminalTextPainter(colorCache, decorationPainter, fontResolver = fontResolver, cellGeometry = cellGeometry)
     private val cursorPainter = TerminalCursorPainter(colorCache, textPainter)
     private val clipScratch = Rectangle()
 
@@ -130,7 +131,8 @@ internal class GridPainter(
         try {
             var row = firstRow
             while (row < rows) {
-                backgroundPainter.paintRow(g, cache, palette, metrics, row)
+                val bidi = cellGeometry.row(cache, row)
+                backgroundPainter.paintRow(g, cache, palette, metrics, row, bidi)
                 shellIntegrationDecorationPainter.paint(
                     g = g,
                     settings = settings,
@@ -148,8 +150,9 @@ internal class GridPainter(
                     highlights = searchHighlights,
                     matchBackground = settings.searchMatchBackground,
                     activeMatchBackground = settings.searchActiveMatchBackground,
+                    bidi = bidi,
                 )
-                selectionPainter.paint(g, cache, metrics, row, selection, settings.selectionBackground, palette)
+                selectionPainter.paint(g, cache, metrics, row, selection, settings.selectionBackground, palette, bidi)
                 textPainter.paintRow(
                     g = g,
                     cache = cache,
@@ -179,6 +182,7 @@ internal class GridPainter(
                 textBlinkVisible,
                 fontRenderContext,
                 cursorVisible = cursorVisible,
+                bidi = cellGeometry.row(cache, cache.cursorRow),
             )
         } finally {
             g.translate(-paddingLeft.toDouble(), -(paddingTop.toDouble() + contentOriginY))

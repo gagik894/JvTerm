@@ -20,8 +20,24 @@ import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.awt.Font
 import java.awt.font.FontRenderContext
+import java.text.Bidi
 
 class TerminalComplexTextLayoutCacheTest {
+    @Test
+    fun `direction is retained in shaped layout cache identity`() {
+        val fonts = fontCache()
+        val cache = TerminalComplexTextLayoutCache()
+        val frc = FontRenderContext(null, false, false)
+        val text = intArrayOf('?'.code, '!'.code)
+        val ltr = cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_LEFT_TO_RIGHT)
+        val rtl = cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_RIGHT_TO_LEFT)
+        assertTrue(ltr.isLeftToRight)
+        assertFalse(rtl.isLeftToRight)
+        assertNotSame(ltr, rtl)
+        assertSame(ltr, cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_LEFT_TO_RIGHT))
+        assertSame(rtl, cache.scriptRunLayout(text, 0, 2, Font.PLAIN, frc, fonts, Bidi.DIRECTION_RIGHT_TO_LEFT))
+    }
+
     @Test
     fun `constructor rejects non-positive capacities`() {
         assertThrows<IllegalArgumentException> {

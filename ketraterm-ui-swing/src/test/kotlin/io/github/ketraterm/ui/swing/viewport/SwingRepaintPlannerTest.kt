@@ -26,6 +26,30 @@ import kotlin.test.assertEquals
 
 class SwingRepaintPlannerTest {
     @Test
+    fun `rtl cursor movement repaints old and new visual cells`() {
+        val frame = MutableFrame(columns = 3, rows = 1)
+        frame.setRow(0, "\u05D0\u05D1\u05D2")
+        frame.cursor = cursor(column = 0, row = 0, generation = 1)
+        val cache = TerminalRenderCache(3, 1)
+        cache.updateFrom(frame.reader)
+        val geometry = TerminalVisualViewportGeometry()
+        geometry.updateLayout(METRICS, 1, HEIGHT)
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink, visualGeometry = geometry)
+
+        frame.cursor = cursor(column = 2, row = 0, generation = 2)
+        frame.frameGeneration++
+        cache.updateFrom(frame.reader)
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink, visualGeometry = geometry)
+
+        assertEquals(
+            listOf(Region(2 * CELL_WIDTH, 0, CELL_WIDTH, CELL_HEIGHT), Region(0, 0, CELL_WIDTH, CELL_HEIGHT)),
+            sink.regions,
+        )
+    }
+
+    @Test
     fun `changed rows repaint only changed row runs`() {
         val frame = MutableFrame(columns = 4, rows = 4)
         val cache = TerminalRenderCache(columns = 4, rows = 4)

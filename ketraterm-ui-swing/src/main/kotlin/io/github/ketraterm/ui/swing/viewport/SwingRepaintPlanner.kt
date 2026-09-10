@@ -299,7 +299,8 @@ internal class SwingRepaintPlanner {
         val flags = cache.flags[cache.rowOffset(row) + column]
         val startColumn = visualCellRangeStart(flags, column)
         val columnSpan = visualCellRangeSpan(flags, column, cache.columns)
-        val x = startColumn * metrics.cellWidth + padding.left
+        val visualColumn = visualGeometry?.bidiLayout?.row(cache, row)?.visualColumn(startColumn) ?: startColumn
+        val x = visualColumn * metrics.cellWidth + padding.left
         if (x >= componentWidth) return false
         val regionWidth = minOf(columnSpan * metrics.cellWidth, componentWidth - x)
         if (regionWidth <= 0) return false

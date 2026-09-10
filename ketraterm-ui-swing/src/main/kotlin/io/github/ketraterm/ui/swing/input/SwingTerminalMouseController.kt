@@ -108,8 +108,7 @@ internal class SwingTerminalMouseController(
     }
 
     fun isMouseTrackingIntercepted(event: MouseEvent): Boolean {
-        if (event.isShiftDown) return false
-        return host.mouseTrackingMode() != MouseTrackingMode.OFF
+        return !event.isShiftDown && host.mouseTrackingMode() != MouseTrackingMode.OFF
     }
 
     private fun handleContextMenu(event: MouseEvent): Boolean {
@@ -165,7 +164,8 @@ internal class SwingTerminalMouseController(
             )
         val gridWidth = host.renderCache.columns * host.metrics.cellWidth
         val gridHeight = host.renderCache.rows * host.metrics.cellHeight
-        val pixelX = (event.x - paddingLeft).coerceIn(0, gridWidth - 1)
+        val visualPixelX = (event.x - paddingLeft).coerceIn(0, gridWidth - 1)
+        val pixelX = column * host.metrics.cellWidth + visualPixelX % host.metrics.cellWidth
         val pixelY = host.terminalPixelYAt(event.y, host.renderCache).coerceIn(0, gridHeight - 1)
 
         val mouseEvent =

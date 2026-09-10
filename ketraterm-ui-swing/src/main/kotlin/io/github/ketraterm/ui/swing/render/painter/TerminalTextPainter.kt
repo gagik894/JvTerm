@@ -39,6 +39,7 @@ internal class TerminalTextPainter(
     private val decorationPainter: TerminalDecorationPainter,
     private val platformEmojiPainter: TerminalPlatformEmojiPainter = TerminalPlatformEmojiPainter(),
     fontResolver: TerminalFontResolver? = null,
+    private val cellGeometry: TerminalBidiLayout = TerminalBidiLayout(),
 ) {
     private val fontCache = FontCache(fontResolver = fontResolver)
     private val complexTextLayouts = TerminalComplexTextLayoutCache()
@@ -104,7 +105,8 @@ internal class TerminalTextPainter(
             hyperlinkActivationHover = hyperlinkActivationHover,
             hyperlinkActivationForeground = hyperlinkActivationForeground,
         )
-        if (shapedTextRuns.cachedRowContainsStrongRtl(cache, row)) {
+        val bidi = cellGeometry.row(cache, row)
+        if (bidi != null) {
             shapedTextRuns.paintBidiRow(
                 g = g,
                 cache = cache,
@@ -112,6 +114,7 @@ internal class TerminalTextPainter(
                 metrics = metrics,
                 row = row,
                 fontRenderContext = fontRenderContext,
+                bidi = bidi,
             )
             return
         }
@@ -179,7 +182,7 @@ internal class TerminalTextPainter(
     }
 
     /**
-     * Paints one cell's text clipped to a block cursor cell.
+     * Paints the logical [column]'s text clipped to a block cursor at [visualColumn].
      */
     fun paintCellForeground(
         g: Graphics2D,
@@ -191,6 +194,7 @@ internal class TerminalTextPainter(
         foreground: Int,
         fontRenderContext: FontRenderContext,
         textBlinkVisible: Boolean = true,
+        visualColumn: Int = column,
     ) {
         val flagsPlane = cache.flags
         val attrWords = cache.attrWords
@@ -207,13 +211,13 @@ internal class TerminalTextPainter(
         val isPrimitive = flags and TerminalRenderCellFlags.CLUSTER == 0 && cellPrimitives.canPaint(codeWord)
         if (isPrimitive) {
             g.color = colorCache.color(foreground)
-            cellPrimitives.paint(g, codeWord, column, row, metrics)
+            cellPrimitives.paint(g, codeWord, visualColumn, row, metrics)
         } else {
             val safeColumnSpan = maxOf(1, columnSpan)
             val oldClip = g.clip
             try {
                 g.clipRect(
-                    column * metrics.cellWidth,
+                    visualColumn * metrics.cellWidth,
                     row * metrics.cellHeight,
                     metrics.cellWidth * safeColumnSpan,
                     metrics.cellHeight,
@@ -233,7 +237,7 @@ internal class TerminalTextPainter(
                                 codepoints = cache.clusterCodepoints,
                                 offset = offset,
                                 length = length,
-                                column = column,
+                                column = visualColumn,
                                 row = row,
                                 columnSpan = safeColumnSpan,
                                 metrics = metrics,
@@ -245,7 +249,7 @@ internal class TerminalTextPainter(
                                 offset = offset,
                                 length = length,
                                 fontStyle = terminalFontStyle(attr),
-                                x = column * metrics.cellWidth,
+                                x = visualColumn * metrics.cellWidth,
                                 cellPixelWidth = metrics.cellWidth * safeColumnSpan,
                                 baselineY = baselineY,
                                 fontRenderContext = fontRenderContext,
@@ -255,7 +259,7 @@ internal class TerminalTextPainter(
                 } else if (platformEmojiPainter.paintCodePoint(
                         g = g,
                         codePoint = codeWord,
-                        column = column,
+                        column = visualColumn,
                         row = row,
                         columnSpan = safeColumnSpan,
                         metrics = metrics,
@@ -267,7 +271,7 @@ internal class TerminalTextPainter(
                         g = g,
                         codePoint = codeWord,
                         fontStyle = terminalFontStyle(attr),
-                        x = column * metrics.cellWidth,
+                        x = visualColumn * metrics.cellWidth,
                         cellPixelWidth = metrics.cellWidth * safeColumnSpan,
                         baselineY = baselineY,
                         fontRenderContext = fontRenderContext,

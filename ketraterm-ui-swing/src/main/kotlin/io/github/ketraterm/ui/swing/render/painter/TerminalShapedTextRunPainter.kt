@@ -18,11 +18,10 @@ package io.github.ketraterm.ui.swing.render.painter
 import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
+import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.cache.FontCache
 import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache
-import io.github.ketraterm.ui.swing.render.hasDrawableText
-import io.github.ketraterm.ui.swing.render.isFastAsciiCell
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 import java.awt.font.FontRenderContext
@@ -33,8 +32,7 @@ import java.text.Bidi
  * Paints row-shaped complex text spans that cannot be rendered correctly one
  * terminal cell at a time.
  *
- * This helper owns Unicode Bidirectional Algorithm row planning and
- * complex-script run shaping for Brahmic and Southeast Asian scripts. The
+ * This helper shapes direction- and script-compatible spans using the shared cell mapping. The
  * ordinary ASCII path remains in [TerminalTextPainter] so the common repaint
  * path does not pay for Bidi or script-run machinery.
  */
@@ -45,30 +43,7 @@ internal class TerminalShapedTextRunPainter(
     private val complexTextLayouts: TerminalComplexTextLayoutCache,
     private val runStyle: TerminalTextRunStyle,
 ) {
-    private var rowChars = CharArray(INITIAL_TEXT_RUN_CAPACITY)
     private var segmentCodepoints = IntArray(INITIAL_TEXT_RUN_CAPACITY)
-    private var bidiRows = arrayOfNulls<Bidi>(0)
-    private var rowGenerations = LongArray(0)
-    private var rowLineIds = LongArray(0)
-    private var rowHasStrongRtl = BooleanArray(0)
-    private var cachedColumns = 0
-
-    fun cachedRowContainsStrongRtl(
-        cache: TerminalRenderCache,
-        row: Int,
-    ): Boolean {
-        ensureBidiRowCache(cache)
-        val generation = cache.lineGenerations[row]
-        val lineId = cache.lineIds[row]
-        if (rowGenerations[row] == generation && rowLineIds[row] == lineId) return rowHasStrongRtl[row]
-
-        val hasStrongRtl = rowContainsStrongRtl(cache, row)
-        bidiRows[row] = null
-        rowGenerations[row] = generation
-        rowLineIds[row] = lineId
-        rowHasStrongRtl[row] = hasStrongRtl
-        return hasStrongRtl
-    }
 
     fun paintBidiRow(
         g: Graphics2D,
@@ -77,15 +52,12 @@ internal class TerminalShapedTextRunPainter(
         metrics: SwingMetrics,
         row: Int,
         fontRenderContext: FontRenderContext,
+        bidi: TerminalBidiLayout.Row,
     ) {
-        val bidi = bidiForRow(cache, row)
         val baselineY = row * metrics.cellHeight + metrics.baseline
-        var visualStartColumn = 0
-        var runIndex = 0
-        while (runIndex < bidi.runCount) {
-            val runStart = bidi.getRunStart(runIndex)
-            val runLimit = bidi.getRunLimit(runIndex)
-            val rtlRun = bidi.getRunLevel(runIndex) and 1 != 0
+        var runStart = 0
+        while (runStart < cache.columns) {
+            val runLimit = bidi.runLimit(runStart)
             var segmentStart = runStart
             while (segmentStart < runLimit) {
                 runStyle.begin(cache, palette, cache.rowOffset(row), segmentStart)
@@ -97,12 +69,9 @@ internal class TerminalShapedTextRunPainter(
                         startColumn = segmentStart,
                         runLimit = runLimit,
                     )
-                val segmentVisualStart =
-                    if (rtlRun) {
-                        visualStartColumn + runLimit - segmentLimit
-                    } else {
-                        visualStartColumn + segmentStart - runStart
-                    }
+                val lastColumn = segmentLimit - 1
+                val lastOwner = visualCellRangeStart(cache.flags[cache.rowOffset(row) + lastColumn], lastColumn)
+                val segmentVisualStart = minOf(bidi.visualColumn(segmentStart), bidi.visualColumn(lastOwner))
                 paintShapedLogicalSegment(
                     g = g,
                     cache = cache,
@@ -112,13 +81,13 @@ internal class TerminalShapedTextRunPainter(
                     startColumn = segmentStart,
                     endColumn = segmentLimit,
                     visualStartColumn = segmentVisualStart,
+                    direction = if (bidi.isRtl(runStart)) Bidi.DIRECTION_RIGHT_TO_LEFT else Bidi.DIRECTION_LEFT_TO_RIGHT,
                     baselineY = baselineY,
                     fontRenderContext = fontRenderContext,
                 )
                 segmentStart = segmentLimit
             }
-            visualStartColumn += runLimit - runStart
-            runIndex++
+            runStart = runLimit
         }
     }
 
@@ -176,33 +145,6 @@ internal class TerminalShapedTextRunPainter(
         return isComplexShapingCodePoint(cache.codeWords[index])
     }
 
-    private fun bidiForRow(
-        cache: TerminalRenderCache,
-        row: Int,
-    ): Bidi {
-        ensureBidiRowCache(cache)
-        val generation = cache.lineGenerations[row]
-        val lineId = cache.lineIds[row]
-        val cached = bidiRows[row]
-        if (cached != null && rowGenerations[row] == generation && rowLineIds[row] == lineId) return cached
-
-        ensureRowCharCapacity(cache.columns)
-        fillBidiRowChars(cache, row)
-        val bidi =
-            Bidi(
-                rowChars,
-                0,
-                null,
-                0,
-                cache.columns,
-                Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
-            )
-        bidiRows[row] = bidi
-        rowGenerations[row] = generation
-        rowLineIds[row] = lineId
-        return bidi
-    }
-
     private fun cellCategory(
         cache: TerminalRenderCache,
         index: Int,
@@ -226,12 +168,12 @@ internal class TerminalShapedTextRunPainter(
         val rowOffset = cache.rowOffset(row)
         val category = cellCategory(cache, rowOffset + startColumn)
         val script = scriptKeyForSegment(cache, rowOffset, startColumn, runLimit)
-        var column = startColumn + 1
+        var column = minOf(runLimit, startColumn + cellSpan(cache.flags[rowOffset + startColumn]))
         while (column < runLimit) {
             if (cellCategory(cache, rowOffset + column) != category) break
             if (!isCompatibleScriptCell(cache, rowOffset, column, runLimit, script)) break
             if (!runStyle.matches(cache, palette, rowOffset, column)) break
-            column++
+            column += minOf(cellSpan(cache.flags[rowOffset + column]), runLimit - column)
         }
         return column
     }
@@ -277,6 +219,7 @@ internal class TerminalShapedTextRunPainter(
         startColumn: Int,
         endColumn: Int,
         visualStartColumn: Int,
+        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
         baselineY: Int,
         fontRenderContext: FontRenderContext,
     ) {
@@ -299,6 +242,7 @@ internal class TerminalShapedTextRunPainter(
                         runStyle.fontStyle,
                         fontRenderContext,
                         fontCache,
+                        direction = direction,
                     )
                 drawFittedLayout(g, layout, x.toFloat(), baselineY.toFloat(), x + cellPixelWidth)
             } finally {
@@ -317,79 +261,6 @@ internal class TerminalShapedTextRunPainter(
         )
     }
 
-    private fun rowContainsStrongRtl(
-        cache: TerminalRenderCache,
-        row: Int,
-    ): Boolean {
-        val rowOffset = cache.rowOffset(row)
-        var column = 0
-        while (column < cache.columns) {
-            val index = rowOffset + column
-            val flags = cache.flags[index]
-            if (hasDrawableText(flags)) {
-                if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                    val clusterRef = cache.clusterRefs[index]
-                    if (clusterRef != 0L) {
-                        val offset = cache.clusterOffset(clusterRef)
-                        val end = offset + cache.clusterLength(clusterRef)
-                        var clusterIndex = offset
-                        while (clusterIndex < end) {
-                            if (isStrongRtl(cache.clusterCodepoints[clusterIndex])) return true
-                            clusterIndex++
-                        }
-                    }
-                } else if (isStrongRtl(cache.codeWords[index])) {
-                    return true
-                }
-            }
-            column++
-        }
-        return false
-    }
-
-    private fun ensureBidiRowCache(cache: TerminalRenderCache) {
-        if (bidiRows.size == cache.rows && cachedColumns == cache.columns) return
-
-        bidiRows = arrayOfNulls(cache.rows)
-        rowGenerations = LongArray(cache.rows) { INVALID_GENERATION }
-        rowLineIds = LongArray(cache.rows)
-        rowHasStrongRtl = BooleanArray(cache.rows)
-        cachedColumns = cache.columns
-    }
-
-    private fun fillBidiRowChars(
-        cache: TerminalRenderCache,
-        row: Int,
-    ) {
-        val rowOffset = cache.rowOffset(row)
-        var column = 0
-        while (column < cache.columns) {
-            val index = rowOffset + column
-            rowChars[column] = bidiClassChar(cache, index)
-            column++
-        }
-    }
-
-    private fun bidiClassChar(
-        cache: TerminalRenderCache,
-        index: Int,
-    ): Char {
-        val flags = cache.flags[index]
-        if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return ' '
-        val codePoint =
-            if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                val clusterRef = cache.clusterRefs[index]
-                if (clusterRef == 0L) {
-                    SPACE_CODE_POINT
-                } else {
-                    cache.clusterCodepoints[cache.clusterOffset(clusterRef)]
-                }
-            } else {
-                cache.codeWords[index]
-            }
-        return if (codePoint in 0..0xffff) codePoint.toChar() else REPLACEMENT_CHAR
-    }
-
     private fun fillSegmentCodepoints(
         cache: TerminalRenderCache,
         row: Int,
@@ -403,7 +274,11 @@ internal class TerminalShapedTextRunPainter(
         while (column < endColumn) {
             val index = rowOffset + column
             val flags = cache.flags[index]
-            if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) {
+            if (flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) {
+                column++
+                continue
+            }
+            if (!hasDrawableText(flags)) {
                 segmentCodepoints[length++] = SPACE_CODE_POINT
             } else if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
                 val clusterRef = cache.clusterRefs[index]
@@ -474,15 +349,6 @@ internal class TerminalShapedTextRunPainter(
         return codePointScript(cache.codeWords[index])
     }
 
-    private fun ensureRowCharCapacity(columns: Int) {
-        if (rowChars.size >= columns) return
-        var capacity = rowChars.size
-        while (capacity < columns) {
-            capacity *= 2
-        }
-        rowChars = rowChars.copyOf(capacity)
-    }
-
     private fun ensureSegmentCodepointCapacity(required: Int) {
         if (segmentCodepoints.size >= required) return
         var capacity = segmentCodepoints.size
@@ -527,8 +393,6 @@ internal class TerminalShapedTextRunPainter(
         private const val INITIAL_TEXT_RUN_CAPACITY = 256
         private const val SPACE_CODE_POINT = 0x20
         private const val MAX_CODEPOINTS_PER_CELL = 4
-        private const val REPLACEMENT_CHAR = '\uFFFD'
-        private const val INVALID_GENERATION = Long.MIN_VALUE
         private const val COMMON_SCRIPT = 0
 
         @JvmStatic
@@ -540,15 +404,6 @@ internal class TerminalShapedTextRunPainter(
                 -> COMMON_SCRIPT
 
                 else -> script.ordinal + 1
-            }
-
-        @JvmStatic
-        private fun isStrongRtl(codePoint: Int): Boolean =
-            when (Character.getDirectionality(codePoint)) {
-                Character.DIRECTIONALITY_RIGHT_TO_LEFT,
-                Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC,
-                -> true
-                else -> false
             }
 
         @JvmStatic

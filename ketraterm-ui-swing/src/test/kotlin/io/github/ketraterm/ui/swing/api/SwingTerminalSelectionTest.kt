@@ -46,6 +46,74 @@ import javax.swing.SwingUtilities
 
 class SwingTerminalSelectionTest {
     @Test
+    fun `rtl pointer activates the hyperlink under its visual cell`() {
+        val opened = AtomicReference<String?>()
+        val frame =
+            TestRenderFrame(
+                arrayOf(
+                    Array(3) { column ->
+                        TestCell(codeWord = 0x05D0 + column, flags = TerminalRenderCellFlags.CODEPOINT, hyperlinkId = column + 1)
+                    },
+                ),
+            )
+        val session = testSession(frame, hyperlinkResolver = TerminalHyperlinkResolver { "https://example.com/$it" })
+        val component =
+            SwingTerminal(
+                settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0), shellIntegrationDecorationGutterWidth = 0) },
+                hostServices =
+                    SwingHostServices(
+                        hyperlinkHandler =
+                            TerminalHyperlinkHandler {
+                                opened.set(it)
+                                true
+                            },
+                    ),
+            )
+        try {
+            SwingUtilities.invokeAndWait {
+                component.setSize(100, 40)
+                component.bind(session)
+                session.renderPublisher.updateAndPublish(StaticFrameReader(frame))
+                component.mouseListeners.forEach { it.mousePressed(mousePressedWithCtrl(component, 1, 1)) }
+            }
+            assertEquals("https://example.com/3", opened.get())
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
+    fun `rtl mouse reports map both cell and pixel coordinates back to the logical grid`() {
+        val input = RecordingInputEncoder()
+        val frame = TestRenderFrame.text("\u05D0\u05D1\u05D2")
+        val session = testSession(frame, inputEncoder = input)
+        val settings = SwingSettings(padding = Insets(0, 0, 0, 0), shellIntegrationDecorationGutterWidth = 0)
+        val component = SwingTerminal(settingsProvider = { settings })
+        session.start(columns = 3, rows = 1)
+        session.terminal.setMouseTrackingMode(io.github.ketraterm.protocol.MouseTrackingMode.NORMAL)
+        try {
+            SwingUtilities.invokeAndWait {
+                component.setSize(100, 40)
+                component.bind(session)
+                session.renderPublisher.updateAndPublish(StaticFrameReader(frame))
+                component.mouseListeners.forEach { it.mousePressed(mousePressed(component, 1, 1, 1)) }
+                val event = requireNotNull(input.lastMouseEvent.get())
+                assertEquals(2, event.column)
+                assertEquals(0, event.row)
+                val metrics =
+                    io.github.ketraterm.ui.swing.settings.SwingMetrics
+                        .from(component.getFontMetrics(settings.font))
+                assertEquals(2 * metrics.cellWidth + 1, event.pixelX)
+                assertEquals(1, event.pixelY)
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            session.close()
+        }
+    }
+
+    @Test
     fun `single click clears selection without selecting the clicked cell`() {
         val frame = TestRenderFrame.text("hello")
         val session = testSession(frame = frame)

@@ -15,11 +15,11 @@
  */
 package io.github.ketraterm.ui.swing.render.cache
 
-import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache.Companion.MAX_CLUSTER_LENGTH
-import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache.Companion.MAX_SCRIPT_RUN_LENGTH
 import java.awt.Font
 import java.awt.font.FontRenderContext
+import java.awt.font.TextAttribute
 import java.awt.font.TextLayout
+import java.text.Bidi
 import java.util.*
 
 /**
@@ -56,7 +56,7 @@ internal class TerminalComplexTextLayoutCache(
             ClusterTextLayoutLru(clusterCapacityPerStyle)
         }
     private val scriptRunLayouts =
-        Array(STYLE_COUNT) {
+        Array(STYLE_COUNT * 3) {
             ClusterTextLayoutLru(scriptRunCapacityPerStyle)
         }
     private var stringClusterScratch = IntArray(MAX_CLUSTER_LENGTH)
@@ -208,7 +208,8 @@ internal class TerminalComplexTextLayoutCache(
      * @param style packed AWT font style bits.
      * @param fontRenderContext active Java2D font render context.
      * @param fontCache configured primary and fallback font resolver.
-     * @return immutable [TextLayout] for the bounded script run.
+     * @param direction resolved row direction, or the default LTR paragraph heuristic when unspecified.
+     * @return immutable [TextLayout] for the bounded script run; direction is part of cache identity.
      */
     fun scriptRunLayout(
         codepoints: IntArray,
@@ -217,6 +218,7 @@ internal class TerminalComplexTextLayoutCache(
         style: Int,
         fontRenderContext: FontRenderContext,
         fontCache: FontCache,
+        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
     ): TextLayout =
         layoutForCodepointSlice(
             codepoints = codepoints,
@@ -227,6 +229,7 @@ internal class TerminalComplexTextLayoutCache(
             fontCache = fontCache,
             maxLength = MAX_SCRIPT_RUN_LENGTH,
             layouts = scriptRunLayouts,
+            direction = direction,
         )
 
     private fun prepare(
@@ -255,6 +258,7 @@ internal class TerminalComplexTextLayoutCache(
         fontCache: FontCache,
         maxLength: Int,
         layouts: Array<ClusterTextLayoutLru>,
+        direction: Int = Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
     ): TextLayout {
         require(length >= 0) { "length must be >= 0, was $length" }
         require(offset >= 0 && codepoints.size - offset >= length) {
@@ -263,7 +267,7 @@ internal class TerminalComplexTextLayoutCache(
         if (length == 0) {
             return codePointLayout(REPLACEMENT_CODE_POINT, style, fontRenderContext, fontCache)
         }
-        if (length == 1) {
+        if (length == 1 && direction == Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT) {
             return codePointLayout(codepoints[offset], style, fontRenderContext, fontCache)
         }
 
@@ -272,7 +276,14 @@ internal class TerminalComplexTextLayoutCache(
 
         val shapedLength = minOf(length, maxLength)
         val normalizedStyle = style and STYLE_MASK
-        val styleLayouts = layouts[normalizedStyle]
+        val directionIndex =
+            when (direction) {
+                Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT -> 0
+                Bidi.DIRECTION_LEFT_TO_RIGHT -> 1
+                Bidi.DIRECTION_RIGHT_TO_LEFT -> 2
+                else -> error("Unsupported text run direction: $direction")
+            }
+        val styleLayouts = layouts[normalizedStyle + directionIndex * STYLE_COUNT]
         val safeCodepoints =
             if (hasOnlyUnicodeScalars(codepoints, offset, shapedLength)) {
                 codepoints
@@ -286,7 +297,20 @@ internal class TerminalComplexTextLayoutCache(
         if (cached != null) return cached
 
         val text = String(safeCodepoints, safeOffset, shapedLength)
-        val layout = TextLayout(text, fontCache.fontForText(text, normalizedStyle), fontRenderContext)
+        val font = fontCache.fontForText(text, normalizedStyle)
+        val layout =
+            if (direction == Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT) {
+                TextLayout(text, font, fontRenderContext)
+            } else {
+                TextLayout(
+                    text,
+                    mapOf(
+                        TextAttribute.FONT to font,
+                        TextAttribute.RUN_DIRECTION to (direction == Bidi.DIRECTION_RIGHT_TO_LEFT),
+                    ),
+                    fontRenderContext,
+                )
+            }
         styleLayouts.put(safeCodepoints, safeOffset, shapedLength, hash, layout)
         return layout
     }

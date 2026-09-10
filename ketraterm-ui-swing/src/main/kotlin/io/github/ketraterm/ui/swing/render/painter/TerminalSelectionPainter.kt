@@ -19,7 +19,9 @@ import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.api.CellSelection
 import io.github.ketraterm.ui.swing.render.SwingColors
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.forEachVisualCellSpan
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 
@@ -37,6 +39,7 @@ internal class TerminalSelectionPainter(
         selection: CellSelection?,
         selectionBackground: Int,
         palette: TerminalColorPalette,
+        bidi: TerminalBidiLayout.Row? = null,
     ) {
         if (selection == null) return
 
@@ -72,11 +75,13 @@ internal class TerminalSelectionPainter(
         }
 
         g.color = colorCache.color(selColor)
-        g.fillRect(
-            startColumn * metrics.cellWidth,
-            row * metrics.cellHeight,
-            (endColumn - startColumn) * metrics.cellWidth,
-            metrics.cellHeight,
-        )
+        forEachVisualCellSpan(bidi, startColumn, endColumn) { visualStart, visualEnd ->
+            g.fillRect(
+                visualStart * metrics.cellWidth,
+                row * metrics.cellHeight,
+                (visualEnd - visualStart) * metrics.cellWidth,
+                metrics.cellHeight,
+            )
+        }
     }
 }

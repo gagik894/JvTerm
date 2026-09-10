@@ -39,6 +39,24 @@ import kotlin.test.assertTrue
  * according to the terminal's rigid column grid.
  */
 class TerminalTextPainterTest {
+    @Test
+    fun `rtl punctuation segment uses the row direction instead of inferring ltr`() {
+        val actual = fixture()
+        val expected = fixture()
+        try {
+            actual.paintRow(renderCache(TestRenderFrame.text("\u05D0?!")))
+            expected.paintRow(renderCache(TestRenderFrame.text("!?")))
+            for (y in 0 until actual.metrics.cellHeight) {
+                for (x in 0 until actual.metrics.cellWidth * 2) {
+                    assertEquals(expected.image.getRGB(x, y), actual.image.getRGB(x, y), "Punctuation order at ($x,$y)")
+                }
+            }
+        } finally {
+            actual.g.dispose()
+            expected.g.dispose()
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = ["AAA", "ééé", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
     fun `hover underline stays within its span without an activation color override`(text: String) {

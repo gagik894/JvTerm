@@ -113,7 +113,8 @@ class SwingTerminal
         internal val isCoroutineScopeActive: Boolean
             get() = componentJob.isActive
 
-        private val painter = GridPainter(hostServices.fontResolver)
+        private val visualGeometry = TerminalVisualViewportGeometry()
+        private val painter = GridPainter(hostServices.fontResolver, visualGeometry.bidiLayout)
         private val visualBellController =
             TerminalVisualBellController {
                 repaint()
@@ -127,7 +128,6 @@ class SwingTerminal
             )
         private val searchCache = TerminalRenderCache(settings.columns, settings.rows)
         private val shellIntegrationDecorations = TerminalShellIntegrationViewportDecorations()
-        private val visualGeometry = TerminalVisualViewportGeometry()
         private val scrollbarOverlay = TerminalScrollbarOverlay()
         private val rowScroller =
             SmoothRowScroller(
@@ -946,7 +946,13 @@ class SwingTerminal
             }
 
             val contentOriginY = if (visualGeometry.rowCount == renderCache.rows) visualGeometry.contentOriginY else 0.0
-            val anchorX = paddingLeft + state.anchorColumn * metrics.cellWidth
+            val anchorColumn =
+                if (state.anchorColumn in 0 until renderCache.columns) {
+                    visualGeometry.bidiLayout.row(renderCache, state.anchorRow)?.visualColumn(state.anchorColumn) ?: state.anchorColumn
+                } else {
+                    state.anchorColumn
+                }
+            val anchorX = paddingLeft + anchorColumn * metrics.cellWidth
             val bottomLimit = height - paddingBottom
             val anchorTop =
                 floor(paddingTop + contentOriginY + state.anchorRow * metrics.cellHeight)
@@ -1674,7 +1680,8 @@ class SwingTerminal
                 } else {
                     ((y - paddingTop) / metrics.cellHeight).coerceIn(0, cache.rows - 1)
                 }
-            return packCell(column, row)
+            val logicalColumn = visualGeometry.bidiLayout.row(cache, row)?.logicalColumn(column) ?: column
+            return packCell(logicalColumn, row)
         }
 
         private fun repaintHyperlinkSpan(
@@ -1698,16 +1705,18 @@ class SwingTerminal
                 val clampedStartColumn = rowStartColumn.coerceIn(0, renderCache.columns)
                 val clampedEndColumn = rowEndColumn.coerceIn(0, renderCache.columns)
                 if (clampedEndColumn > clampedStartColumn) {
-                    val x = paddingLeft + clampedStartColumn * metrics.cellWidth
+                    val bidi = visualGeometry.bidiLayout.row(renderCache, row)
                     val yTop = paddingTop + contentOriginY + row * metrics.cellHeight
                     val y = floor(yTop).toInt()
                     val repaintHeight = ceil(yTop + metrics.cellHeight).toInt() - y
-                    repaint(
-                        x,
-                        y,
-                        (clampedEndColumn - clampedStartColumn) * metrics.cellWidth,
-                        repaintHeight,
-                    )
+                    forEachVisualCellSpan(bidi, clampedStartColumn, clampedEndColumn) { visualStart, visualEnd ->
+                        repaint(
+                            paddingLeft + visualStart * metrics.cellWidth,
+                            y,
+                            (visualEnd - visualStart) * metrics.cellWidth,
+                            repaintHeight,
+                        )
+                    }
                 }
                 row++
             }
