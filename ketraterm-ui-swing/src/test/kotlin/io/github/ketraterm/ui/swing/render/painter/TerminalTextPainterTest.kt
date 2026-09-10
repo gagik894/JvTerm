@@ -22,6 +22,7 @@ import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
@@ -1348,7 +1349,7 @@ class TerminalTextPainterTest {
             palette = defaultTestSettings(foreground = TEST_RED, background = TEST_BLACK).palette,
             textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
             fractionalMetrics = RenderingHints.VALUE_FRACTIONALMETRICS_ON,
-            padding = Insets(0, 0, 0, 0),
+            padding = SwingPadding(0, 0, 0, 0),
         )
 
     private fun createMismatchFixture(settings: SwingSettings): Triple<BufferedImage, SwingMetrics, TerminalTextPainter> {

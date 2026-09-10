@@ -73,7 +73,9 @@ internal class FontCache(
      *
      * This method evaluates whether the core typography configuration has changed.
      * If so, it discards all cached style variants, reallocates the fallback
-     * arrays, and invalidates all dynamically resolved glyphs.
+     * arrays, and invalidates all dynamically resolved glyphs. Fallback inputs
+     * are snapshotted only on a configuration change; caller mutations take
+     * effect only through a subsequent update.
      *
      * @param font The primary base font for the terminal grid.
      * @param fallbackFonts A prioritized list of fallback fonts for missing glyphs.
@@ -88,24 +90,33 @@ internal class FontCache(
     ): Boolean {
         if (
             font == baseFont &&
-            fallbackFonts == fallbackBaseFonts &&
+            matchesFallbackFonts(fallbackFonts) &&
             useSystemFallbackFonts == this.useSystemFallbackFonts
         ) {
             return false
         }
 
         baseFont = font
-        fallbackBaseFonts = fallbackFonts
+        fallbackBaseFonts = fallbackFonts.toList()
         this.useSystemFallbackFonts = useSystemFallbackFonts
 
         styleFonts.fill(null)
         styleFonts[font.style and STYLE_MASK] = font
-        fallbackStyleFonts = Array(fallbackFonts.size) { arrayOfNulls(STYLE_COUNT) }
+        fallbackStyleFonts = Array(fallbackBaseFonts.size) { arrayOfNulls(STYLE_COUNT) }
 
         systemFallbackFamilies = emptyList()
         systemFontCache.clear()
 
         invalidateResolvedCaches()
+        return true
+    }
+
+    private fun matchesFallbackFonts(fonts: List<Font>): Boolean {
+        if (fonts.size != fallbackBaseFonts.size) return false
+        // List equality can allocate iterators; configuration is checked on every paint.
+        for (index in fonts.indices) {
+            if (fonts[index] != fallbackBaseFonts[index]) return false
+        }
         return true
     }
 

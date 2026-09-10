@@ -17,16 +17,16 @@ package io.github.ketraterm.ui.swing.viewport
 
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 
 class TerminalScrollbarOverlayTest {
     @Test
     fun `thumb is painted inside the reserved right inset`() {
         val overlay = TerminalScrollbarOverlay()
-        val settings = SwingSettings(padding = Insets(0, 4, 8, 10))
+        val settings = SwingSettings(padding = SwingPadding(0, 4, 8, 10))
 
         val thumb =
             overlay.thumbBounds(
@@ -47,7 +47,7 @@ class TerminalScrollbarOverlayTest {
     @Test
     fun `alternate screen uses small edge inset and hides thumb`() {
         val overlay = TerminalScrollbarOverlay()
-        val settings = SwingSettings(padding = Insets(0, 4, 8, 10))
+        val settings = SwingSettings(padding = SwingPadding(0, 4, 8, 10))
 
         assertTrue(
             overlay.containsGutter(
@@ -73,7 +73,7 @@ class TerminalScrollbarOverlayTest {
     @Test
     fun `dragging maps bottom origin thumb movement to terminal scrollback offset`() {
         val overlay = TerminalScrollbarOverlay()
-        val settings = SwingSettings(padding = Insets(0, 4, 8, 10))
+        val settings = SwingSettings(padding = SwingPadding(0, 4, 8, 10))
         var requestedOffset = -1
         var requestedAdjusting = false
 

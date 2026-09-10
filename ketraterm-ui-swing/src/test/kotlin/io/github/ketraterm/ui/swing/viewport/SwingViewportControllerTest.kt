@@ -18,14 +18,14 @@ package io.github.ketraterm.ui.swing.viewport
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 
 class SwingViewportControllerTest {
-    private val settings = SwingSettings(padding = Insets(3, 5, 7, 11), shellIntegrationDecorationGutterWidth = 0)
+    private val settings = SwingSettings(padding = SwingPadding(3, 5, 7, 11), shellIntegrationDecorationGutterWidth = 0)
     private val metrics =
         SwingMetrics(
             cellWidth = 10,
@@ -61,8 +61,8 @@ class SwingViewportControllerTest {
             val controller = SwingViewportController { _, _, _, _, _ -> }
             val settings =
                 SwingSettings(
-                    padding = Insets(0, 4, 8, 12),
-                    alternateScreenPadding = Insets(0, 8, 8, 8),
+                    padding = SwingPadding(0, 4, 8, 12),
+                    alternateScreenPadding = SwingPadding(0, 8, 8, 8),
                 )
 
             val primary =

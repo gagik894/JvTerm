@@ -18,10 +18,10 @@ package io.github.ketraterm.ui.swing.api
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import javax.swing.JButton
@@ -30,7 +30,7 @@ class TerminalSelectionControllerTest {
     private class FakeSelectionHost(
         override val renderCache: TerminalRenderCache,
     ) : TerminalSelectionHost {
-        override val settings = SwingSettings(padding = Insets(0, 0, 0, 0))
+        override val settings = SwingSettings(padding = SwingPadding(0, 0, 0, 0))
         override val metrics =
             SwingMetrics(
                 cellWidth = 10,

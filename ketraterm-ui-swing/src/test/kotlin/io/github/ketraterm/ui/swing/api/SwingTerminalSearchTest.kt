@@ -27,11 +27,11 @@ import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import kotlinx.coroutines.Dispatchers
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 import javax.swing.SwingUtilities
 
 class SwingTerminalSearchTest {
@@ -39,7 +39,7 @@ class SwingTerminalSearchTest {
     fun `clearSearch clears query and result highlights`() {
         val reader = SearchFrameReader()
         val session = testSession(reader)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 1)
@@ -60,7 +60,7 @@ class SwingTerminalSearchTest {
     fun `search scrolls active scrollback result into viewport`() {
         val reader = SearchFrameReader()
         val session = testSession(reader)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 1)

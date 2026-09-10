@@ -21,6 +21,7 @@ import io.github.ketraterm.input.event.*
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.suggestion.*
 import kotlinx.coroutines.*
@@ -31,7 +32,6 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.receiveAsFlow
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 import java.awt.event.KeyEvent
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
@@ -127,7 +127,7 @@ class SwingTerminalShellSuggestionTest {
                 }
             val terminal =
                 SwingTerminal(
-                    settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(5, 4, 7, 6)) },
+                    settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(5, 4, 7, 6)) },
                     hostServices = SwingHostServices(shellSuggestionViewFactory = SwingShellSuggestionViewFactory { view }),
                 )
             try {
@@ -158,7 +158,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -205,7 +205,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -243,7 +243,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -279,7 +279,8 @@ class SwingTerminalShellSuggestionTest {
 
     @Test
     fun `shell input hides popup before invalidation listeners run`() {
-        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
+        val component =
+            SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) })
         val visibleDuringInvalidation = ArrayList<Boolean>()
         val listener =
             SwingShellSuggestionInvalidationListener {
@@ -299,7 +300,8 @@ class SwingTerminalShellSuggestionTest {
     @Test
     fun `clear screen hides popup before command bytes are submitted`() {
         val session = activeSuggestionSession(RecordingConnector())
-        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
+        val component =
+            SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) })
         val visibleDuringInvalidation = ArrayList<Boolean>()
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 4)
@@ -324,7 +326,7 @@ class SwingTerminalShellSuggestionTest {
         val requests = ArrayList<SwingShellSuggestionRequest>()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionHandler =
@@ -360,7 +362,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -428,7 +430,7 @@ class SwingTerminalShellSuggestionTest {
         val session = activeSuggestionSession(connector)
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { flowOf(suggestions("git s")) },
@@ -468,7 +470,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { emissions.receiveAsFlow() },
@@ -520,7 +522,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider = SwingShellSuggestionProvider { emissions.receiveAsFlow() },
@@ -573,7 +575,7 @@ class SwingTerminalShellSuggestionTest {
         val view = RecordingSuggestionView()
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -620,7 +622,7 @@ class SwingTerminalShellSuggestionTest {
         connector.feedFromHost("\u001B]133;A\u0007PS> \u001B]133;B\u0007git s\u001B]133;C\u0007".utf8())
         val component =
             SwingTerminal(
-                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) },
+                settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
                         shellSuggestionProvider =
@@ -749,7 +751,8 @@ class SwingTerminalShellSuggestionTest {
         connector.feedFromHost((1..8).joinToString("") { "line$it\r\n" }.utf8())
         runBlocking { withTimeout(1_000.milliseconds) { session.renderGeneration.first { it >= 0L } } }
         val visibleDuringCallback = ArrayList<Boolean>()
-        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
+        val component =
+            SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(30, 4)
@@ -773,7 +776,8 @@ class SwingTerminalShellSuggestionTest {
 
     @Test
     fun `shown shell suggestion state exposes selected item`() {
-        val component = SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = Insets(0, 0, 0, 0)) })
+        val component =
+            SwingTerminal(settingsProvider = { SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0)) })
         val request = request(anchorColumn = 2, anchorRow = 1)
         val suggestions = suggestions(request.commandText)
 

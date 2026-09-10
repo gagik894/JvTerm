@@ -23,6 +23,65 @@ import java.awt.Font
 
 class FontCacheTest {
     @Test
+    fun replacingCallerFallbackDoesNotChangeConfiguredFontsBeforeUpdate() {
+        val primary = TerminalCacheTestFonts.primary(14f)
+        val fallback = TerminalCacheTestFonts.fallback(14f)
+        val text = TerminalCacheTestFonts.FALLBACK_ONLY_TEXT
+        val fallbacks = mutableListOf(fallback)
+        val cache = FontCache()
+        cache.update(primary, fallbacks, useSystemFallbackFonts = false)
+
+        fallbacks[0] = primary
+        Assertions.assertEquals(fallback.family, cache.fontForText(text, Font.BOLD).family)
+        Assertions.assertTrue(cache.update(primary, fallbacks, useSystemFallbackFonts = false))
+        Assertions.assertEquals(primary.family, cache.fontForText(text, Font.BOLD).family)
+    }
+
+    @Test
+    fun mutableFallbackInputCannotCrashLookup() {
+        val primary = TerminalCacheTestFonts.primary(14f)
+        val fallbacks = mutableListOf<Font>()
+        val cache = FontCache()
+        cache.update(primary, fallbacks, useSystemFallbackFonts = false)
+
+        fallbacks.add(TerminalCacheTestFonts.fallback(14f))
+
+        Assertions.assertSame(primary, cache.fontForCodePoint(0x10FFFF, Font.PLAIN))
+        Assertions.assertSame(primary, cache.fontForText(String(Character.toChars(0x10FFFF)), Font.PLAIN))
+    }
+
+    @Test
+    fun callerMutationTakesEffectOnlyOnExplicitUpdate() {
+        val primary = TerminalCacheTestFonts.primary(14f)
+        val fallback = TerminalCacheTestFonts.fallback(14f)
+        val text = TerminalCacheTestFonts.FALLBACK_ONLY_TEXT
+        val codePoint = text.codePointAt(0)
+        val fallbacks = mutableListOf(fallback)
+        val cache = FontCache()
+        cache.update(primary, fallbacks, useSystemFallbackFonts = false)
+        val generation = cache.generation
+
+        fallbacks.clear()
+        Assertions.assertEquals(fallback.family, cache.fontForCodePoint(codePoint, Font.PLAIN).family)
+        Assertions.assertEquals(fallback.family, cache.fontForText(text, Font.PLAIN).family)
+        Assertions.assertEquals(generation, cache.generation)
+
+        Assertions.assertTrue(cache.update(primary, fallbacks, useSystemFallbackFonts = false))
+        Assertions.assertEquals(generation + 1, cache.generation)
+        Assertions.assertSame(primary, cache.fontForCodePoint(codePoint, Font.PLAIN))
+        Assertions.assertSame(primary, cache.fontForText(text, Font.PLAIN))
+
+        fallbacks.add(fallback)
+        Assertions.assertTrue(cache.update(primary, fallbacks, useSystemFallbackFonts = false))
+        Assertions.assertEquals(generation + 2, cache.generation)
+        Assertions.assertEquals(fallback.family, cache.fontForText(text, Font.PLAIN).family)
+        val resolved = cache.fontForCodePoint(codePoint, Font.PLAIN)
+        Assertions.assertFalse(cache.update(primary, fallbacks.toList(), useSystemFallbackFonts = false))
+        Assertions.assertSame(resolved, cache.fontForCodePoint(codePoint, Font.PLAIN))
+        Assertions.assertEquals(generation + 2, cache.generation)
+    }
+
+    @Test
     fun `font returns cached primary style variant`() {
         val base = TerminalCacheTestFonts.primary(14f)
         val cache = FontCache()

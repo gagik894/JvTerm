@@ -28,12 +28,12 @@ import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.session.TerminalShellIntegrationState
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingSettingsProvider
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
@@ -442,7 +442,7 @@ class SwingTerminalScrollbackTest {
             scrollTestTerminal(
                 settings =
                     SwingSettings(
-                        padding = Insets(0, 0, 0, 0),
+                        padding = SwingPadding(0, 0, 0, 0),
                     ),
             )
 
@@ -501,7 +501,7 @@ class SwingTerminalScrollbackTest {
         val settingsProvider =
             MutableSettingsProvider(
                 SwingSettings(
-                    padding = Insets(0, 0, 0, 0),
+                    padding = SwingPadding(0, 0, 0, 0),
                     shellIntegrationPromptDotsVisible = false,
                 ),
             )
@@ -546,8 +546,8 @@ class SwingTerminalScrollbackTest {
             )
         val settings =
             SwingSettings(
-                padding = Insets(0, 40, 8, 8),
-                alternateScreenPadding = Insets(0, 8, 8, 8),
+                padding = SwingPadding(0, 40, 8, 8),
+                alternateScreenPadding = SwingPadding(0, 8, 8, 8),
                 shellIntegrationDecorationGutterWidth = 32,
             )
         val component = SwingTerminal(settingsProvider = SwingSettingsProvider { settings })
@@ -574,7 +574,7 @@ class SwingTerminalScrollbackTest {
             assertTrue(alternateVisibleSize.width > primaryColumns)
             assertEquals(alternateVisibleSize.width, terminal.width)
             assertEquals(alternateVisibleSize.width, connector.lastColumns.get())
-            assertEquals(Insets(0, 8, 8, 8), settings.alternateScreenPadding)
+            assertEquals(SwingPadding(0, 8, 8, 8), settings.alternateScreenPadding)
         } finally {
             session.close()
         }
@@ -769,7 +769,7 @@ class SwingTerminalScrollbackTest {
 
     private fun scrollTestTerminal(
         hostServices: SwingHostServices = SwingHostServices(),
-        settings: SwingSettings = SwingSettings(padding = Insets(0, 0, 0, 0)),
+        settings: SwingSettings = SwingSettings(padding = SwingPadding(0, 0, 0, 0)),
     ): SwingTerminal =
         SwingTerminal(
             settingsProvider = SwingSettingsProvider { settings },

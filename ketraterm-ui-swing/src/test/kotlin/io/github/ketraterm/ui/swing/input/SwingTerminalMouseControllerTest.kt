@@ -23,12 +23,12 @@ import io.github.ketraterm.protocol.MouseTrackingMode
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import java.awt.Canvas
-import java.awt.Insets
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
@@ -418,7 +418,7 @@ class SwingTerminalMouseControllerTest {
         )
 
     private class RecordingMouseHost(
-        override val settings: SwingSettings = SwingSettings(padding = Insets(0, 0, 0, 0)),
+        override val settings: SwingSettings = SwingSettings(padding = SwingPadding(0, 0, 0, 0)),
         private val hyperlinkPressHandled: Boolean = false,
         private val scrollResult: Boolean = true,
         private val mouseTrackingMode: MouseTrackingMode = MouseTrackingMode.OFF,

@@ -29,11 +29,11 @@ import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 
 class SwingRenderFrameControllerTest {
     @Nested
@@ -119,7 +119,7 @@ class SwingRenderFrameControllerTest {
         private val syncGridToChromeResult: Boolean = false,
     ) : SwingRenderFrameHost {
         override val renderCache = TerminalRenderCache(80, 24)
-        override val settings = SwingSettings(padding = Insets(0, 0, 0, 0))
+        override val settings = SwingSettings(padding = SwingPadding(0, 0, 0, 0))
         override val metrics =
             SwingMetrics(
                 cellWidth = 10,
