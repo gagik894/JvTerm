@@ -58,7 +58,7 @@ internal class SwingTerminalInputController(
                 }
 
                 host.updateHyperlinkActivationHover(event.isControlDown)
-                host.resetCursorBlink(forceRepaint = true)
+                host.resetCursorBlink()
 
                 val keyEvent = keyMapper.keyPressed(event) ?: return
                 host.invalidateShellSuggestions()
@@ -78,7 +78,7 @@ internal class SwingTerminalInputController(
             }
 
             override fun keyTyped(event: KeyEvent) {
-                host.resetCursorBlink(forceRepaint = true)
+                host.resetCursorBlink()
                 if (claimedKeyLifecycle.ownsTypedEvent()) {
                     event.consume()
                     return
@@ -94,7 +94,7 @@ internal class SwingTerminalInputController(
         object : FocusAdapter() {
             override fun focusGained(event: FocusEvent) {
                 host.setTerminalFocused(true)
-                host.resetCursorBlink(forceRepaint = false)
+                host.resetCursorBlink()
                 host.repaintCursorState()
             }
 

@@ -38,7 +38,7 @@ class SwingTerminalInputControllerTest {
             controller.focusListener.focusLost(FocusEvent(source, FocusEvent.FOCUS_LOST))
 
             assertFalse(host.focused)
-            assertEquals(listOf(false), host.cursorBlinkResets)
+            assertEquals(1, host.cursorBlinkResetCount)
             assertEquals(2, host.cursorRepaints)
             assertEquals(1, host.hideShellSuggestionsCount)
         }
@@ -61,7 +61,7 @@ class SwingTerminalInputControllerTest {
             assertEquals(1, host.hostKeyPressCount)
             assertEquals(1, host.shellSuggestionKeyPressCount)
             assertTrue(host.hyperlinkHoverUpdates.isEmpty())
-            assertTrue(host.cursorBlinkResets.isEmpty())
+            assertEquals(0, host.cursorBlinkResetCount)
             assertTrue(event.isConsumed)
         }
 
@@ -254,24 +254,23 @@ class SwingTerminalInputControllerTest {
 
     private class RecordingInputHost(
         private val hostKeyHandled: Boolean = false,
-        shellSuggestionKeyHandled: Boolean = false,
+        var shellSuggestionKeyHandled: Boolean = false,
     ) : SwingTerminalInputHost {
         override val session: TerminalSession? = null
         val hyperlinkHoverUpdates = ArrayList<Boolean>()
-        val cursorBlinkResets = ArrayList<Boolean>()
+        var cursorBlinkResetCount = 0
         var focused = false
         var cursorRepaints = 0
         var hostKeyPressCount = 0
         var shellSuggestionKeyPressCount = 0
-        var shellSuggestionKeyHandled = shellSuggestionKeyHandled
         var invalidationCount = 0
 
         override fun updateHyperlinkActivationHover(active: Boolean) {
             hyperlinkHoverUpdates += active
         }
 
-        override fun resetCursorBlink(forceRepaint: Boolean) {
-            cursorBlinkResets += forceRepaint
+        override fun resetCursorBlink() {
+            cursorBlinkResetCount++
         }
 
         override fun setTerminalFocused(focused: Boolean) {

@@ -335,8 +335,8 @@ class SwingTerminal
                         hyperlinkController.updateHyperlinkActivationHover(active)
                     }
 
-                    override fun resetCursorBlink(forceRepaint: Boolean) {
-                        this@SwingTerminal.resetCursorBlinkOnEdt(forceRepaint)
+                    override fun resetCursorBlink() {
+                        if (resetCursorBlinkOnEdt()) renderFrameController.repaintBlinkState()
                     }
 
                     override fun setTerminalFocused(focused: Boolean) {
@@ -460,9 +460,7 @@ class SwingTerminal
                     override val componentHeight: Int get() = this@SwingTerminal.height
                     override val cursorPresentationEnabled: Boolean get() = this@SwingTerminal.cursorPresentationEnabled
 
-                    override fun resetCursorBlinkForFrame() {
-                        this@SwingTerminal.resetCursorBlinkOnEdt(forceRepaint = false)
-                    }
+                    override fun resetCursorBlinkForFrame(): Boolean = resetCursorBlinkOnEdt()
 
                     override fun refreshRenderCacheFromSession(session: TerminalSession) {
                         this@SwingTerminal.refreshRenderCacheFromSession(session)
@@ -1782,15 +1780,14 @@ class SwingTerminal
             return true
         }
 
-        private fun resetCursorBlinkOnEdt(forceRepaint: Boolean) {
+        /** Returns whether the shared blink visibility changed; callers own pixel invalidation. */
+        private fun resetCursorBlinkOnEdt(): Boolean {
             val wasVisible = cursorBlinkVisible
             cursorBlinkVisible = true
             if (settings.cursorBlinkMillis > 0) {
                 cursorTimer.restart()
             }
-            if (forceRepaint && !wasVisible) {
-                renderFrameController.repaintBlinkState()
-            }
+            return !wasVisible
         }
 
         private fun configureCursorTimerOnEdt() {

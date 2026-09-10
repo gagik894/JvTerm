@@ -33,7 +33,12 @@ internal interface SwingRenderFrameHost {
     val componentHeight: Int
     val cursorPresentationEnabled: Boolean
 
-    fun resetCursorBlinkForFrame()
+    /**
+     * Restarts the shared cursor/text blink phase without requesting a repaint.
+     * Returns whether visibility changed; the controller invalidates blink
+     * regions after installing the published frame and its geometry.
+     */
+    fun resetCursorBlinkForFrame(): Boolean
 
     fun refreshRenderCacheFromSession(session: TerminalSession)
 

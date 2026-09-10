@@ -50,13 +50,13 @@ internal class SwingRenderFrameController(
 
     fun handlePublishedFrame() {
         val boundSession = host.session ?: return
-        host.resetCursorBlinkForFrame()
+        val blinkVisibilityChanged = host.resetCursorBlinkForFrame()
         host.refreshRenderCacheFromSession(boundSession)
         val followUpRenderRequired =
             host.syncTerminalGridToActiveChrome() ||
                 host.clampViewport(host.renderCache.historySize, host.renderCache.discardedCount) ||
                 host.renderCache.scrollbackOffset != host.requestedViewportOffset()
-        var shellIntegrationDecorationsChanged = host.refreshShellIntegrationDecorations(boundSession)
+        val shellIntegrationDecorationsChanged = host.refreshShellIntegrationDecorations(boundSession)
         if (followUpRenderRequired) host.requestRender(boundSession)
         host.refreshSearchForFrame()
         host.publishViewportState(host.renderCache.historySize)
@@ -70,6 +70,7 @@ internal class SwingRenderFrameController(
             forceFullRepaint = shellIntegrationDecorationsChanged,
             visualGeometry = host.visualGeometry,
         )
+        if (blinkVisibilityChanged) repaintBlinkState()
     }
 
     fun repaintBlinkState() {
