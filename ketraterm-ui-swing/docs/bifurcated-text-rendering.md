@@ -24,6 +24,20 @@ fallback dispatch. A directional character elsewhere in a row therefore cannot
 disable a block primitive or native emoji. Emoji classification happens before
 access to the lazy native rasterizer.
 
+## Native emoji image caching
+
+`TerminalEmojiImageCache` retains up to 1,024 results for one native rasterizer.
+Identity consists of code point content and raster pixel size; scalar cells and
+single-code-point clusters share entries. Position, foreground color, and cell
+span do not affect identity when the resulting raster size is unchanged.
+
+Lookups reuse a key with primitive scalar fields or a borrowed cluster slice.
+Only misses snapshot the content and construct text for the native rasterizer.
+Borrowed arrays are released after lookup. Successful images and unsupported
+null results share the same access-order LRU, so repeated unsupported text uses
+Java2D fallback without retrying native work until eviction. Replacing the
+painter replaces the rasterizer and its cache together.
+
 ## Contextual shaping and terminal geometry
 
 Shaping spans are constrained by direction, font style, Unicode script, and cell

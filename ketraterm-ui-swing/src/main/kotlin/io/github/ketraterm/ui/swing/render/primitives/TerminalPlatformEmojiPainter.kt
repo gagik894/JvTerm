@@ -15,6 +15,7 @@
  */
 package io.github.ketraterm.ui.swing.render.primitives
 
+import io.github.ketraterm.ui.swing.render.cache.TerminalEmojiImageCache
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
@@ -31,14 +32,9 @@ internal class TerminalPlatformEmojiPainter(
 ) {
     constructor(rasterizer: TerminalPlatformEmojiRasterizer) : this({ rasterizer })
 
-    private val rasterizer: TerminalPlatformEmojiRasterizer by lazy(LazyThreadSafetyMode.PUBLICATION) {
-        rasterizerFactory()
+    private val cache by lazy(LazyThreadSafetyMode.PUBLICATION) {
+        TerminalEmojiImageCache(rasterizerFactory())
     }
-
-    private val cache =
-        object : LinkedHashMap<EmojiImageKey, BufferedImage>(CACHE_CAPACITY, LOAD_FACTOR, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<EmojiImageKey, BufferedImage>?): Boolean = size > CACHE_CAPACITY
-        }
 
     fun paintCodePoint(
         g: Graphics2D,
@@ -48,9 +44,10 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!usesEmojiPresentation(codePoint) || !rasterizer.available) return false
-        val text = String(Character.toChars(codePoint))
-        return paintText(g, text, column, row, columnSpan, metrics)
+        if (!usesEmojiPresentation(codePoint)) return false
+        val pixelSize = pixelSize(metrics, columnSpan)
+        val image = cache.codePointImage(codePoint, pixelSize) ?: return false
+        return paintImage(g, image, pixelSize, column, row, columnSpan, metrics)
     }
 
     fun paintCluster(
@@ -63,26 +60,26 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!usesEmojiPresentation(codepoints, offset, length) || !rasterizer.available) return false
-        val text = String(codepoints, offset, length)
-        return paintText(g, text, column, row, columnSpan, metrics)
+        if (!usesEmojiPresentation(codepoints, offset, length)) return false
+        val pixelSize = pixelSize(metrics, columnSpan)
+        val image = cache.clusterImage(codepoints, offset, length, pixelSize) ?: return false
+        return paintImage(g, image, pixelSize, column, row, columnSpan, metrics)
     }
 
-    private fun paintText(
+    private fun pixelSize(
+        metrics: SwingMetrics,
+        columnSpan: Int,
+    ): Int = maxOf(1, min(metrics.cellWidth * columnSpan, metrics.cellHeight))
+
+    private fun paintImage(
         g: Graphics2D,
-        text: String,
+        image: BufferedImage,
+        pixelSize: Int,
         column: Int,
         row: Int,
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        val pixelSize = maxOf(1, min(metrics.cellWidth * columnSpan, metrics.cellHeight))
-        val key = EmojiImageKey(text, pixelSize)
-        val image =
-            synchronized(cache) {
-                cache[key] ?: rasterizer.rasterize(text, pixelSize)?.also { cache[key] = it }
-            } ?: return false
-
         val cellX = column * metrics.cellWidth
         val cellY = row * metrics.cellHeight
         val cellWidth = metrics.cellWidth * columnSpan
@@ -164,14 +161,7 @@ internal class TerminalPlatformEmojiPainter(
             codePoint == 0x2B50 ||
             codePoint == 0x2B55
 
-    private data class EmojiImageKey(
-        val text: String,
-        val pixelSize: Int,
-    )
-
     private companion object {
-        private const val CACHE_CAPACITY = 1024
-        private const val LOAD_FACTOR = 0.75f
         private const val VARIATION_SELECTOR_15 = 0xFE0E
         private const val VARIATION_SELECTOR_16 = 0xFE0F
         private const val ZERO_WIDTH_JOINER = 0x200D
