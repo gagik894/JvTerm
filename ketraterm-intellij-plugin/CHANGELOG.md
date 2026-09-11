@@ -5,7 +5,7 @@
 - Fixed alignment of Hebrew, Arabic, and mixed-direction text with cell backgrounds, the cursor, selection and search highlights, and mouse targets.
 - Fixed Arabic letter forms changing under the block cursor and missing text in very long lines that require contextual shaping.
 - Preserved native emoji rendering and solid block graphics on lines containing right-to-left text.
-- Fixed concealed text and emoji becoming visible under the block cursor or when hovering over links.
+- Fixed concealed text and emoji becoming visible under the block cursor or when hovering over links. Prevented neighboring characters from spilling into concealed cells.
 - Fixed rectangular selections widening across mixed-direction lines or when part of the selection scrolls out of view.
 - Fixed a terminal view retaining the previous session's text or search results when switching to a new session.
 - Fixed blinking text and the cursor remaining hidden after unrelated output updates.

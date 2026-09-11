@@ -284,43 +284,74 @@ class TerminalShapedGlyphVectorCacheTest {
         allocationBean.isThreadAllocatedMemoryEnabled = true
         val thread = Thread.currentThread().threadId()
         val text = "אבג".repeat(45)
-        val run =
-            TerminalShapedGlyphVectorCache().run(
-                text.toCharArray(),
-                text.length,
-                IntArray(text.length) {
-                    it
-                },
-                text.length,
-                Font.PLAIN,
-                CELL_WIDTH,
-                fonts,
-                context,
-                rtl = true,
-            )
-        val image = BufferedImage(text.length * CELL_WIDTH, 40, BufferedImage.TYPE_INT_ARGB)
-        val g = image.createGraphics()
-        try {
-            g.color = Color.WHITE
-            // An interior cell selects one batch, matching the control's one
-            // Java2D submission. Batch-boundary clips can select two batches.
+        for (antialiased in booleanArrayOf(false, true)) {
+            val recordingFont = BatchRecordingFont()
+            val recordingFonts = FontCache().apply { update(recordingFont, emptyList(), useSystemFallbackFonts = false) }
+            val run =
+                TerminalShapedGlyphVectorCache().run(
+                    text.toCharArray(),
+                    text.length,
+                    IntArray(text.length) { it },
+                    text.length,
+                    Font.PLAIN,
+                    CELL_WIDTH,
+                    recordingFonts,
+                    FontRenderContext(null, antialiased, false),
+                    rtl = true,
+                )
+            assertSame(recordingFont, run.glyphVector.font)
+            // This clip is well inside one retained batch. Use that exact vector
+            // so its glyph count, flags and context match the direct control.
+            // macOS can promote AA_OFF to AA_ON and copy the submitted vector;
+            // using the full run as the control would measure a larger JDK copy.
             val start = 31 * CELL_WIDTH
             val end = 32 * CELL_WIDTH
-            g.clipRect(start, 0, end - start, image.height)
-            repeat(10_000) {
-                run.draw(g, 0f, 26f, start.toFloat(), end.toFloat())
-                g.drawGlyphVector(run.glyphVector, 0f, 26f)
+            val batch =
+                recordingFont.batches.single {
+                    val bounds = it.visualBounds
+                    bounds.maxX > start && bounds.minX < end
+                }
+            assertTrue(batch.numGlyphs < run.glyphVector.numGlyphs)
+
+            val image = BufferedImage(text.length * CELL_WIDTH, 40, BufferedImage.TYPE_INT_ARGB)
+            val g = image.createGraphics()
+            try {
+                g.color = Color.WHITE
+                g.clipRect(start, 0, end - start, image.height)
+
+                fun drawBatch() {
+                    repeat(2_000) { run.draw(g, 0f, 26f, start.toFloat(), end.toFloat()) }
+                }
+
+                fun drawDirect() {
+                    repeat(2_000) { g.drawGlyphVector(batch, 0f, 26f) }
+                }
+
+                repeat(10) {
+                    drawBatch()
+                    drawDirect()
+                }
+                val batchBefore = allocationBean.getThreadAllocatedBytes(thread)
+                drawBatch()
+                val batchAllocated = allocationBean.getThreadAllocatedBytes(thread) - batchBefore
+                val directBefore = allocationBean.getThreadAllocatedBytes(thread)
+                drawDirect()
+                val directAllocated = allocationBean.getThreadAllocatedBytes(thread) - directBefore
+                assertEquals(directAllocated, batchAllocated, "antialiased=$antialiased")
+            } finally {
+                g.dispose()
             }
-            val batchBefore = allocationBean.getThreadAllocatedBytes(thread)
-            repeat(2_000) { run.draw(g, 0f, 26f, start.toFloat(), end.toFloat()) }
-            val batchAllocated = allocationBean.getThreadAllocatedBytes(thread) - batchBefore
-            val directBefore = allocationBean.getThreadAllocatedBytes(thread)
-            repeat(2_000) { g.drawGlyphVector(run.glyphVector, 0f, 26f) }
-            val directAllocated = allocationBean.getThreadAllocatedBytes(thread) - directBefore
-            assertEquals(directAllocated, batchAllocated)
-        } finally {
-            g.dispose()
         }
+    }
+
+    /** Records batches during cache construction, before positions and transforms are assigned. */
+    private class BatchRecordingFont : Font(SERIF, PLAIN, 18) {
+        val batches = mutableListOf<GlyphVector>()
+
+        override fun createGlyphVector(
+            context: FontRenderContext,
+            glyphCodes: IntArray,
+        ): GlyphVector = super.createGlyphVector(context, glyphCodes).also { batches.add(it) }
     }
 
     private fun renderRun(

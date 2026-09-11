@@ -17,6 +17,7 @@ package io.github.ketraterm.ui.swing.render.primitives
 
 import com.sun.management.ThreadMXBean
 import io.github.ketraterm.ui.swing.render.TEST_RED
+import io.github.ketraterm.ui.swing.render.cache.TerminalEmojiImageCache
 import io.github.ketraterm.ui.swing.render.containsColor
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
@@ -171,7 +172,7 @@ class TerminalPlatformEmojiPainterTest {
 
     @ParameterizedTest
     @CsvSource("false, false", "false, true", "true, false", "true, true")
-    fun `warmed emoji paints allocate no storage for images or negative results`(
+    fun `warmed image-cache lookups allocate no storage for images or negative results`(
         cluster: Boolean,
         supported: Boolean,
     ) {
@@ -181,10 +182,50 @@ class TerminalPlatformEmojiPainterTest {
         assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
         val rasterizedImage = if (supported) BufferedImage(10, 10, BufferedImage.TYPE_INT_ARGB) else null
         val rasterizer = CountingEmojiRasterizer(rasterizedImage)
+        val cache = TerminalEmojiImageCache(rasterizer)
+        val codepoints = intArrayOf(0x41, 0x1F469, 0x200D, 0x1F4BB, 0x42)
+
+        fun lookup(): BufferedImage? =
+            if (cluster) {
+                cache.clusterImage(codepoints, 1, 3, 10)
+            } else {
+                cache.codePointImage(0x1F600, 10)
+            }
+
+        fun lookupBatch(): Int {
+            var matching = 0
+            repeat(10_000) {
+                if (lookup() === rasterizedImage) matching++
+            }
+            return matching
+        }
+
+        assertSame(rasterizedImage, lookup())
+        repeat(5) { lookupBatch() }
+        val threadId = Thread.currentThread().threadId()
+        var minimum = Long.MAX_VALUE
+        var matching = 0
+        repeat(5) {
+            val before = allocationBean.getThreadAllocatedBytes(threadId)
+            matching += lookupBatch()
+            minimum = minOf(minimum, allocationBean.getThreadAllocatedBytes(threadId) - before)
+        }
+        assertEquals(50_000, matching)
+        assertEquals(1, rasterizer.calls, "A retained miss must not retry native rasterization")
+        assertEquals(0L, minimum, "Warmed image-cache lookups must not allocate keys or text")
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `warmed negative emoji paints allocate no storage before fallback`(cluster: Boolean) {
+        val bean = ManagementFactory.getThreadMXBean()
+        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
+        val allocationBean = bean as ThreadMXBean
+        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+        val rasterizer = CountingEmojiRasterizer(null)
         val painter = TerminalPlatformEmojiPainter(rasterizer)
         val codepoints = intArrayOf(0x41, 0x1F469, 0x200D, 0x1F4BB, 0x42)
-        val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
-        val g = image.createGraphics()
+        val g = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB).createGraphics()
         try {
             fun paintBatch(): Int {
                 var painted = 0
@@ -209,9 +250,9 @@ class TerminalPlatformEmojiPainterTest {
                 painted += paintBatch()
                 minimum = minOf(minimum, allocationBean.getThreadAllocatedBytes(threadId) - before)
             }
-            assertEquals(if (supported) 50_000 else 0, painted)
+            assertEquals(0, painted)
             assertEquals(1, rasterizer.calls, "A retained miss must not retry native rasterization")
-            assertEquals(0L, minimum, "Warmed emoji painting must not allocate lookup keys or text")
+            assertEquals(0L, minimum, "Warmed negative paints must not allocate before fallback")
         } finally {
             g.dispose()
         }

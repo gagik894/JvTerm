@@ -19,6 +19,13 @@ ASCII batching compares foreground, font style, visibility, decorations, and
 hyperlink state. Background runs are painted independently. The ASCII path does
 not invoke contextual shaping or font fallback searches.
 
+ASCII ink is clipped to the run's cell span, just like shaped text; matching
+advances alone do not prevent italic or antialiased ink from crossing a style or
+visibility boundary. If the caller's clip bounds already lie inside the span,
+ASCII painting leaves the clip untouched. Otherwise it intersects and restores
+the exact clip, including nonrectangular shapes. Those Java2D clip operations can
+allocate; they are outside the contained-clip allocation assertion below.
+
 Ordinary cells and block-cursor foreground share primitive, native-emoji, and
 fallback dispatch. A directional character elsewhere in a row therefore cannot
 disable a block primitive or native emoji. Emoji classification happens before
@@ -113,11 +120,19 @@ Their assertions cover the following scopes:
 | Probe | Allocation assertion and boundary |
 | --- | --- |
 | `TerminalTextRunStyleTest` and `TerminalShapedGlyphVectorCacheTest` | Zero bytes for warmed style scanning and shaped-run cache lookup; creation and positioning on cache misses are outside these measurements |
-| `TerminalPlatformEmojiPainterTest` | Zero bytes for warmed scalar/cluster paint calls with a recording rasterizer returning a preallocated image or null; successful hits include image drawing, while negative hits stop before Java2D text fallback |
+| `TerminalPlatformEmojiPainterTest` | Zero bytes for warmed scalar/cluster lookups in `TerminalEmojiImageCache`, including retained images and negative results, and for negative painter results before fallback; Java2D image drawing is outside these measurements |
 | `TerminalBidiLayoutTest` | Zero bytes for warmed row mapping, range projection, and retained-capacity overscan transitions; frame copying is outside the overscan measurement |
+| ASCII painting with a contained caller clip | The same allocated bytes as equivalent direct character or positioned-vector drawing, with antialiasing requested both on and off; wider clips requiring intersection are outside this assertion |
 | Styled-row and clipped-glyph-batch probes | The same allocated bytes as equivalent direct Java2D glyph drawing, not an assertion that Java2D itself allocates zero bytes |
 | `TerminalScrollbarOverlayTest` | The same allocated bytes as equivalent direct Java2D rounded-rectangle drawing; overlay geometry and color lookup add no allocation in the warmed fixture |
 | `SwingViewportControllerTest` | Zero bytes for warmed primitive viewport publication and its recording callback; explicitly requested immutable snapshots are outside this measurement |
+
+The single-batch allocation control submits the actual retained batch, matching
+its glyph count, font, positions, transforms, and font-render context. Comparing
+against the larger full run would include different Java2D work. Raster tests
+preserve antialiased coverage: cursor comparisons erase the previous cell before
+repainting and compare exact alpha and color. Drawing again with `SrcOver` onto
+existing coverage is not an idempotent operation, even with the same glyphs.
 
 Scrollbar painting receives primitive viewport metrics directly from the EDT-owned
 controller and reuses thumb geometry and colors. It does not call the public
