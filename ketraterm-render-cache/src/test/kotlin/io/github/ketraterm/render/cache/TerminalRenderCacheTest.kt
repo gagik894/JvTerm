@@ -18,8 +18,218 @@ package io.github.ketraterm.render.cache
 import io.github.ketraterm.render.api.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
 class TerminalRenderCacheTest {
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `replacement reader cannot reuse equal metadata from the previous source`(absoluteRange: Boolean) {
+        val first = MutableFrame(columns = 5, rows = 1).apply { setRow(0, "alpha") }
+        val second = MutableFrame(columns = 5, rows = 1).apply { setRow(0, "bravo") }
+        val cache = TerminalRenderCache(5, 1)
+        val codeStorage = cache.codeWords
+        val generationStorage = cache.lineGenerations
+        assertEquals(first.frameGeneration, second.frameGeneration)
+        assertEquals(first.structureGeneration, second.structureGeneration)
+        assertEquals(first.lineId(0), second.lineId(0))
+        assertEquals(first.lineGeneration(0), second.lineGeneration(0))
+
+        fun read(reader: TerminalRenderFrameReader) {
+            if (absoluteRange) {
+                cache.updateFromAbsoluteRange(reader, 0L, Long.MAX_VALUE)
+            } else {
+                cache.updateFrom(reader)
+            }
+        }
+
+        read(first.reader)
+        read(first.reader)
+        assertEquals("alpha", cache.rowText(0))
+        assertEquals(1, first.copyCounts[0])
+        read(second.reader)
+        read(second.reader)
+
+        assertEquals("bravo", cache.rowText(0))
+        assertEquals(1, second.copyCounts[0])
+        assertTrue(cache.hasFrame)
+        assertSame(codeStorage, cache.codeWords)
+        assertSame(generationStorage, cache.lineGenerations)
+    }
+
+    @Test
+    fun `reset clears source data while retaining allocated storage`() {
+        val frame =
+            MutableFrame(3, 2).apply {
+                setClusterRow("e\u0301x")
+                setRow(1, "abc")
+                setBlink(1, 0, true)
+                setWrapped(1, true)
+                activeBuffer = TerminalRenderBufferKind.ALTERNATE
+                historySize = 8
+                scrollbackOffset = 2
+                discardedCount = 40L
+                palette = TerminalColorPalette(defaultBackground = 0xFF123456.toInt())
+            }
+        val cache = TerminalRenderCache(3, 2, rowCapacityReserve = 1)
+        val emptyPalette = cache.palette
+        assertFalse(cache.hasFrame)
+        cache.updateFrom(frame.reader)
+        cache.hyperlinkIds[0] = 17
+        cache.extraAttrWords[0] = 23L
+        val codeStorage = cache.codeWords
+        val attrStorage = cache.attrWords
+        val clusterStorage = cache.clusterCodepoints
+        val generationStorage = cache.lineGenerations
+
+        cache.reset()
+
+        assertFalse(cache.hasFrame)
+        assertEquals(3, cache.columns)
+        assertEquals(2, cache.rows)
+        assertSame(codeStorage, cache.codeWords)
+        assertSame(attrStorage, cache.attrWords)
+        assertSame(clusterStorage, cache.clusterCodepoints)
+        assertSame(generationStorage, cache.lineGenerations)
+        assertTrue(cache.codeWords.all { it == 0 })
+        assertTrue(cache.attrWords.all { it == TerminalRenderAttrs.DEFAULT })
+        assertTrue(cache.flags.all { it == TerminalRenderCellFlags.EMPTY })
+        assertTrue(cache.extraAttrWords.all { it == TerminalRenderExtraAttrs.DEFAULT })
+        assertTrue(cache.hyperlinkIds.all { it == 0 })
+        assertTrue(cache.clusterRefs.all { it == 0L })
+        assertTrue(cache.clusterCodepoints.all { it == 0 })
+        assertTrue(cache.lineIds.all { it == 0L })
+        assertTrue(cache.lineWrapped.none { it })
+        assertTrue(cache.lineHasBlinkingText.none { it })
+        assertFalse(cache.hasBlinkingText)
+        assertNull(cache.cursor)
+        assertSame(emptyPalette, cache.palette)
+        assertEquals(TerminalRenderBufferKind.PRIMARY, cache.activeBuffer)
+        assertEquals(0, cache.historySize)
+        assertEquals(0, cache.scrollbackOffset)
+        assertEquals(0L, cache.discardedCount)
+
+        cache.updateFrom(frame.reader)
+
+        assertTrue(cache.hasFrame)
+        assertEquals("e\u0301", cache.clusterText(0, 0))
+        assertEquals("abc", cache.rowText(1))
+        assertArrayEquals(intArrayOf(2, 2), frame.copyCounts)
+        assertSame(codeStorage, cache.codeWords)
+    }
+
+    @Test
+    fun `direct consumers can end a source lifetime before accepting equal metadata`() {
+        val first = MutableFrame(5, 1).apply { setRow(0, "alpha") }
+        val second = MutableFrame(5, 1).apply { setRow(0, "bravo") }
+        val cache = TerminalRenderCache(5, 1)
+        cache.accept(first)
+
+        cache.reset()
+        cache.accept(second)
+
+        assertEquals("bravo", cache.rowText(0))
+        assertTrue(cache.hasFrame)
+    }
+
+    @Test
+    fun `rotating published caches preserve their reader lifetime`() {
+        val frame = MutableFrame(3, 1).apply { setRow(0, "abc") }
+        val firstPublication = TerminalRenderCache(3, 1).apply { updateFrom(frame.reader) }
+        val secondPublication = TerminalRenderCache(3, 1).apply { updateFrom(frame.reader) }
+        val cache = TerminalRenderCache(3, 1)
+
+        cache.updateFrom(firstPublication)
+        cache.updateFrom(frame.reader)
+        cache.updateFrom(secondPublication)
+        cache.updateFromAbsoluteRange(frame.reader, 0L, Long.MAX_VALUE)
+
+        assertEquals("abc", cache.rowText(0))
+        assertEquals(2, frame.copyCounts[0])
+        val replacement = MutableFrame(3, 1).apply { setRow(0, "xyz") }
+        cache.updateFrom(replacement.reader)
+        assertEquals("xyz", cache.rowText(0))
+        assertEquals(1, replacement.copyCounts[0])
+    }
+
+    @Test
+    fun `copying an empty cache ends the previous frame lifetime`() {
+        val frame = MutableFrame(3, 1).apply { setRow(0, "abc") }
+        val cache = TerminalRenderCache(3, 1).apply { updateFrom(frame.reader) }
+        val storage = cache.codeWords
+
+        cache.updateFrom(TerminalRenderCache(3, 1))
+
+        assertFalse(cache.hasFrame)
+        assertEquals("   ", cache.rowText(0))
+        assertNull(cache.cursor)
+        assertSame(storage, cache.codeWords)
+        cache.updateFrom(frame.reader)
+        assertTrue(cache.hasFrame)
+        assertEquals("abc", cache.rowText(0))
+        assertEquals(2, frame.copyCounts[0])
+    }
+
+    @Test
+    fun `shape change copies rows even when generations equal initialization values`() {
+        val cache = TerminalRenderCache(1, 1)
+        cache.accept(MutableFrame(1, 1).apply { setRow(0, "x") })
+        val frame = MutableFrame(3, 1).apply { setRow(0, "abc") }
+        val sentinelFrame =
+            object : TerminalRenderFrame by frame {
+                override val structureGeneration: Long = -1L
+
+                override fun lineGeneration(row: Int): Long = -1L
+
+                override fun lineId(row: Int): Long = 0L
+            }
+
+        cache.accept(sentinelFrame)
+
+        assertEquals("abc", cache.rowText(0))
+        assertTrue(cache.hasFrame)
+        assertTrue(cache.shapeChangedOnLastUpdate)
+        assertEquals(1, frame.copyCounts[0])
+    }
+
+    @Test
+    fun `failed frame copy cannot publish partial state or skip rows on retry`() {
+        val frame =
+            MutableFrame(3, 2).apply {
+                setRow(0, "abc")
+                setRow(1, "def")
+            }
+        val cache = TerminalRenderCache(3, 2).apply { updateFrom(frame.reader) }
+        frame.setRow(0, "xyz")
+        frame.setRow(1, "uvw")
+        frame.failAtRow = 1
+
+        assertThrows(IllegalStateException::class.java) { cache.updateFrom(frame.reader) }
+        assertFalse(cache.hasFrame)
+        frame.failAtRow = -1
+        cache.updateFrom(frame.reader)
+
+        assertTrue(cache.hasFrame)
+        assertEquals("xyz", cache.rowText(0))
+        assertEquals("uvw", cache.rowText(1))
+        assertArrayEquals(intArrayOf(3, 3), frame.copyCounts)
+    }
+
+    @Test
+    fun `content generation survives frame and cache copies independently of frame generation`() {
+        val frame = MutableFrame(columns = 3, rows = 2)
+        val source = TerminalRenderCache(1, 1)
+        val destination = TerminalRenderCache(1, 1)
+        for (generation in longArrayOf(5L, Long.MAX_VALUE, Long.MIN_VALUE, 0L)) {
+            frame.contentGeneration = generation
+            frame.frameGeneration++
+            source.updateFrom(frame.reader)
+            destination.updateFrom(source)
+            assertEquals(generation, source.contentGeneration)
+            assertEquals(generation, destination.contentGeneration)
+        }
+    }
+
     @Test
     fun `constructor rejects non-positive dimensions`() {
         assertAll(
@@ -567,9 +777,15 @@ class TerminalRenderCacheTest {
         private val clusters = Array(rows) { arrayOfNulls<String>(columns) }
 
         val copyCounts = IntArray(rows)
+        var failAtRow: Int = -1
 
         override var frameGeneration: Long = 0L
+        override var contentGeneration: Long = 0L
         override var structureGeneration: Long = 0L
+        override var historySize: Int = 0
+        override var scrollbackOffset: Int = 0
+        override var discardedCount: Long = 0L
+        override var palette: TerminalColorPalette = TerminalColorPalette()
         override var activeBuffer: TerminalRenderBufferKind = TerminalRenderBufferKind.PRIMARY
         override var cursor: TerminalRenderCursor =
             TerminalRenderCursor(
@@ -671,6 +887,7 @@ class TerminalRenderCacheTest {
             clusterDataSink: TerminalRenderClusterDataSink?,
         ) {
             copyCounts[row]++
+            check(row != failAtRow) { "frame copy failed at row $row" }
             var col = 0
             while (col < columns) {
                 codeWords[codeOffset + col] = this.codeWords[row][col]

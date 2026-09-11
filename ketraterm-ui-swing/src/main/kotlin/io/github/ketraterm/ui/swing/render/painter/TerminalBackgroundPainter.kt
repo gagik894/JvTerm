@@ -18,6 +18,7 @@ package io.github.ketraterm.ui.swing.render.painter
 import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.SwingColors
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
@@ -50,6 +51,7 @@ internal class TerminalBackgroundPainter(
         palette: TerminalColorPalette,
         metrics: SwingMetrics,
         row: Int,
+        bidi: TerminalBidiLayout.Row? = null,
     ) {
         val attrWords = cache.attrWords
         val rowOffset = cache.rowOffset(row)
@@ -67,13 +69,13 @@ internal class TerminalBackgroundPainter(
 
         var column = 0
         while (column < cache.columns) {
-            val background = SwingColors.background(palette, attrWords[rowOffset + column])
+            val background = SwingColors.background(palette, attrWords[rowOffset + (bidi?.logicalColumn(column) ?: column)])
             val start = column
 
             column++
             while (
                 column < cache.columns &&
-                SwingColors.background(palette, attrWords[rowOffset + column]) == background
+                SwingColors.background(palette, attrWords[rowOffset + (bidi?.logicalColumn(column) ?: column)]) == background
             ) {
                 column++
             }

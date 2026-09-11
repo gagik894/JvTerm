@@ -17,7 +17,7 @@ package io.github.ketraterm.ui.swing.api
 
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
-import io.github.ketraterm.ui.swing.api.CellSelection.Companion.NO_RANGE
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 
 /**
  * Half-open terminal cell selection in visible render-cache coordinates.
@@ -26,6 +26,9 @@ import io.github.ketraterm.ui.swing.api.CellSelection.Companion.NO_RANGE
  * [caretColumn] and [caretRow] identify the moving edge and may be before the
  * anchor for backward selections. Columns are caret positions between cells, so
  * selecting cells 2 through 4 on one row is represented as columns 2..5.
+ * Linear selections use logical columns in stored text order. Block selections
+ * use visual columns and the same horizontal interval on every selected row;
+ * copying a block maps its cells back to logical order independently per row.
  *
  * @property anchorColumn zero-based anchor caret column.
  * @property anchorRow zero-based anchor row.
@@ -51,15 +54,18 @@ data class CellSelection(
      * Returns true when the selection covers no cells.
      */
     val isEmpty: Boolean
-        get() = anchorColumn == caretColumn && anchorRow == caretRow
+        get() = anchorColumn == caretColumn && (isBlock || anchorRow == caretRow)
 
     /**
      * Returns the selected half-open column range for [row], packed as
      * `start shl 32 | end`, or [NO_RANGE] when [row] is outside the selection.
+     * The range uses logical columns for linear selections and visual columns
+     * for blocks. A block's visual bounds do not depend on the row's bidi order.
      *
      * @param row visible render-cache row.
      * @param columns visible render-cache column count.
-     * @param cache optional terminal render cache used to adjust selection boundaries for wide characters.
+     * @param cache optional cache used to include complete wide cells in linear
+     * selections. Block bounds require a row's visual mapping for this adjustment.
      * @return packed half-open range, or [NO_RANGE].
      */
     fun packedColumnRange(
@@ -69,43 +75,52 @@ data class CellSelection(
     ): Long {
         if (isEmpty || row < startRow || row > endRow) return NO_RANGE
 
-        var start =
-            when {
-                isBlock -> minOf(anchorColumn, caretColumn)
-                startRow == endRow -> startColumn
-                row == startRow -> startColumn
-                else -> 0
-            }.coerceIn(0, columns)
+        val start = (if (isBlock || row == startRow) startColumn else 0).coerceIn(0, columns)
+        val end = (if (isBlock || row == endRow) endColumn else columns).coerceIn(0, columns)
+        if (start >= end) return NO_RANGE
+        val range = packRange(start, end)
+        return if (cache != null && !isBlock) expandWideCells(range, row, cache, null) else range
+    }
 
-        val endVal =
-            when {
-                isBlock -> maxOf(anchorColumn, caretColumn)
-                startRow == endRow -> endColumn
-                row == endRow -> endColumn
-                else -> columns
-            }.coerceIn(0, columns)
-        var end = endVal
+    /** Resolves complete cells in the selection's coordinate space using the row's bidi mapping. */
+    internal fun packedColumnRange(
+        row: Int,
+        cache: TerminalRenderCache,
+        bidi: TerminalBidiLayout.Row?,
+    ): Long {
+        val range = packedColumnRange(row, cache.columns)
+        return expandWideCells(range, row, cache, if (isBlock) bidi else null)
+    }
 
-        if (cache != null && row in 0 until cache.rows) {
+    private fun expandWideCells(
+        range: Long,
+        row: Int,
+        cache: TerminalRenderCache,
+        bidi: TerminalBidiLayout.Row?,
+    ): Long {
+        if (range == NO_RANGE) return NO_RANGE
+        var start = rangeStart(range)
+        var end = rangeEnd(range)
+        val columns = cache.columns
+        if (row in 0 until cache.rows) {
             val rowOffset = cache.rowOffset(row)
             val flags = cache.flags
 
             if (start in 0 until columns) {
-                val startIdx = rowOffset + start
+                val startIdx = rowOffset + (bidi?.logicalColumn(start) ?: start)
                 if (startIdx in flags.indices && (flags[startIdx] and TerminalRenderCellFlags.WIDE_TRAILING) != 0) {
                     start = (start - 1).coerceAtLeast(0)
                 }
             }
 
             if (end in 1..columns) {
-                val endIdx = rowOffset + (end - 1)
+                val endIdx = rowOffset + (bidi?.logicalColumn(end - 1) ?: (end - 1))
                 if (endIdx in flags.indices && (flags[endIdx] and TerminalRenderCellFlags.WIDE_LEADING) != 0) {
                     end = (end + 1).coerceAtMost(columns)
                 }
             }
         }
 
-        if (start >= end) return NO_RANGE
         return packRange(start, end)
     }
 
@@ -122,16 +137,30 @@ data class CellSelection(
         get() = if (isForward) caretRow else anchorRow
 
     /**
-     * First selected caret column on [startRow].
+     * First logical caret column on [startRow], or the left visual edge of a block.
      */
     val startColumn: Int
-        get() = if (isForward) anchorColumn else caretColumn
+        get() =
+            if (isBlock) {
+                minOf(anchorColumn, caretColumn)
+            } else if (isForward) {
+                anchorColumn
+            } else {
+                caretColumn
+            }
 
     /**
-     * End-exclusive selected caret column on [endRow].
+     * End-exclusive logical caret column on [endRow], or the right visual edge of a block.
      */
     val endColumn: Int
-        get() = if (isForward) caretColumn else anchorColumn
+        get() =
+            if (isBlock) {
+                maxOf(anchorColumn, caretColumn)
+            } else if (isForward) {
+                caretColumn
+            } else {
+                anchorColumn
+            }
 
     private val isForward: Boolean
         get() = caretRow > anchorRow || caretRow == anchorRow && caretColumn >= anchorColumn

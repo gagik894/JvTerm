@@ -2,8 +2,16 @@
 
 ## [Unreleased]
 
-- Raised the plugin runtime requirement to Java 25 and the minimum supported IntelliJ Platform build to 262 (2026.2). Earlier IDE builds and Java 21-24 runtimes are no longer supported.
-- Improved terminal rendering performance.
+- Fixed alignment of Hebrew, Arabic, and mixed-direction text with cell backgrounds, the cursor, selection and search highlights, and mouse targets.
+- Fixed Arabic letter forms changing under the block cursor and missing text in very long lines that require contextual shaping.
+- Fixed Arabic text containing joiners unexpectedly switching fonts, particularly on macOS.
+- Preserved native emoji rendering and solid block graphics on lines containing right-to-left text.
+- Fixed concealed text and emoji becoming visible under the block cursor or when hovering over links. Prevented neighboring characters from spilling into concealed cells.
+- Fixed rectangular selections widening across mixed-direction lines or when part of the selection scrolls out of view.
+- Fixed a terminal view retaining the previous session's text or search results when switching to a new session.
+- Fixed blinking text and the cursor remaining hidden after unrelated output updates.
+- Fixed inverted colors in scrollback failing to update when reverse-video mode changes or resets.
+- Fixed gaps during smooth scrolling while new content is loading, scroll-position jumps during resizing, and stale scroll animations after screen switches.
 
 ## [0.2.1] - 2026-07-14
 

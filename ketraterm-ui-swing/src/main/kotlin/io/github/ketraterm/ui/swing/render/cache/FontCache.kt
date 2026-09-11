@@ -16,6 +16,7 @@
 package io.github.ketraterm.ui.swing.render.cache
 
 import io.github.ketraterm.ui.swing.api.TerminalFontResolver
+import io.github.ketraterm.ui.swing.render.TerminalEmojiPresentation
 import io.github.ketraterm.ui.swing.render.font.TerminalSystemFallbackFonts
 import io.github.ketraterm.ui.swing.render.font.TerminalSystemFontFamilies
 import java.awt.Font
@@ -51,7 +52,7 @@ internal class FontCache(
     private var useSystemFallbackFonts: Boolean = false
     private val styleFonts = arrayOfNulls<Font>(STYLE_COUNT)
     private var fallbackStyleFonts: Array<Array<Font?>> = emptyArray()
-    private val systemFontCache = SystemFontLru(DEFAULT_SYSTEM_FONT_CACHE_CAPACITY)
+    private val systemFontCache = StringFontLru(DEFAULT_SYSTEM_FONT_CACHE_CAPACITY)
     private val resolvedCodePointFonts =
         Array(STYLE_COUNT) {
             IntFontLru(codePointFallbackCapacityPerStyle)
@@ -73,7 +74,9 @@ internal class FontCache(
      *
      * This method evaluates whether the core typography configuration has changed.
      * If so, it discards all cached style variants, reallocates the fallback
-     * arrays, and invalidates all dynamically resolved glyphs.
+     * arrays, and invalidates all dynamically resolved glyphs. Fallback inputs
+     * are snapshotted only on a configuration change; caller mutations take
+     * effect only through a subsequent update.
      *
      * @param font The primary base font for the terminal grid.
      * @param fallbackFonts A prioritized list of fallback fonts for missing glyphs.
@@ -88,24 +91,33 @@ internal class FontCache(
     ): Boolean {
         if (
             font == baseFont &&
-            fallbackFonts == fallbackBaseFonts &&
+            matchesFallbackFonts(fallbackFonts) &&
             useSystemFallbackFonts == this.useSystemFallbackFonts
         ) {
             return false
         }
 
         baseFont = font
-        fallbackBaseFonts = fallbackFonts
+        fallbackBaseFonts = fallbackFonts.toList()
         this.useSystemFallbackFonts = useSystemFallbackFonts
 
         styleFonts.fill(null)
         styleFonts[font.style and STYLE_MASK] = font
-        fallbackStyleFonts = Array(fallbackFonts.size) { arrayOfNulls(STYLE_COUNT) }
+        fallbackStyleFonts = Array(fallbackBaseFonts.size) { arrayOfNulls(STYLE_COUNT) }
 
         systemFallbackFamilies = emptyList()
         systemFontCache.clear()
 
         invalidateResolvedCaches()
+        return true
+    }
+
+    private fun matchesFallbackFonts(fonts: List<Font>): Boolean {
+        if (fonts.size != fallbackBaseFonts.size) return false
+        // List equality can allocate iterators; configuration is checked on every paint.
+        for (index in fonts.indices) {
+            if (fonts[index] != fallbackBaseFonts[index]) return false
+        }
         return true
     }
 
@@ -144,7 +156,7 @@ internal class FontCache(
         if (cached != null) return cached
 
         val primary = font(normalizedStyle)
-        val isEmoji = isEmojiPresentationCodePoint(codePoint)
+        val isEmoji = TerminalEmojiPresentation.usesEmojiPresentation(codePoint)
 
         if (isEmoji && fontResolver != null) {
             val resolved = fontResolver.resolveFallbackFont(codePoint, normalizedStyle, primary.size2D)
@@ -203,12 +215,13 @@ internal class FontCache(
     }
 
     /**
-     * Returns the first cached style font that can display all UTF-16 units in
-     * [text], falling back to [font] when no configured fallback covers it.
+     * Resolves a styled font for [text] through the primary and fallback pipeline.
+     * Returns the primary [font] when fallback resolution fails, even if some glyphs
+     * remain unsupported.
      *
-     * Grapheme-cluster lookups are bounded per style. The render cache already
-     * owns cluster strings for visible cells; this renderer cache must not keep
-     * every historical cluster alive for a months-long terminal session.
+     * Painting reads primitive cluster slices; shaping caches create strings only
+     * on layout-cache misses. Fallback resolutions retain their text keys in a
+     * bounded LRU per style, including unsupported text mapped to the primary font.
      */
     fun fontForText(
         text: String,
@@ -220,7 +233,7 @@ internal class FontCache(
         if (cached != null) return cached
 
         val primary = font(normalizedStyle)
-        val isEmoji = containsEmojiPresentation(text)
+        val isEmoji = TerminalEmojiPresentation.usesEmojiPresentation(text)
 
         if (isEmoji && fontResolver != null) {
             val resolved = fontResolver.resolveFallbackFont(text, normalizedStyle, primary.size2D)
@@ -419,12 +432,6 @@ internal class FontCache(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Font>?): Boolean = size > capacity
     }
 
-    private class SystemFontLru(
-        private val capacity: Int,
-    ) : LinkedHashMap<String, Font>(capacity, LOAD_FACTOR, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Font>?): Boolean = size > capacity
-    }
-
     @Suppress("DuplicatedCode")
     private class IntFontLru(
         capacity: Int,
@@ -585,26 +592,6 @@ internal class FontCache(
         private const val LOAD_FACTOR = 0.75f
         private const val EMPTY = -1
 
-        private fun containsEmojiPresentation(text: String): Boolean {
-            var charIndex = 0
-            while (charIndex < text.length) {
-                val codePoint = text.codePointAt(charIndex)
-                if (codePoint == VARIATION_SELECTOR_16 ||
-                    codePoint == ZERO_WIDTH_JOINER ||
-                    isEmojiPresentationCodePoint(codePoint)
-                ) {
-                    return true
-                }
-                charIndex += Character.charCount(codePoint)
-            }
-            return false
-        }
-
-        private fun isEmojiPresentationCodePoint(codePoint: Int): Boolean =
-            codePoint in 0x1F000..0x1FAFF ||
-                codePoint in 0x2600..0x27BF ||
-                codePoint in 0x2B00..0x2BFF
-
         private fun isEmojiFontFamily(family: String): Boolean {
             val normalized = family.lowercase(Locale.ROOT)
             return "emoji" in normalized ||
@@ -619,8 +606,5 @@ internal class FontCache(
             }
             return capacity
         }
-
-        private const val VARIATION_SELECTOR_16 = 0xFE0F
-        private const val ZERO_WIDTH_JOINER = 0x200D
     }
 }

@@ -90,7 +90,8 @@ internal class DefaultTerminalBuffer private constructor(
      *
      * @return A [Pair] of (newScrollbackOffset, newHistorySize), allowing the caller to
      *   re-anchor a scrollback viewport that was active at [oldScrollbackOffset] before
-     *   the reflow. The offset is 0 when the caller was not scrolled back.
+     *   the reflow. Both values describe the active buffer; the alternate viewport
+     *   stays at offset 0 while primary content is reflowed in the background.
      */
     override fun resize(
         newWidth: Int,
@@ -106,7 +107,7 @@ internal class DefaultTerminalBuffer private constructor(
         val oldCursorRow = state.cursor.row
 
         if (newWidth == oldWidth && newHeight == oldHeight) {
-            return Pair(oldScrollbackOffset.coerceIn(0, state.historySize), state.historySize)
+            return Pair(state.clampScrollbackOffset(oldScrollbackOffset), state.historySize)
         }
 
         val newScrollbackOffset =
@@ -139,10 +140,11 @@ internal class DefaultTerminalBuffer private constructor(
         if (state.cursor.col != oldCursorCol || state.cursor.row != oldCursorRow) {
             state.markCursorChanged()
         }
-        return Pair(newScrollbackOffset, state.historySize)
+        return Pair(state.clampScrollbackOffset(newScrollbackOffset), state.historySize)
     }
 
     override fun reset() {
+        val wasReverseVideo = state.modes.isReverseVideo
         if (state.isAltScreenActive) {
             this.exitAltBuffer()
         }
@@ -154,6 +156,9 @@ internal class DefaultTerminalBuffer private constructor(
         state.altBuffer.clearKittyKeyboardStack()
         state.isAttributeChangeExtentRectangle = false
         state.modes.reset()
+        if (wasReverseVideo != state.modes.isReverseVideo) {
+            state.markGlobalAttributesChanged()
+        }
         state.tabStops.resetToDefault()
         state.cursorShape = state.defaultCursorShape
         state.palette = state.themePalette
@@ -180,7 +185,7 @@ internal class DefaultTerminalBuffer private constructor(
         resetSavedCursorToHome(state.altBuffer.savedCursor)
         state.cursorShape = state.defaultCursorShape
         if (wasReverseVideo != state.modes.isReverseVideo) {
-            state.markVisibleLinesChanged()
+            state.markGlobalAttributesChanged()
         }
         state.markCursorChanged()
     }

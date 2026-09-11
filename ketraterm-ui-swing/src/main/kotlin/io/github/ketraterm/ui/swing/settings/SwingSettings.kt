@@ -18,17 +18,22 @@ package io.github.ketraterm.ui.swing.settings
 import io.github.ketraterm.input.policy.PasteSanitizationPolicy
 import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.api.TerminalRenderCursorShape
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.toImmutableList
 import java.awt.Font
 import java.awt.GraphicsEnvironment
-import java.awt.Insets
 import java.awt.RenderingHints
 import java.util.*
 
 /**
  * Immutable Swing terminal UI settings.
  *
+ * Padding and fallback collections are immutable values, so [copy] can safely
+ * share them. Convert host-owned font lists with `toImmutableList()` before
+ * constructing or copying settings. Padding reads never allocate defensive copies.
+ *
  * Hosts can replace this value and call
- * [SwingTerminal.reloadSettings] to rebuild metrics and repaint.
+ * [io.github.ketraterm.ui.swing.api.SwingTerminal.reloadSettings] to rebuild metrics and repaint.
  *
  * @property font primary terminal font.
  * @property fallbackFonts ordered fonts used by the complex-text renderer when
@@ -100,7 +105,7 @@ data class SwingSettings
     @JvmOverloads
     constructor(
         val font: Font = defaultTerminalFont(),
-        val fallbackFonts: List<Font> = defaultFallbackFonts(),
+        val fallbackFonts: ImmutableList<Font> = defaultFallbackFonts(),
         val useSystemFallbackFonts: Boolean = true,
         val palette: TerminalColorPalette = defaultPalette(),
         val columns: Int = 80,
@@ -125,8 +130,8 @@ data class SwingSettings
         val shellIntegrationFailedCommandRailsVisible: Boolean = true,
         val shellIntegrationFailedCommandRailColor: Int = DEFAULT_SHELL_INTEGRATION_FAILED_COMMAND_RAIL_COLOR,
         val shellIntegrationFailedCommandRailWidth: Int = 3,
-        val padding: Insets = Insets(0, 4, 4, 6),
-        val alternateScreenPadding: Insets = Insets(0, 2, 2, 2),
+        val padding: SwingPadding = SwingPadding(0, 4, 4, 6),
+        val alternateScreenPadding: SwingPadding = SwingPadding(0, 2, 2, 2),
         val pasteSanitizationPolicy: PasteSanitizationPolicy = PasteSanitizationPolicy.RAW,
         val cursorShape: TerminalRenderCursorShape = TerminalRenderCursorShape.BLOCK,
         val scrollbackLines: Int = 1000,
@@ -164,17 +169,6 @@ data class SwingSettings
             }
             require(shellIntegrationFailedCommandRailWidth > 0) {
                 "shellIntegrationFailedCommandRailWidth must be > 0, was $shellIntegrationFailedCommandRailWidth"
-            }
-            require(padding.top >= 0 && padding.left >= 0 && padding.bottom >= 0 && padding.right >= 0) {
-                "padding must be non-negative, was $padding"
-            }
-            require(
-                alternateScreenPadding.top >= 0 &&
-                    alternateScreenPadding.left >= 0 &&
-                    alternateScreenPadding.bottom >= 0 &&
-                    alternateScreenPadding.right >= 0,
-            ) {
-                "alternateScreenPadding must be non-negative, was $alternateScreenPadding"
             }
         }
 
@@ -216,13 +210,14 @@ data class SwingSettings
              * @return list of fallback fonts.
              */
             @JvmStatic
-            fun defaultFallbackFonts(): List<Font> {
+            fun defaultFallbackFonts(): ImmutableList<Font> {
                 val installedFamilies =
                     GraphicsEnvironment
                         .getLocalGraphicsEnvironment()
                         .availableFontFamilyNames
                 return fallbackFontFamiliesForInstalledFonts(installedFamilies)
                     .map { family -> Font(family, Font.PLAIN, DEFAULT_FONT_SIZE) }
+                    .toImmutableList()
             }
 
             internal fun fallbackFontFamiliesForInstalledFonts(installedFamilies: Array<String>): List<String> {
@@ -573,7 +568,7 @@ enum class TerminalTheme {
 }
 
 /**
- * Provides immutable settings snapshots to [SwingTerminal].
+ * Provides immutable settings snapshots to [io.github.ketraterm.ui.swing.api.SwingTerminal].
  */
 fun interface SwingSettingsProvider {
     /**

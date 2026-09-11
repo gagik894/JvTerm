@@ -38,8 +38,6 @@ import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingSettingsProvider
 import io.github.ketraterm.ui.swing.settings.SwingTerminalChrome
 import io.github.ketraterm.ui.swing.suggestion.*
-import io.github.ketraterm.ui.swing.viewport.SmoothRowScrollHost
-import io.github.ketraterm.ui.swing.viewport.SmoothRowScroller
 import io.github.ketraterm.ui.swing.viewport.SwingViewportController
 import io.github.ketraterm.ui.swing.viewport.TerminalScrollbarOverlay
 import kotlinx.coroutines.*
@@ -63,6 +61,10 @@ import kotlin.math.floor
  * [TerminalSession] and paints terminal rows without knowing which transport
  * produced the bytes. Hosts own session creation, process lifecycle, and
  * connector choice outside this component.
+ *
+ * Component state belongs to the Swing Event Dispatch Thread (EDT). Access it
+ * on the EDT unless a method explicitly documents another threading contract.
+ * Snapshot access and dispatch to the EDT are specified by each public method.
  *
  * @param settingsProvider provider for immutable settings snapshots.
  * @param hostServices host-provided non-render services.
@@ -113,12 +115,16 @@ class SwingTerminal
         internal val isCoroutineScopeActive: Boolean
             get() = componentJob.isActive
 
-        private val painter = GridPainter(hostServices.fontResolver)
+        private val visualGeometry = TerminalVisualViewportGeometry()
+        private val painter = GridPainter(hostServices.fontResolver, visualGeometry.bidiLayout)
         private val visualBellController =
             TerminalVisualBellController {
                 repaint()
             }
-        private val viewportController = SwingViewportController(hostServices.viewportListener)
+        private val viewportController =
+            SwingViewportController(hostServices.viewportListener) { renderMappingChanged, scrollComplete ->
+                handleViewportScrollOnEdt(renderMappingChanged, scrollComplete)
+            }
         private val renderCache =
             TerminalRenderCache(
                 columns = settings.columns,
@@ -127,21 +133,7 @@ class SwingTerminal
             )
         private val searchCache = TerminalRenderCache(settings.columns, settings.rows)
         private val shellIntegrationDecorations = TerminalShellIntegrationViewportDecorations()
-        private val visualGeometry = TerminalVisualViewportGeometry()
         private val scrollbarOverlay = TerminalScrollbarOverlay()
-        private val rowScroller =
-            SmoothRowScroller(
-                object : SmoothRowScrollHost {
-                    override fun rowScrollOffset(): Double = viewportController.preciseOffset
-
-                    override fun rowScrollHistorySize(): Int = renderCache.historySize
-
-                    override fun applyRowScrollOffset(
-                        offsetRows: Double,
-                        scrollComplete: Boolean,
-                    ): Boolean = this@SwingTerminal.applyRowScrollOffsetOnEdt(offsetRows, scrollComplete)
-                },
-            )
         private var hoveredPromptMarkerRow: Int = NO_PROMPT_MARKER_ROW
         private val terminalMouseListener =
             object : MouseAdapter() {
@@ -211,7 +203,12 @@ class SwingTerminal
                         y: Int,
                     ): Long = this@SwingTerminal.cellAt(x, y, this@SwingTerminal.renderCache)
 
-                    override fun scrollViewportByRows(deltaRows: Int): Boolean = rowScroller.scrollByRows(deltaRows)
+                    override fun visualCellAt(
+                        x: Int,
+                        y: Int,
+                    ): Long = this@SwingTerminal.visualCellAt(x, y, this@SwingTerminal.renderCache)
+
+                    override fun scrollViewportByRows(deltaRows: Int): Boolean = viewportController.scrollByRows(deltaRows)
 
                     override fun repaint() = this@SwingTerminal.repaint()
 
@@ -252,7 +249,7 @@ class SwingTerminal
                         offsetRows: Int,
                         historySize: Int,
                         boundSession: TerminalSession,
-                    ): Boolean = this@SwingTerminal.scrollViewportToOnEdt(offsetRows, historySize, boundSession)
+                    ): Boolean = this@SwingTerminal.scrollViewportToOnEdt(offsetRows, historySize)
 
                     override fun repaint() = this@SwingTerminal.repaint()
                 },
@@ -307,7 +304,7 @@ class SwingTerminal
                     override fun openHyperlink(hyperlinkId: Int): Boolean = this@SwingTerminal.openHyperlink(hyperlinkId)
                 },
             )
-        private val searchController =
+        private val searchController: TerminalSearchController =
             TerminalSearchController(
                 object : TerminalSearchHost {
                     override val session: TerminalSession? get() = this@SwingTerminal.session
@@ -320,9 +317,9 @@ class SwingTerminal
                         offsetRows: Int,
                         historySize: Int,
                         boundSession: TerminalSession,
-                    ): Boolean = this@SwingTerminal.scrollViewportToOnEdt(offsetRows, historySize, boundSession)
+                    ): Boolean = this@SwingTerminal.scrollViewportToOnEdt(offsetRows, historySize)
 
-                    override fun repaint() = this@SwingTerminal.repaint()
+                    override fun repaint() = this@SwingTerminal.renderFrameController.repaintFrame()
                 },
             )
         private var shellSuggestionController: SwingShellSuggestionController? = null
@@ -335,8 +332,8 @@ class SwingTerminal
                         hyperlinkController.updateHyperlinkActivationHover(active)
                     }
 
-                    override fun resetCursorBlink(forceRepaint: Boolean) {
-                        this@SwingTerminal.resetCursorBlinkOnEdt(forceRepaint)
+                    override fun resetCursorBlink() {
+                        if (resetCursorBlinkOnEdt()) renderFrameController.repaintBlinkState()
                     }
 
                     override fun setTerminalFocused(focused: Boolean) {
@@ -393,10 +390,10 @@ class SwingTerminal
 
                     override fun visibleGridRows(): Int = this@SwingTerminal.visibleGridRows()
 
-                    override fun scrollViewportByPreciseRows(deltaRows: Double): Boolean = rowScroller.scrollByPreciseRows(deltaRows)
+                    override fun scrollViewportByPreciseRows(deltaRows: Double): Boolean = viewportController.scrollByPreciseRows(deltaRows)
 
                     override fun finishViewportScroll() {
-                        rowScroller.finish()
+                        viewportController.finishScroll()
                     }
 
                     override fun requestFocusInWindow(): Boolean = this@SwingTerminal.requestFocusInWindow()
@@ -456,13 +453,12 @@ class SwingTerminal
                     override val metrics: SwingMetrics get() = this@SwingTerminal.metrics
                     override val visualGeometry: TerminalVisualViewportGeometry
                         get() = this@SwingTerminal.visualGeometry
+                    override val searchHighlights get() = this@SwingTerminal.searchController.viewportHighlights
                     override val componentWidth: Int get() = this@SwingTerminal.width
                     override val componentHeight: Int get() = this@SwingTerminal.height
                     override val cursorPresentationEnabled: Boolean get() = this@SwingTerminal.cursorPresentationEnabled
 
-                    override fun resetCursorBlinkForFrame() {
-                        this@SwingTerminal.resetCursorBlinkOnEdt(forceRepaint = false)
-                    }
+                    override fun resetCursorBlinkForFrame(): Boolean = resetCursorBlinkOnEdt()
 
                     override fun refreshRenderCacheFromSession(session: TerminalSession) {
                         this@SwingTerminal.refreshRenderCacheFromSession(session)
@@ -695,7 +691,8 @@ class SwingTerminal
          *
          * This method may be called from any thread. EDT callers refresh the
          * snapshot from live component and render-cache state before reading it;
-         * off-EDT callers read the last EDT-published snapshot without blocking.
+         * off-EDT callers copy one complete EDT publication under the short monitor
+         * shared with publication, without dispatching to the EDT.
          *
          * @return current scrollback viewport state.
          */
@@ -744,7 +741,7 @@ class SwingTerminal
         fun scrollViewportBy(deltaLines: Double) {
             require(deltaLines.isFinite()) { "deltaLines must be finite, was $deltaLines" }
             runOnEdt {
-                rowScroller.scrollByPreciseRows(deltaLines)
+                viewportController.scrollByPreciseRows(deltaLines)
             }
         }
 
@@ -767,9 +764,9 @@ class SwingTerminal
             valueIsAdjusting: Boolean,
         ) {
             if (valueIsAdjusting) {
-                rowScroller.jumpToRow(scrollbackOffset)
+                viewportController.jumpToRow(scrollbackOffset)
             } else {
-                rowScroller.scrollToRow(scrollbackOffset)
+                viewportController.scrollToRow(scrollbackOffset)
             }
         }
 
@@ -907,7 +904,7 @@ class SwingTerminal
             terminalFocused = false
             cursorTimer.stop()
             visualBellController.stop()
-            rowScroller.finish()
+            viewportController.finishScroll()
             selectionController.stopSelectionDrag()
             hyperlinkDiscoveryController.reset()
 
@@ -946,7 +943,13 @@ class SwingTerminal
             }
 
             val contentOriginY = if (visualGeometry.rowCount == renderCache.rows) visualGeometry.contentOriginY else 0.0
-            val anchorX = paddingLeft + state.anchorColumn * metrics.cellWidth
+            val anchorColumn =
+                if (state.anchorColumn in 0 until renderCache.columns) {
+                    visualGeometry.bidiLayout.row(renderCache, state.anchorRow)?.visualColumn(state.anchorColumn) ?: state.anchorColumn
+                } else {
+                    state.anchorColumn
+                }
+            val anchorX = paddingLeft + anchorColumn * metrics.cellWidth
             val bottomLimit = height - paddingBottom
             val anchorTop =
                 floor(paddingTop + contentOriginY + state.anchorRow * metrics.cellHeight)
@@ -970,7 +973,7 @@ class SwingTerminal
 
             val g = graphics.create() as Graphics2D
             try {
-                if (session == null) {
+                if (!renderCache.hasFrame) {
                     painter.clear(g, settings.palette, width, height)
                     visualBellController.paint(g, width, height)
                     return
@@ -1007,7 +1010,10 @@ class SwingTerminal
                         palette = renderCache.palette,
                         componentWidth = width,
                         componentHeight = height,
-                        state = viewportController.viewportStateSnapshot(),
+                        historySize = viewportController.historySize,
+                        visualScrollOffsetPixels = viewportController.visualScrollOffsetPixels,
+                        visualScrollRangePixels = viewportController.visualScrollRangePixels,
+                        viewportHeightPixels = viewportController.viewportHeightPixels,
                     )
                 }
                 visualBellController.paint(g, width, height)
@@ -1020,6 +1026,7 @@ class SwingTerminal
             if (disposed) return
             bindingJob?.cancel(CancellationException("Terminal session binding replaced"))
             this.session = session
+            resetRenderCaches()
             updateMinimizedStateFromAncestor()
             applySettingsToSession(session, settings)
             resetScrollbackState()
@@ -1064,6 +1071,7 @@ class SwingTerminal
             bindingJob = null
             cancelAndHideShellSuggestionsOnEdt("Terminal session unbound")
             session = null
+            resetRenderCaches()
             resetScrollbackState()
             selectionController.clearSelection()
             searchController.reset(renderCache.rows)
@@ -1086,7 +1094,7 @@ class SwingTerminal
             unbindOnEdt()
             cursorTimer.stop()
             visualBellController.stop()
-            rowScroller.finish()
+            viewportController.finishScroll()
             selectionController.stopSelectionDrag()
             hyperlinkDiscoveryController.dispose()
             suggestionJob?.cancel(CancellationException("Swing terminal disposed"))
@@ -1110,7 +1118,7 @@ class SwingTerminal
                     next.padding != previous.padding ||
                     next.alternateScreenPadding != previous.alternateScreenPadding ||
                     next.shellIntegrationDecorationGutterWidth != previous.shellIntegrationDecorationGutterWidth
-            if (geometryChanged) rowScroller.finish()
+            if (geometryChanged) viewportController.finishScroll()
             settings = next
             metrics = nextMetrics
             if (next.font != previous.font) font = next.font
@@ -1144,15 +1152,22 @@ class SwingTerminal
 
         /**
          * Returns the current visible cell selection, or `null` when nothing is
-         * selected.
+         * selected. Linear selection columns are logical; block selection columns
+         * are visual, as defined by [CellSelection].
          *
-         * This method may be called from any thread. Off-EDT callers receive a
-         * snapshot from the EDT.
+         * This method may be called from any thread. Off-EDT callers wait for the
+         * EDT to read the binding, selection, and viewport together. EDT callers
+         * read directly.
          *
          * @return current selection, or `null`.
          */
         fun currentSelection(): CellSelection? {
-            if (session == null) return null
+            if (!SwingUtilities.isEventDispatchThread()) {
+                var selection: CellSelection? = null
+                SwingUtilities.invokeAndWait { selection = currentSelection() }
+                return selection
+            }
+            if (!renderCache.hasFrame) return null
             return selectionController.getViewportSelection(renderCache)
         }
 
@@ -1168,7 +1183,7 @@ class SwingTerminal
          */
         fun selectAll(): Boolean {
             if (!SwingUtilities.isEventDispatchThread()) return false
-            if (session == null || renderCache.columns <= 0 || renderCache.rows <= 0) return false
+            if (!renderCache.hasFrame) return false
             val firstAbsoluteRow = renderCache.discardedCount
             val lastAbsoluteRow = renderCache.discardedCount + renderCache.historySize + renderCache.rows - 1L
             selectionController.selectAbsoluteRows(firstAbsoluteRow, lastAbsoluteRow, renderCache.columns)
@@ -1232,6 +1247,10 @@ class SwingTerminal
 
         /**
          * Returns the current search result snapshot.
+         *
+         * Must be called on the EDT: this reads live search-controller state
+         * synchronously. The returned immutable value may be retained or passed
+         * to another thread.
          *
          * @return current terminal search state.
          */
@@ -1665,6 +1684,18 @@ class SwingTerminal
             y: Int,
             cache: TerminalRenderCache,
         ): Long {
+            val visualCell = visualCellAt(x, y, cache)
+            val column = (visualCell ushr 32).toInt()
+            val row = visualCell.toInt()
+            val logicalColumn = visualGeometry.bidiLayout.row(cache, row)?.logicalColumn(column) ?: column
+            return packCell(logicalColumn, row)
+        }
+
+        private fun visualCellAt(
+            x: Int,
+            y: Int,
+            cache: TerminalRenderCache,
+        ): Long {
             val paddingLeft = SwingTerminalChrome.left(settings, cache.activeBuffer)
             val paddingTop = SwingTerminalChrome.top(settings, cache.activeBuffer)
             val column = ((x - paddingLeft) / metrics.cellWidth).coerceIn(0, cache.columns - 1)
@@ -1698,16 +1729,18 @@ class SwingTerminal
                 val clampedStartColumn = rowStartColumn.coerceIn(0, renderCache.columns)
                 val clampedEndColumn = rowEndColumn.coerceIn(0, renderCache.columns)
                 if (clampedEndColumn > clampedStartColumn) {
-                    val x = paddingLeft + clampedStartColumn * metrics.cellWidth
+                    val bidi = visualGeometry.bidiLayout.row(renderCache, row)
                     val yTop = paddingTop + contentOriginY + row * metrics.cellHeight
                     val y = floor(yTop).toInt()
                     val repaintHeight = ceil(yTop + metrics.cellHeight).toInt() - y
-                    repaint(
-                        x,
-                        y,
-                        (clampedEndColumn - clampedStartColumn) * metrics.cellWidth,
-                        repaintHeight,
-                    )
+                    forEachVisualCellSpan(bidi, clampedStartColumn, clampedEndColumn) { visualStart, visualEnd ->
+                        repaint(
+                            paddingLeft + visualStart * metrics.cellWidth,
+                            y,
+                            (visualEnd - visualStart) * metrics.cellWidth,
+                            repaintHeight,
+                        )
+                    }
                 }
                 row++
             }
@@ -1728,60 +1761,36 @@ class SwingTerminal
         private fun scrollViewportToOnEdt(
             offsetRows: Int,
             historySize: Int = renderCache.historySize,
-            boundSession: TerminalSession? = session,
         ): Boolean {
-            rowScroller.cancel()
             val targetRow = offsetRows.coerceIn(0, historySize)
-            if (!moveViewportToOnEdt(targetRow.toDouble(), historySize, boundSession)) return false
-            publishViewportState(renderCache.historySize)
-            return true
+            return viewportController.scrollTo(targetRow.toDouble(), historySize)
         }
 
-        private fun applyRowScrollOffsetOnEdt(
-            offsetRows: Double,
+        private fun handleViewportScrollOnEdt(
+            renderMappingChanged: Boolean,
             scrollComplete: Boolean,
-        ): Boolean {
-            val changed = moveViewportToOnEdt(offsetRows, renderCache.historySize, session)
-            if (changed || scrollComplete) {
-                publishViewportState(
-                    renderCache.historySize,
-                    notifyListener = scrollComplete,
-                    notifyPrimitiveListener = !scrollComplete,
-                )
-            }
-            return changed
-        }
-
-        private fun moveViewportToOnEdt(
-            offsetRows: Double,
-            historySize: Int,
-            boundSession: TerminalSession?,
-        ): Boolean {
-            val oldRenderOffset = viewportController.requestedOffset
-            val oldRequestedRows = requestedRenderRows()
-            if (!viewportController.scrollTo(offsetRows, historySize)) return false
-
-            val renderMappingChanged =
-                oldRenderOffset != viewportController.requestedOffset ||
-                    oldRequestedRows != requestedRenderRows()
+        ) {
+            val boundSession = session
             if (boundSession != null && renderMappingChanged) {
                 requestRenderFromSession(boundSession)
-            } else {
-                updateVisualViewportGeometry()
             }
+            updateVisualViewportGeometry()
             repaint()
-            return true
+            publishViewportState(
+                renderCache.historySize,
+                notifyListener = scrollComplete,
+                notifyPrimitiveListener = !scrollComplete,
+            )
         }
 
-        private fun resetCursorBlinkOnEdt(forceRepaint: Boolean) {
+        /** Returns whether the shared blink visibility changed; callers own pixel invalidation. */
+        private fun resetCursorBlinkOnEdt(): Boolean {
             val wasVisible = cursorBlinkVisible
             cursorBlinkVisible = true
             if (settings.cursorBlinkMillis > 0) {
                 cursorTimer.restart()
             }
-            if (forceRepaint && !wasVisible) {
-                renderFrameController.repaintBlinkState()
-            }
+            return !wasVisible
         }
 
         private fun configureCursorTimerOnEdt() {
@@ -1805,7 +1814,6 @@ class SwingTerminal
         }
 
         private fun resetScrollbackState() {
-            rowScroller.cancel()
             viewportController.reset()
         }
 
@@ -1849,6 +1857,17 @@ class SwingTerminal
             shellSuggestionController?.hide()
         }
 
+        /**
+         * Returns the component size in pixels for a primary-screen grid.
+         *
+         * Must be called on the EDT because it reads the current settings and
+         * font metrics. The calculation includes primary-screen chrome even
+         * when the alternate screen is active.
+         *
+         * @param columns requested number of terminal columns.
+         * @param rows requested number of terminal rows.
+         * @return a new caller-owned dimension containing pixel width and height.
+         */
         fun preferredGridSize(
             columns: Int,
             rows: Int,
@@ -1880,17 +1899,20 @@ class SwingTerminal
                 return false
             }
 
-            rowScroller.finish()
+            viewportController.finishScroll()
             publishViewportState(renderCache.historySize)
             lastResizedColumns = columns
             lastResizedRows = rows
 
             // Animation is finished above, so resize anchoring is always row-exact.
-            val oldOffset = viewportController.resizeRequestedOffset()
+            val oldOffset = viewportController.requestedOffset
 
-            val (newOffset, newHistorySize) = boundSession.resize(columns, rows, oldOffset)
-
-            viewportController.anchorAfterResize(newOffset, newHistorySize)
+            val resizedViewport = boundSession.resizeViewport(columns, rows, oldOffset)
+            viewportController.anchorAfterResize(
+                resizedViewport.scrollbackOffset,
+                resizedViewport.historySize,
+                resizedViewport.discardedCount,
+            )
             return true
         }
 
@@ -1901,10 +1923,10 @@ class SwingTerminal
         private fun requestedRenderRows(): Int = viewportController.requestedRows(visibleRenderRows())
 
         private fun visualContentHeightPixels(): Int =
-            if (visualGeometry.rowCount == renderCache.rows) {
-                visualGeometry.visualHeight
-            } else {
-                renderCache.rows * metrics.cellHeight
+            when {
+                !renderCache.hasFrame -> 0
+                visualGeometry.rowCount == renderCache.rows -> visualGeometry.visualHeight
+                else -> renderCache.rows * metrics.cellHeight
             }
 
         private fun commandNavigationAnchorRow(): Int =
@@ -1914,10 +1936,15 @@ class SwingTerminal
                 0
             }
 
+        private fun resetRenderCaches() {
+            renderCache.reset()
+            searchCache.reset()
+        }
+
         private fun refreshRenderCacheFromSession(session: TerminalSession) {
             session.renderPublisher.readCurrent { published ->
                 renderCache.updateFrom(published)
-            }
+            } ?: return
             hyperlinkDiscoveryController.scheduleForFrame()
         }
 
@@ -1941,21 +1968,18 @@ class SwingTerminal
                     rows = renderCache.rows,
                     viewportPixelHeight = viewportPixelHeight,
                 )
-            val visualMetricsChanged =
-                viewportController.updateVisualMetrics(
-                    historySize = renderCache.historySize,
-                    discardedCount = renderCache.discardedCount,
-                    cellHeight = metrics.cellHeight,
-                    visualOverflowPixels = 0,
-                )
+            viewportController.updateCellHeight(metrics.cellHeight)
             val originChanged =
                 visualGeometry.updateContentOrigin(
                     viewportController.contentOriginY(
                         cacheScrollbackOffset = renderCache.scrollbackOffset,
+                        cacheRows = renderCache.rows,
                         cellHeight = metrics.cellHeight,
+                        viewportHeightPixels = viewportPixelHeight,
+                        visibleGridRows = visibleGridRows(),
                     ),
                 )
-            return layoutChanged or visualMetricsChanged or originChanged
+            return layoutChanged or originChanged
         }
 
         private fun buildMetrics(settings: SwingSettings): SwingMetrics {

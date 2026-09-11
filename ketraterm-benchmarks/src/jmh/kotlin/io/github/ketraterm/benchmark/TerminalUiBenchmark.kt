@@ -32,6 +32,7 @@ import java.awt.Graphics2D
 import java.awt.image.BufferedImage
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeUnit
+import javax.swing.SwingUtilities
 
 @State(Scope.Benchmark)
 @BenchmarkMode(Mode.Throughput)
@@ -135,12 +136,14 @@ open class TerminalRenderPublishBenchmark {
     }
 }
 
-@State(Scope.Benchmark)
+/** Complete component painting on the EDT, including amortized dispatch and Java2D costs. */
+@State(Scope.Thread)
 @BenchmarkMode(Mode.Throughput)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
 @Warmup(iterations = 3, time = 1, timeUnit = TimeUnit.SECONDS)
 @Measurement(iterations = 5, time = 1, timeUnit = TimeUnit.SECONDS)
 @Fork(1)
+@Threads(1)
 open class SwingPaintBenchmark {
     @Param("80", "160", "240")
     var columns: Int = 0
@@ -156,6 +159,14 @@ open class SwingPaintBenchmark {
     private lateinit var component: SwingTerminal
     private lateinit var image: BufferedImage
     private lateinit var graphics: Graphics2D
+    private var paintedPixel = 0
+    private val paintBatch =
+        Runnable {
+            repeat(PAINT_BATCH_SIZE) {
+                component.paint(graphics)
+            }
+            paintedPixel = image.getRGB(image.width - 1, image.height - 1)
+        }
 
     @Setup
     open fun setup() {
@@ -170,36 +181,53 @@ open class SwingPaintBenchmark {
         session = benchmarkSession(terminal)
         session.renderPublisher.updateAndPublish(terminal as io.github.ketraterm.render.api.TerminalRenderFrameReader)
 
-        component =
-            SwingTerminal(
-                SwingSettingsProvider {
-                    SwingSettings(
-                        columns = columns,
-                        rows = rows,
-                        useSystemFallbackFonts = false,
-                    )
-                },
-            )
-        component.bind(session)
-        component.size = component.preferredSize
-
-        image = BufferedImage(component.width, component.height, BufferedImage.TYPE_INT_ARGB)
-        graphics = image.createGraphics()
+        SwingUtilities.invokeAndWait {
+            component =
+                SwingTerminal(
+                    SwingSettingsProvider {
+                        SwingSettings(
+                            columns = columns,
+                            rows = rows,
+                            cursorBlinkMillis = 0,
+                            useSystemFallbackFonts = false,
+                        )
+                    },
+                )
+            component.size = component.preferredSize
+            val grid = component.visibleGridSize()
+            check(grid.width == columns && grid.height == rows)
+            image = BufferedImage(component.width, component.height, BufferedImage.TYPE_INT_ARGB)
+            graphics = image.createGraphics()
+            component.paint(graphics)
+            val emptyPixels = image.getRGB(0, 0, image.width, image.height / 2, null, 0, image.width)
+            component.bind(session)
+            component.paint(graphics)
+            val contentPixels = image.getRGB(0, 0, image.width, image.height / 2, null, 0, image.width)
+            check(!emptyPixels.contentEquals(contentPixels)) { "Benchmark frame was not painted" }
+        }
     }
 
     @TearDown
     open fun tearDown() {
-        graphics.dispose()
-        session.close()
+        try {
+            SwingUtilities.invokeAndWait {
+                component.dispose()
+                graphics.dispose()
+            }
+        } finally {
+            session.close()
+        }
     }
 
     @Benchmark
-    open fun paintPublishedFrame(blackhole: Blackhole) {
-        component.paint(graphics)
-        blackhole.consume(image.getRGB(component.width - 1, component.height - 1))
+    @OperationsPerInvocation(PAINT_BATCH_SIZE)
+    open fun paintPublishedFrame(): Int {
+        SwingUtilities.invokeAndWait(paintBatch)
+        return paintedPixel
     }
 }
 
+private const val PAINT_BATCH_SIZE = 64
 private const val LARGE_INPUT_COLUMNS = 160
 private const val LARGE_INPUT_ROWS = 48
 private const val LARGE_INPUT_LINES = 20_000
@@ -359,7 +387,7 @@ private fun writeClusterViewport(
     }
 }
 
-private fun benchmarkSession(terminal: TerminalBuffer): TerminalSession =
+internal fun benchmarkSession(terminal: TerminalBuffer): TerminalSession =
     TerminalSession.create(
         terminal = terminal,
         connector = NoOpTerminalConnector,

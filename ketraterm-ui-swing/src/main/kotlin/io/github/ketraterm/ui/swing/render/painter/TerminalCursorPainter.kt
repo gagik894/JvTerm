@@ -18,6 +18,7 @@ package io.github.ketraterm.ui.swing.render.painter
 import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.api.TerminalRenderCursorShape
 import io.github.ketraterm.render.cache.TerminalRenderCache
+import io.github.ketraterm.ui.swing.render.TerminalBidiLayout
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.visualCellRangeSpan
 import io.github.ketraterm.ui.swing.render.visualCellRangeStart
@@ -44,6 +45,7 @@ internal class TerminalCursorPainter(
         textBlinkVisible: Boolean,
         fontRenderContext: FontRenderContext,
         cursorVisible: Boolean = true,
+        bidi: TerminalBidiLayout.Row? = null,
     ) {
         if (!cursorVisible || !cache.cursorVisible || (cache.cursorBlinking && !cursorBlinkVisible)) return
         if (cache.cursorColumn !in 0 until cache.columns || cache.cursorRow !in 0 until cache.rows) return
@@ -52,7 +54,8 @@ internal class TerminalCursorPainter(
         val cursorFlags = cache.flags[cursorIndex]
         val startColumn = visualCellRangeStart(cursorFlags, cache.cursorColumn)
         val columnSpan = visualCellRangeSpan(cursorFlags, cache.cursorColumn, cache.columns)
-        val x = startColumn * metrics.cellWidth
+        val visualColumn = bidi?.visualColumn(startColumn) ?: startColumn
+        val x = visualColumn * metrics.cellWidth
         val y = cache.cursorRow * metrics.cellHeight
         val width = columnSpan * metrics.cellWidth
         g.color = colorCache.color(palette.cursorBackground)
@@ -80,6 +83,7 @@ internal class TerminalCursorPainter(
                 column = startColumn,
                 row = cache.cursorRow,
                 columnSpan = columnSpan,
+                visualColumn = visualColumn,
                 foreground = palette.cursorForeground,
                 fontRenderContext = fontRenderContext,
                 textBlinkVisible = textBlinkVisible,

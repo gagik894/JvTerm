@@ -21,11 +21,11 @@ import io.github.ketraterm.host.TerminalClipboardPermission
 import io.github.ketraterm.host.TerminalTitleOrigin
 import io.github.ketraterm.host.TerminalTitlePermission
 import io.github.ketraterm.render.api.TerminalRenderCursorShape
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import io.github.ketraterm.workspace.config.TerminalConfig
 import org.junit.Assert.*
 import org.junit.Test
-import java.awt.Insets
 import java.util.concurrent.CancellationException
 
 /**
@@ -148,8 +148,8 @@ class KetraTermIntellijSettingsTest {
                 KetraTermIntellijSettings.State(themeId = "nord"),
             )
 
-        assertEquals(Insets(0, 4, 4, 6), settings.padding)
-        assertEquals(Insets(0, 2, 2, 2), settings.alternateScreenPadding)
+        assertEquals(SwingPadding(0, 4, 4, 6), settings.padding)
+        assertEquals(SwingPadding(0, 2, 2, 2), settings.alternateScreenPadding)
         assertEquals(16, settings.shellIntegrationDecorationGutterWidth)
     }
 

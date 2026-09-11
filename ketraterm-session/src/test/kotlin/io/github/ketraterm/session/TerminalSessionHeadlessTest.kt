@@ -152,6 +152,9 @@ class TerminalSessionHeadlessTest {
         assertThrows(IllegalArgumentException::class.java) {
             session.resize(columns = 0, rows = 3)
         }
+        assertThrows(IllegalArgumentException::class.java) {
+            session.resizeViewport(columns = 10, rows = 0)
+        }
 
         assertEquals(10, session.terminal.width)
         assertEquals(3, session.terminal.height)

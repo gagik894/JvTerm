@@ -22,18 +22,21 @@ import io.github.ketraterm.input.event.TerminalKeyEvent
 import io.github.ketraterm.input.event.TerminalMouseEvent
 import io.github.ketraterm.input.event.TerminalPasteEvent
 import io.github.ketraterm.parser.api.TerminalOutputParser
-import io.github.ketraterm.render.api.TerminalRenderFrameReader
+import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.search.TerminalSearchModel
+import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import java.awt.Insets
 
 class SwingRenderFrameControllerTest {
     @Nested
@@ -54,6 +57,178 @@ class SwingRenderFrameControllerTest {
     @Nested
     inner class PublishedFrameHandling {
         @Test
+        fun `removing a wrapped search result repaints its unchanged first row`() {
+            val cells =
+                arrayOf("abc", "def")
+                    .map { text ->
+                        Array(text.length) { TestCell(codeWord = text[it].code, flags = TerminalRenderCellFlags.CODEPOINT) }
+                    }.toTypedArray()
+            val frame =
+                object : TestRenderFrame(cells) {
+                    override var frameGeneration = 1L
+
+                    override fun lineWrapped(row: Int): Boolean = row == 0
+
+                    override fun lineGeneration(row: Int): Long = if (row == 0) 1L else frameGeneration
+                }
+            val session = createSession(frame)
+            val host = RecordingRenderFrameHost(session)
+            host.searchQuery = "cde"
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                assertEquals(1, host.searchHighlights.segmentCountForRow(0))
+                val firstRowGeneration = host.renderCache.lineGenerations[0]
+                host.clearRepaints()
+                cells[1][0] = TestCell(codeWord = 'x'.code, flags = TerminalRenderCellFlags.CODEPOINT)
+                frame.frameGeneration++
+                session.renderPublisher.updateAndPublish(frame)
+
+                controller.handlePublishedFrame()
+
+                assertEquals(firstRowGeneration, host.renderCache.lineGenerations[0])
+                assertEquals(0, host.searchHighlights.segmentCountForRow(0))
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 0, 800, 40)), host.regions)
+                host.clearRepaints()
+                controller.handlePublishedFrame()
+                assertTrue(host.regions.isEmpty())
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun `search commands between publications become the next repaint baseline`() {
+            val session = createSession(TestRenderFrame.text("needle"))
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.searchQuery = "needle"
+                host.refreshSearchForFrame()
+                controller.repaintFrame()
+                assertEquals(listOf(Region(0, 0, 800, 20)), host.regions)
+
+                host.clearRepaints()
+                host.searchQuery = ""
+                controller.handlePublishedFrame()
+
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 0, 800, 20)), host.regions)
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun resetFromHiddenPhaseMustRepaintUnchangedCursor() {
+            val session = createSession(blinkFrame())
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.blinkVisible = false
+
+                controller.handlePublishedFrame()
+
+                assertTrue(host.blinkVisible)
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 0, 10, 20)), host.regions)
+                host.clearRepaints()
+                repeat(3) { controller.handlePublishedFrame() }
+                assertEquals(0, host.fullRepaintCount)
+                assertTrue(host.regions.isEmpty())
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun resetFromHiddenPhaseMustRepaintUnchangedTextWithoutCursorPresentation() {
+            val session = createSession(blinkFrame(textBlinks = true))
+            val host = RecordingRenderFrameHost(session, cursorPresentationEnabled = false)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.blinkVisible = false
+
+                controller.handlePublishedFrame()
+
+                assertTrue(host.blinkVisible)
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(listOf(Region(0, 20, 800, 20)), host.regions)
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun unrelatedRowUpdateAlsoRepaintsUnchangedBlinkingContent() {
+            val session = createSession(blinkFrame(textBlinks = true))
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.blinkVisible = false
+                session.renderPublisher.updateAndPublish(blinkFrame(textBlinks = true, generation = 2))
+
+                controller.handlePublishedFrame()
+
+                assertTrue(host.blinkVisible)
+                assertEquals(0, host.fullRepaintCount)
+                assertEquals(setOf(Region(0, 0, 10, 20), Region(0, 20, 800, 20), Region(0, 40, 800, 20)), host.regions.toSet())
+                assertTrue(host.repaintFrameGenerations.all { it == 2L }, "blink regions must use the refreshed frame")
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun visiblePhaseResetDoesNotRepaintUnchangedBlinkingContent() {
+            val session = createSession(blinkFrame(textBlinks = true))
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+
+                controller.handlePublishedFrame()
+
+                assertTrue(host.blinkVisible)
+                assertEquals(0, host.fullRepaintCount)
+                assertTrue(host.regions.isEmpty())
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
+        fun hiddenPhaseResetDoesNotRepaintNonBlinkingContent() {
+            val session = createSession(blinkFrame(cursorBlinks = false))
+            val host = RecordingRenderFrameHost(session)
+            val controller = SwingRenderFrameController(host)
+            try {
+                controller.handlePublishedFrame()
+                host.clearRepaints()
+                host.blinkVisible = false
+
+                controller.handlePublishedFrame()
+
+                assertTrue(host.blinkVisible)
+                assertEquals(0, host.fullRepaintCount)
+                assertTrue(host.regions.isEmpty())
+            } finally {
+                session.close()
+            }
+        }
+
+        @Test
         fun `published frame refreshes session-backed state in order`() {
             val session = createSession()
             val host = RecordingRenderFrameHost(session = session)
@@ -66,6 +241,7 @@ class SwingRenderFrameControllerTest {
                     listOf(
                         "resetCursorBlinkForFrame",
                         "refreshRenderCacheFromSession",
+                        "clampViewport",
                         "syncTerminalGridToActiveChrome",
                         "refreshShellIntegrationDecorations",
                         "refreshSearchForFrame",
@@ -107,6 +283,11 @@ class SwingRenderFrameControllerTest {
 
                 assertEquals(1, host.refreshCount)
                 assertEquals(1, host.renderRequestCount)
+                assertEquals(1, host.clampViewportCallCount)
+                assertTrue(
+                    host.semanticCalls.indexOf("clampViewport") < host.semanticCalls.indexOf("syncTerminalGridToActiveChrome"),
+                    "published history must be reconciled before a resize installs its new viewport anchor",
+                )
             } finally {
                 session.close()
             }
@@ -117,9 +298,10 @@ class SwingRenderFrameControllerTest {
         override val session: TerminalSession?,
         private val clampViewportResult: Boolean = false,
         private val syncGridToChromeResult: Boolean = false,
+        override val cursorPresentationEnabled: Boolean = true,
     ) : SwingRenderFrameHost {
         override val renderCache = TerminalRenderCache(80, 24)
-        override val settings = SwingSettings(padding = Insets(0, 0, 0, 0))
+        override val settings = SwingSettings(padding = SwingPadding(), shellIntegrationDecorationGutterWidth = 0)
         override val metrics =
             SwingMetrics(
                 cellWidth = 10,
@@ -131,25 +313,35 @@ class SwingRenderFrameControllerTest {
                 cursorStrokeWidth = 2,
             )
         override val visualGeometry = TerminalVisualViewportGeometry()
+        override val searchHighlights = TerminalSearchViewportHighlights()
+        private val searchModel = TerminalSearchModel()
+        var searchQuery = ""
         override val componentWidth = 800
         override val componentHeight = 480
-        override val cursorPresentationEnabled = true
+        var blinkVisible = true
+        val regions = ArrayList<Region>()
+        val repaintFrameGenerations = ArrayList<Long>()
 
         var fullRepaintCount = 0
         var regionRepaintCount = 0
         var refreshCount = 0
         var renderRequestCount = 0
+        var clampViewportCallCount = 0
         val semanticCalls = ArrayList<String>()
         val publishHistorySizes = ArrayList<Int>()
 
-        override fun resetCursorBlinkForFrame() {
+        override fun resetCursorBlinkForFrame(): Boolean {
             semanticCalls += "resetCursorBlinkForFrame"
+            val changed = !blinkVisible
+            blinkVisible = true
+            return changed
         }
 
         override fun refreshRenderCacheFromSession(session: TerminalSession) {
             refreshCount++
             semanticCalls += "refreshRenderCacheFromSession"
             session.renderPublisher.readCurrent { published -> renderCache.updateFrom(published) }
+            visualGeometry.updateLayout(metrics, renderCache.rows, componentHeight)
         }
 
         override fun requestRender(session: TerminalSession) {
@@ -164,7 +356,11 @@ class SwingRenderFrameControllerTest {
         override fun clampViewport(
             historySize: Int,
             discardedCount: Long,
-        ): Boolean = clampViewportResult
+        ): Boolean {
+            clampViewportCallCount++
+            semanticCalls += "clampViewport"
+            return clampViewportResult
+        }
 
         override fun requestedViewportOffset(): Int = 0
 
@@ -175,6 +371,7 @@ class SwingRenderFrameControllerTest {
 
         override fun refreshSearchForFrame() {
             semanticCalls += "refreshSearchForFrame"
+            searchModel.search(renderCache, searchQuery, ignoreCase = false).buildViewportHighlights(renderCache, searchHighlights)
         }
 
         override fun publishViewportState(historySize: Int) {
@@ -193,22 +390,61 @@ class SwingRenderFrameControllerTest {
             height: Int,
         ) {
             regionRepaintCount++
+            regions += Region(x, y, width, height)
+            repaintFrameGenerations += renderCache.frameGeneration
+        }
+
+        fun clearRepaints() {
+            fullRepaintCount = 0
+            regionRepaintCount = 0
+            regions.clear()
+            repaintFrameGenerations.clear()
         }
     }
 
-    private fun createSession(): TerminalSession {
+    private data class Region(
+        val x: Int,
+        val y: Int,
+        val width: Int,
+        val height: Int,
+    )
+
+    private fun blinkFrame(
+        textBlinks: Boolean = false,
+        cursorBlinks: Boolean = true,
+        generation: Long = 1,
+    ): TestRenderFrame =
+        object : TestRenderFrame(
+            cells =
+                Array(3) { row ->
+                    Array(4) {
+                        TestCell(
+                            codeWord = if (row == 2 && generation > 1) 'Z'.code else 'A'.code,
+                            flags = TerminalRenderCellFlags.CODEPOINT,
+                            attr = TerminalRenderAttrs.pack(blink = textBlinks && row == 1),
+                        )
+                    }
+                },
+            cursorValue = TerminalRenderCursor(0, 0, true, cursorBlinks, TerminalRenderCursorShape.BLOCK, 1),
+        ) {
+            override val frameGeneration: Long = generation
+
+            override fun lineGeneration(row: Int): Long = if (row == 2) generation else 1
+        }
+
+    private fun createSession(frameReader: TerminalRenderFrameReader? = null): TerminalSession {
         val terminal = TerminalBuffers.create(width = 2, height = 1, maxHistory = 1)
         val session =
             TerminalSession(
                 terminal = terminal,
                 renderPublisher = TerminalRenderPublisher(2, 1),
-                renderReader = terminal as TerminalRenderFrameReader,
+                renderReader = frameReader ?: terminal as TerminalRenderFrameReader,
                 responseReader = terminal,
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
             )
-        session.renderPublisher.updateAndPublish(terminal as TerminalRenderFrameReader)
+        session.renderPublisher.updateAndPublish(frameReader ?: terminal as TerminalRenderFrameReader)
         return session
     }
 

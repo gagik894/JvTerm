@@ -245,19 +245,47 @@ class TerminalSession(
      *   Pass 0 if the viewport was at the live screen (no scrollback).
      * @return A [Pair] of (newScrollbackOffset, newHistorySize) that the UI should apply to
      *   re-anchor the viewport to the same logical content after reflow.
+     * @see resizeViewport for an atomic history baseline including discarded rows.
      */
     fun resize(
         columns: Int,
         rows: Int,
         oldScrollbackOffset: Int = 0,
     ): Pair<Int, Int> {
+        val result = resizeViewport(columns, rows, oldScrollbackOffset)
+        return result.scrollbackOffset to result.historySize
+    }
+
+    /**
+     * Resizes the terminal and captures its viewport anchor and history baseline
+     * under the same mutation lock before notifying the connector.
+     *
+     * Reflow may replace history storage and change its discarded-row counter.
+     * Consumers that retain scrollback position must adopt the complete result
+     * together, so later output is measured against the resized history.
+     *
+     * @param columns target terminal column width; must be positive.
+     * @param rows target terminal row height; must be positive.
+     * @param oldScrollbackOffset pre-resize whole-row offset, or zero for live output.
+     * @return the resized viewport and history metadata from one synchronized state.
+     */
+    fun resizeViewport(
+        columns: Int,
+        rows: Int,
+        oldScrollbackOffset: Int = 0,
+    ): TerminalViewportResizeResult {
         require(columns > 0) { "columns must be positive, got $columns" }
         require(rows > 0) { "rows must be positive, got $rows" }
 
-        val result: Pair<Int, Int>
-        synchronized(mutationLock) {
-            result = terminal.resize(columns, rows, oldScrollbackOffset)
-        }
+        val result =
+            synchronized(mutationLock) {
+                val (scrollbackOffset, historySize) = terminal.resize(columns, rows, oldScrollbackOffset)
+                var resizedViewport: TerminalViewportResizeResult? = null
+                renderReader.readRenderFrame { frame ->
+                    resizedViewport = TerminalViewportResizeResult(scrollbackOffset, historySize, frame.discardedCount)
+                }
+                checkNotNull(resizedViewport) { "Render reader did not expose the resized terminal frame" }
+            }
         connector.resize(columns, rows)
         invalidateRender()
         return result

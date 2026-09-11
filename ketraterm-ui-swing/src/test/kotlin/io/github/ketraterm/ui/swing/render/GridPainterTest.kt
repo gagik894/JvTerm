@@ -22,11 +22,11 @@ import io.github.ketraterm.session.TerminalShellIntegrationCommandRecord
 import io.github.ketraterm.session.TerminalShellIntegrationState
 import io.github.ketraterm.ui.swing.api.CellSelection
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import java.awt.Font
-import java.awt.Insets
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 
@@ -44,7 +44,7 @@ class GridPainterTest {
                         defaultBackground = BLACK,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -82,7 +82,7 @@ class GridPainterTest {
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
                 fractionalMetrics = RenderingHints.VALUE_FRACTIONALMETRICS_ON,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val fontMetrics = g.getFontMetrics(settings.font)
@@ -135,7 +135,7 @@ class GridPainterTest {
                         cursorBackground = BLUE,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -173,7 +173,7 @@ class GridPainterTest {
                         defaultBackground = BLACK,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -221,7 +221,7 @@ class GridPainterTest {
                         cursorBackground = BLUE,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -259,7 +259,7 @@ class GridPainterTest {
                         defaultBackground = BLACK,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -313,7 +313,7 @@ class GridPainterTest {
                         defaultBackground = BLACK,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -371,7 +371,7 @@ class GridPainterTest {
                     ),
                 selectionBackground = RED,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -408,7 +408,7 @@ class GridPainterTest {
                     ),
                 selectionBackground = 0x66FFFFFF.toInt(),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
@@ -447,7 +447,7 @@ class GridPainterTest {
                 shellIntegrationPromptDotDiameter = 6,
                 shellIntegrationDecorationGutterWidth = 8,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -499,7 +499,7 @@ class GridPainterTest {
                 selectionBackground = BLUE,
                 shellIntegrationPromptDotColor = GREEN,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 0, 0),
+                padding = SwingPadding(0, 0, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -546,7 +546,7 @@ class GridPainterTest {
                 shellIntegrationPromptDotDiameter = 6,
                 shellIntegrationDecorationGutterWidth = 12,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 12, 0, 0),
+                padding = SwingPadding(0, 12, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 1)
@@ -593,7 +593,7 @@ class GridPainterTest {
                     ),
                 shellIntegrationPromptDotColor = GREEN,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -642,7 +642,7 @@ class GridPainterTest {
                         defaultBackground = BLACK,
                     ),
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 0, 8, 0),
+                padding = SwingPadding(0, 0, 8, 0),
                 shellIntegrationDecorationGutterWidth = 0,
             )
         val metrics =
@@ -713,7 +713,7 @@ class GridPainterTest {
                 shellIntegrationFailedCommandRailColor = RED,
                 shellIntegrationDecorationGutterWidth = 8,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -758,7 +758,7 @@ class GridPainterTest {
                 shellIntegrationPromptDotColor = GREEN,
                 shellIntegrationDecorationGutterWidth = 8,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -804,7 +804,7 @@ class GridPainterTest {
                 shellIntegrationFailedPromptDotColor = RED,
                 shellIntegrationDecorationGutterWidth = 8,
                 textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val metrics = SwingMetrics.from(g.getFontMetrics(settings.font))
         val cache = TerminalRenderCache(columns = 3, rows = 3)
@@ -837,7 +837,7 @@ class GridPainterTest {
         val settings =
             SwingSettings(
                 font = Font(Font.MONOSPACED, Font.PLAIN, 14),
-                padding = Insets(0, 8, 0, 0),
+                padding = SwingPadding(0, 8, 0, 0),
             )
         val cache = TerminalRenderCache(columns = 3, rows = 3)
         cache.updateFrom(

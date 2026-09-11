@@ -17,17 +17,93 @@ package io.github.ketraterm.ui.swing.settings
 
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.SwingTerminal
+import io.github.ketraterm.ui.swing.render.cache.FontCache
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Canvas
 import java.awt.Font
-import java.awt.Insets
 import java.awt.RenderingHints
 import javax.swing.SwingUtilities
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
-import kotlin.test.assertTrue
+import kotlin.test.*
 
 class SwingSettingsTest {
+    @ParameterizedTest
+    @ValueSource(ints = [0, 1, 3])
+    fun unchangedFontSettingsRetainUnsupportedGlyphResolution(fallbackCount: Int) {
+        val font = Font(Font.MONOSPACED, Font.PLAIN, 14)
+        val settings =
+            SwingSettings(
+                font = font,
+                fallbackFonts = List(fallbackCount) { font }.toImmutableList(),
+                useSystemFallbackFonts = false,
+            )
+        val cache = FontCache()
+        assertTrue(cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts))
+        val missingGlyphFont = cache.fontForCodePoint(0x10FFFF, Font.PLAIN)
+
+        assertFalse(cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts))
+        assertSame(missingGlyphFont, cache.fontForCodePoint(0x10FFFF, Font.PLAIN))
+        assertEquals(26, SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.PRIMARY))
+        assertEquals(4, SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.PRIMARY))
+        assertEquals(4, SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.ALTERNATE))
+        assertEquals(2, SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.ALTERNATE))
+    }
+
+    @Test
+    fun settingsFontSnapshotIsIndependentOfHostList() {
+        val font = Font(Font.MONOSPACED, Font.PLAIN, 14)
+        val fonts = mutableListOf(font)
+        val settings = SwingSettings(fallbackFonts = fonts.toImmutableList())
+        val hash = settings.hashCode()
+        fonts.clear()
+
+        assertEquals(listOf(font), settings.fallbackFonts)
+        assertEquals(settings, settings.copy())
+        assertEquals(hash, settings.copy().hashCode())
+    }
+
+    @Test
+    fun settingsCopySharesImmutableValues() {
+        val settings =
+            SwingSettings(
+                fallbackFonts = persistentListOf(Font(Font.MONOSPACED, Font.PLAIN, 14)),
+                padding = SwingPadding(1, 2, 3, 4),
+                alternateScreenPadding = SwingPadding(5, 6, 7, 8),
+            )
+        val copy = settings.copy(columns = 123)
+        assertSame(settings.padding, copy.padding)
+        assertSame(settings.alternateScreenPadding, copy.alternateScreenPadding)
+        assertSame(settings.fallbackFonts, copy.fallbackFonts)
+        assertEquals(80, settings.columns)
+        assertEquals(123, copy.columns)
+    }
+
+    @Test
+    fun replacingPaddingAndFontsLeavesOriginalSettingsUnchanged() {
+        val originalFont = Font(Font.MONOSPACED, Font.PLAIN, 14)
+        val replacementFont = Font(Font.DIALOG, Font.BOLD, 18)
+        val settings = SwingSettings(fallbackFonts = persistentListOf(originalFont))
+        val fonts = mutableListOf(replacementFont)
+        val copy =
+            settings.copy(
+                fallbackFonts = fonts.toImmutableList(),
+                padding = settings.padding.copy(left = 12),
+                alternateScreenPadding = settings.alternateScreenPadding.copy(bottom = 9),
+            )
+        fonts.clear()
+
+        assertEquals(listOf(originalFont), settings.fallbackFonts)
+        assertEquals(listOf(replacementFont), copy.fallbackFonts)
+        assertEquals(SwingPadding(0, 4, 4, 6), settings.padding)
+        assertEquals(SwingPadding(0, 12, 4, 6), copy.padding)
+        assertEquals(SwingPadding(0, 2, 2, 2), settings.alternateScreenPadding)
+        assertEquals(SwingPadding(0, 2, 9, 2), copy.alternateScreenPadding)
+        assertEquals(settings.font, copy.font)
+        assertTrue(settings != copy)
+    }
+
     @Test
     fun settingsRejectInvalidGridSizes() {
         assertFailsWith<IllegalArgumentException> {
@@ -141,8 +217,8 @@ class SwingSettingsTest {
         assertEquals(true, settings.shellIntegrationFailedCommandRailsVisible)
         assertEquals(0xFFE74856.toInt(), settings.shellIntegrationFailedCommandRailColor)
         assertEquals(3, settings.shellIntegrationFailedCommandRailWidth)
-        assertEquals(Insets(0, 4, 4, 6), settings.padding)
-        assertEquals(Insets(0, 2, 2, 2), settings.alternateScreenPadding)
+        assertEquals(SwingPadding(0, 4, 4, 6), settings.padding)
+        assertEquals(SwingPadding(0, 2, 2, 2), settings.alternateScreenPadding)
         assertEquals(0, settings.padding.top)
         assertEquals(4, settings.padding.left)
         assertEquals(4, settings.padding.bottom)
@@ -171,11 +247,11 @@ class SwingSettingsTest {
     fun settingsAcceptCustomPadding() {
         val settings =
             SwingSettings(
-                padding = Insets(4, 8, 4, 8),
-                alternateScreenPadding = Insets(1, 2, 3, 4),
+                padding = SwingPadding(4, 8, 4, 8),
+                alternateScreenPadding = SwingPadding(1, 2, 3, 4),
             )
-        assertEquals(Insets(4, 8, 4, 8), settings.padding)
-        assertEquals(Insets(1, 2, 3, 4), settings.alternateScreenPadding)
+        assertEquals(SwingPadding(4, 8, 4, 8), settings.padding)
+        assertEquals(SwingPadding(1, 2, 3, 4), settings.alternateScreenPadding)
     }
 
     @Test
@@ -198,8 +274,8 @@ class SwingSettingsTest {
     fun alternateScreenChromeDoesNotInheritPrimaryScrollbarGutter() {
         val settings =
             SwingSettings(
-                padding = Insets(0, 40, 8, 14),
-                alternateScreenPadding = Insets(0, 3, 4, 5),
+                padding = SwingPadding(0, 40, 8, 14),
+                alternateScreenPadding = SwingPadding(0, 3, 4, 5),
             )
 
         assertEquals(56, SwingTerminalChrome.left(settings, TerminalRenderBufferKind.PRIMARY))
@@ -214,10 +290,10 @@ class SwingSettingsTest {
     @Test
     fun settingsRejectNegativePaddingEdges() {
         assertFailsWith<IllegalArgumentException> {
-            SwingSettings(padding = Insets(0, -1, 0, 0))
+            SwingSettings(padding = SwingPadding(0, -1, 0, 0))
         }
         assertFailsWith<IllegalArgumentException> {
-            SwingSettings(alternateScreenPadding = Insets(0, 0, 0, -1))
+            SwingSettings(alternateScreenPadding = SwingPadding(0, 0, 0, -1))
         }
     }
 
@@ -360,7 +436,7 @@ class SwingSettingsTest {
     fun preferredGridSizeIncludesPrimaryChrome() {
         val component =
             SwingTerminal(settingsProvider = {
-                SwingSettings(columns = 10, rows = 4, padding = Insets(3, 5, 7, 11))
+                SwingSettings(columns = 10, rows = 4, padding = SwingPadding(3, 5, 7, 11))
             })
         val cellWidth = (component.preferredGridSize(2, 1).width - component.preferredGridSize(1, 1).width)
         val cellHeight = (component.preferredGridSize(1, 2).height - component.preferredGridSize(1, 1).height)

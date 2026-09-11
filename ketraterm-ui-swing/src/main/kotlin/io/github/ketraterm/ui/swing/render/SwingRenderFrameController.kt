@@ -50,16 +50,26 @@ internal class SwingRenderFrameController(
 
     fun handlePublishedFrame() {
         val boundSession = host.session ?: return
-        host.resetCursorBlinkForFrame()
+        val blinkVisibilityChanged = host.resetCursorBlinkForFrame()
         host.refreshRenderCacheFromSession(boundSession)
+        if (!host.renderCache.hasFrame) return
+        val viewportChanged = host.clampViewport(host.renderCache.historySize, host.renderCache.discardedCount)
+        val gridChanged = host.syncTerminalGridToActiveChrome()
         val followUpRenderRequired =
-            host.syncTerminalGridToActiveChrome() ||
-                host.clampViewport(host.renderCache.historySize, host.renderCache.discardedCount) ||
+            gridChanged ||
+                viewportChanged ||
                 host.renderCache.scrollbackOffset != host.requestedViewportOffset()
-        var shellIntegrationDecorationsChanged = host.refreshShellIntegrationDecorations(boundSession)
+        val shellIntegrationDecorationsChanged = host.refreshShellIntegrationDecorations(boundSession)
         if (followUpRenderRequired) host.requestRender(boundSession)
         host.refreshSearchForFrame()
         host.publishViewportState(host.renderCache.historySize)
+        repaintFrame(forceFullRepaint = shellIntegrationDecorationsChanged)
+        if (blinkVisibilityChanged) repaintBlinkState()
+    }
+
+    /** Plans damage for the installed frame and projection, including search commands between publications. */
+    fun repaintFrame(forceFullRepaint: Boolean = false) {
+        if (!host.renderCache.hasFrame) return
         repaintPlanner.requestFrameRepaint(
             cache = host.renderCache,
             metrics = host.metrics,
@@ -67,13 +77,14 @@ internal class SwingRenderFrameController(
             componentHeight = host.componentHeight,
             padding = repaintPadding(),
             repaintSink = repaintSink,
-            forceFullRepaint = shellIntegrationDecorationsChanged,
+            forceFullRepaint = forceFullRepaint,
             visualGeometry = host.visualGeometry,
+            searchHighlights = host.searchHighlights,
         )
     }
 
     fun repaintBlinkState() {
-        if (host.session == null) return
+        if (host.session == null || !host.renderCache.hasFrame) return
         if (host.cursorPresentationEnabled) {
             repaintPlanner.requestCursorBlinkRepaint(
                 cache = host.renderCache,
@@ -97,7 +108,7 @@ internal class SwingRenderFrameController(
     }
 
     fun repaintCursorState() {
-        if (host.session == null) return
+        if (host.session == null || !host.renderCache.hasFrame) return
         repaintPlanner.requestCursorRepaint(
             cache = host.renderCache,
             metrics = host.metrics,

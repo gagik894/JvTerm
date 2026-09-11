@@ -62,6 +62,21 @@ interface TerminalRenderFrame {
     val frameGeneration: Long
 
     /**
+     * Generation for retained cell content and terminal-owned row mapping, including
+     * off-screen history. Cell, cluster, stored attribute, wrap, resize, scroll, reset, and
+     * buffer changes advance this value; cursor and caller-requested viewport changes
+     * do not need to. Compare for equality, since generations can wrap.
+     *
+     * The default conservatively includes all visual changes. Implementations with
+     * separate content tracking should override this to let consumers reuse work
+     * across cursor-only frames. Generations are local to one content source.
+     * Global presentation changes such as reverse video may preserve this value,
+     * but must change [lineGeneration] for every row whose rendered attributes change.
+     */
+    val contentGeneration: Long
+        get() = frameGeneration
+
+    /**
      * Generation that changes when terminal-owned row mapping or shape changes.
      *
      * Resize, full reset, scrolling, buffer switches, and reflow should advance
@@ -124,13 +139,13 @@ interface TerminalRenderFrame {
     fun lineWrapped(row: Int): Boolean
 
     /**
-     * Copies one visible row into caller-owned primitive arrays.
+     * Copies one visible row into caller-owned primitive arrays in logical terminal-column order.
      *
      * All destination arrays must have enough space for [columns] entries from
      * their respective offsets. [extraAttrWords] and [hyperlinkIds] are optional
      * because not every renderer needs those channels.
      *
-     * [clusterDataSink] is the preferred zero-allocation path for cells marked
+     * [clusterDataSink] is the preferred primitive handoff for cells marked
      * [TerminalRenderCellFlags.CLUSTER]. [clusterSink] is retained for callers
      * that need text directly; implementations may avoid constructing cluster
      * strings when only [clusterDataSink] is supplied.

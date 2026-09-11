@@ -23,12 +23,14 @@ import io.github.ketraterm.protocol.MouseTrackingMode
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Canvas
-import java.awt.Insets
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.event.MouseWheelEvent
@@ -38,6 +40,27 @@ class SwingTerminalMouseControllerTest {
 
     @Nested
     inner class PressRouting {
+        @ParameterizedTest
+        @ValueSource(ints = [MouseEvent.MOUSE_PRESSED, MouseEvent.MOUSE_RELEASED])
+        fun `context menu remains available without a published frame`(eventId: Int) {
+            val host = RecordingMouseHost()
+            host.renderCache.reset()
+            val controller = SwingTerminalMouseController(host)
+            val event = MouseEvent(source, eventId, 0L, 0, 20, 30, 1, true, MouseEvent.BUTTON3)
+
+            if (eventId == MouseEvent.MOUSE_PRESSED) {
+                controller.mouseListener.mousePressed(event)
+            } else {
+                controller.mouseListener.mouseReleased(event)
+            }
+
+            assertEquals(1, host.contextMenuCount)
+            assertEquals(0, host.selectionPressCount)
+            assertEquals(0, host.selectionReleaseCount)
+            assertTrue(host.mouseReports.isEmpty())
+            assertTrue(event.isConsumed)
+        }
+
         @Test
         fun `middle mouse press falls through to selection routing`() {
             val host = RecordingMouseHost()
@@ -418,7 +441,7 @@ class SwingTerminalMouseControllerTest {
         )
 
     private class RecordingMouseHost(
-        override val settings: SwingSettings = SwingSettings(padding = Insets(0, 0, 0, 0)),
+        override val settings: SwingSettings = SwingSettings(padding = SwingPadding(0, 0, 0, 0)),
         private val hyperlinkPressHandled: Boolean = false,
         private val scrollResult: Boolean = true,
         private val mouseTrackingMode: MouseTrackingMode = MouseTrackingMode.OFF,
@@ -434,7 +457,10 @@ class SwingTerminalMouseControllerTest {
                 overlineY = 0,
                 cursorStrokeWidth = 2,
             )
-        override val renderCache = TerminalRenderCache(80, 24)
+        override val renderCache =
+            TerminalRenderCache(80, 24).also {
+                it.updateFrom(FakeFrameReader(FakeFrame(historySize = 0, rows = 24)))
+            }
 
         var scrollCount = 0
         var requestFocusInWindowCount = 0

@@ -29,6 +29,8 @@ internal interface TerminalPlatformEmojiRasterizer {
 
     /**
      * Rasterizes [text] into a transparent image no larger than [pixelSize].
+     * Returns null when this text and size cannot be rendered natively. Callers
+     * may cache that result for this rasterizer's lifetime and use text fallback.
      */
     fun rasterize(
         text: String,

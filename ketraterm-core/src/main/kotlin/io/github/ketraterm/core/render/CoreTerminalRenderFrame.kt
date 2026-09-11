@@ -95,6 +95,12 @@ internal class CoreTerminalRenderFrame(
             return state.frameGeneration
         }
 
+    override val contentGeneration: Long
+        get() {
+            checkValid()
+            return state.contentGeneration
+        }
+
     override val structureGeneration: Long
         get() {
             checkValid()
@@ -147,7 +153,9 @@ internal class CoreTerminalRenderFrame(
     override fun lineGeneration(row: Int): Long {
         checkValid()
         checkRow(row)
-        return visibleLineAt(row).renderGeneration
+        // Both counters advance independently. Addition preserves equality-based invalidation
+        // across signed overflow while covering global attribute changes without touching lines.
+        return visibleLineAt(row).renderGeneration + state.globalAttributeGeneration
     }
 
     override fun lineId(row: Int): Long {

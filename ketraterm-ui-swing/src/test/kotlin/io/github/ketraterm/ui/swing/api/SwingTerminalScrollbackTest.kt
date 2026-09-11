@@ -23,22 +23,27 @@ import io.github.ketraterm.input.event.TerminalMouseEvent
 import io.github.ketraterm.input.event.TerminalPasteEvent
 import io.github.ketraterm.parser.api.TerminalOutputParser
 import io.github.ketraterm.render.api.*
+import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.session.TerminalShellIntegrationState
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingSettingsProvider
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
+import kotlinx.coroutines.test.StandardTestDispatcher
+import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import java.awt.Insets
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.event.ComponentEvent
 import java.awt.event.MouseWheelEvent
 import java.awt.image.BufferedImage
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -49,6 +54,76 @@ import javax.swing.SwingUtilities
 
 /** Rendering, viewport, and EDT coalescing tests for Swing terminal scrollback. */
 class SwingTerminalScrollbackTest {
+    private val components = ArrayList<SwingTerminal>()
+    private val sessions = ArrayList<TerminalSession>()
+    private val viewportUpdates = HashMap<SwingTerminal, LinkedBlockingQueue<Double>>()
+    private val dispatcher = StandardTestDispatcher()
+
+    @AfterEach
+    fun disposeFixtures() {
+        SwingUtilities.invokeAndWait { components.forEach(SwingTerminal::dispose) }
+        sessions.forEach(TerminalSession::close)
+        dispatcher.scheduler.runCurrent()
+    }
+
+    private fun createComponent(
+        settingsProvider: SwingSettingsProvider = SwingSettingsProvider { SwingSettings() },
+        hostServices: SwingHostServices = SwingHostServices(),
+    ): SwingTerminal {
+        val updates = LinkedBlockingQueue<Double>()
+        val listener =
+            object : TerminalViewportListener {
+                override fun viewportChanged(
+                    historySize: Int,
+                    scrollbackOffset: Double,
+                    renderOffset: Int,
+                    visibleRows: Int,
+                    requestedRows: Int,
+                ) {
+                    hostServices.viewportListener.viewportChanged(historySize, scrollbackOffset, renderOffset, visibleRows, requestedRows)
+                    updates.add(scrollbackOffset)
+                }
+
+                override fun viewportStateChanged(state: TerminalViewportState) {
+                    hostServices.viewportListener.viewportStateChanged(state)
+                    updates.add(state.scrollbackOffset)
+                }
+            }
+        return SwingTerminal(settingsProvider = settingsProvider, hostServices = hostServices.copy(viewportListener = listener)).also {
+            components += it
+            viewportUpdates[it] = updates
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `reverse video changes invalidate retained history including soft reset`(softReset: Boolean) {
+        val terminal = TerminalBuffers.create(width = 2, height = 1, maxHistory = 1)
+        terminal.writeCodepoint('x'.code)
+        terminal.scrollUp()
+        val reader = terminal as TerminalRenderFrameReader
+        val reused = TerminalRenderCache(2, 1)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        assertEquals('x'.code, reused.codeWords[0])
+        assertFalse(TerminalRenderAttrs.isInverse(reused.attrWords[0]))
+
+        terminal.setReverseVideo(true)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        val inverted = TerminalRenderCache(2, 1)
+        inverted.updateFrom(reader, scrollbackOffset = 1)
+        assertTrue(TerminalRenderAttrs.isInverse(inverted.attrWords[0]))
+        assertArrayEquals(inverted.attrWords, reused.attrWords, "Existing history must receive global reverse-video attributes")
+
+        if (softReset) terminal.softReset() else terminal.setReverseVideo(false)
+        reused.updateFrom(reader, scrollbackOffset = 1)
+        val restored = TerminalRenderCache(2, 1)
+        restored.updateFrom(reader, scrollbackOffset = 1)
+        assertEquals('x'.code, restored.codeWords[0])
+        assertFalse(TerminalRenderAttrs.isInverse(restored.attrWords[0]))
+        assertArrayEquals(restored.attrWords, reused.attrWords, "Resetting reverse video must also restore cached history attributes")
+        assertArrayEquals(restored.codeWords, reused.codeWords)
+    }
+
     @Test
     fun `equal render requests schedule at most one pending EDT repaint`() {
         val terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5)
@@ -62,24 +137,26 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         session.renderPublisher.updateAndPublish(renderReader)
-        val component = SwingTerminal()
+        val component = createComponent()
         val oldManager = RepaintManager.currentManager(component)
         val repaintManager = CountingRepaintManager(component)
+        val releaseEdt = CountDownLatch(1)
 
         try {
             RepaintManager.setCurrentManager(repaintManager)
             SwingUtilities.invokeAndWait {
                 component.bind(session)
+                dispatcher.scheduler.runCurrent()
             }
-            awaitRenderGenerationAfter(session, -1L)
+            publishRenderRequestsAfter(session, -1L)
             drainEdt()
             repaintManager.reset()
             val generationBeforeFlood = session.renderGeneration.value
 
             val edtBlocked = CountDownLatch(1)
-            val releaseEdt = CountDownLatch(1)
             SwingUtilities.invokeLater {
                 edtBlocked.countDown()
                 assertTrue(releaseEdt.await(5, TimeUnit.SECONDS), "EDT block was not released")
@@ -89,7 +166,7 @@ class SwingTerminalScrollbackTest {
             repeat(1_000) {
                 session.requestRender(scrollbackOffset = 0)
             }
-            awaitRenderGenerationAfter(session, generationBeforeFlood)
+            publishRenderRequestsAfter(session, generationBeforeFlood)
             assertEquals(0, repaintManager.count)
 
             releaseEdt.countDown()
@@ -99,6 +176,7 @@ class SwingTerminalScrollbackTest {
 
             assertTrue(repaintManager.count <= 1)
         } finally {
+            releaseEdt.countDown()
             RepaintManager.setCurrentManager(oldManager)
             session.close()
         }
@@ -117,13 +195,15 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         session.renderPublisher.updateAndPublish(renderReader)
         val component = scrollTestTerminal()
 
         SwingUtilities.invokeAndWait {
             component.setSize(30, 100)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
         }
         SwingUtilities.invokeAndWait {
             component.dispatchEvent(
@@ -163,12 +243,14 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val component = scrollTestTerminal()
 
         SwingUtilities.invokeAndWait {
             component.setSize(30, 100)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
         }
         lateinit var event: MouseWheelEvent
         SwingUtilities.invokeAndWait {
@@ -205,25 +287,35 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val component = scrollTestTerminal()
 
-        SwingUtilities.invokeAndWait {
-            component.setSize(30, 100)
-            component.bind(session)
-        }
-        SwingUtilities.invokeAndWait {
-            component.scrollToScrollbackOffset(4)
-        }
+        try {
+            SwingUtilities.invokeAndWait {
+                component.setSize(30, 100)
+                try {
+                    component.bind(session)
+                    assertNull(session.renderPublisher.current(), "The worker has not published the initial viewport yet")
+                    dispatcher.scheduler.runCurrent()
+                    assertEquals(5, component.viewportState().historySize, "Scrolling requires the published history bounds")
 
-        awaitRequestedOffset(renderReader, expectedOffset = 4)
-        drainEdt()
-        val state = component.viewportState()
-        assertTrue(renderReader.requestedOffsets.contains(4), "reader never received absolute scrollback offset 4")
-        assertEquals(5, state.historySize)
-        assertEquals(4.0, state.scrollbackOffset)
-        assertEquals(4, state.renderOffset)
-        session.close()
+                    component.scrollToScrollbackOffset(4)
+                    dispatcher.scheduler.runCurrent()
+
+                    val state = component.viewportState()
+                    assertTrue(renderReader.requestedOffsets.contains(4), "reader never received absolute scrollback offset 4")
+                    assertEquals(5, state.historySize)
+                    assertEquals(4.0, state.scrollbackOffset)
+                    assertEquals(4, state.renderOffset)
+                } finally {
+                    component.dispose()
+                }
+            }
+        } finally {
+            session.close()
+            dispatcher.scheduler.runCurrent()
+        }
     }
 
     @Test
@@ -240,7 +332,8 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val component =
             scrollTestTerminal(
                 hostServices =
@@ -252,8 +345,9 @@ class SwingTerminalScrollbackTest {
         SwingUtilities.invokeAndWait {
             component.setSize(30, 100)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
         }
-        awaitRenderGenerationAfter(session, -1L)
+        publishRenderRequestsAfter(session, -1L)
         awaitViewportOffset(component, expectedOffset = 0.0)
         repeat(3) {
             component.scrollViewportBy(0.25)
@@ -274,7 +368,7 @@ class SwingTerminalScrollbackTest {
     }
 
     @Test
-    fun `fractional-height viewport requests both partial-row and animation overscan`() {
+    fun `fractional-height viewport publishes partial-row coverage before and after scrolling`() {
         val terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5)
         val renderReader = ScrollbackFrameReader()
         val session =
@@ -286,7 +380,8 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val component = scrollTestTerminal()
 
         SwingUtilities.invokeAndWait {
@@ -295,20 +390,23 @@ class SwingTerminalScrollbackTest {
             val cellHeight = elevenRows.height - tenRows.height
             component.setSize(tenRows.width, tenRows.height + cellHeight - 1)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
 
             assertEquals(10, component.visibleGridSize().height)
             assertEquals(10, terminal.height)
             assertEquals(11, component.viewportState().requestedRows)
+            assertEquals(5, component.viewportState().historySize)
+            assertEquals(11, renderReader.lastRequestedRows)
+
+            component.scrollToScrollbackOffset(1)
+            dispatcher.scheduler.runCurrent()
+
+            assertEquals(1.0, component.viewportState().scrollbackOffset)
+            assertEquals(1, renderReader.lastRequestedOffset)
+            assertEquals(11, renderReader.lastRequestedRows)
+            assertEquals(11, component.viewportState().requestedRows)
+            session.renderPublisher.readCurrent { assertEquals(11, it.rows) }
         }
-
-        component.scrollViewportBy(1.0)
-        awaitViewportOffset(component, expectedOffset = 1.0)
-
-        assertTrue(
-            renderReader.requestedRows.contains(12),
-            "reader never received 11 visible render rows plus one animation overscan row",
-        )
-        assertEquals(11, component.viewportState().requestedRows)
         session.close()
     }
 
@@ -325,14 +423,16 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val component = scrollTestTerminal()
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(columns = 3, rows = 3)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
         }
-        awaitRequestedRows(renderReader, expectedRows = 3)
+        publishRequestedRows(renderReader, expectedRows = 3)
         renderReader.requestedRows.clear()
 
         var resizedRows = -1
@@ -342,8 +442,8 @@ class SwingTerminalScrollbackTest {
             resizedRows = component.viewportState().requestedRows
         }
 
-        awaitRequestedRows(renderReader, resizedRows)
-        awaitPublishedRows(session, resizedRows)
+        publishRequestedRows(renderReader, resizedRows)
+        assertPublishedRows(session, resizedRows)
         session.close()
     }
 
@@ -360,13 +460,15 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         session.renderPublisher.updateAndPublish(renderReader)
         val component = scrollTestTerminal()
 
         SwingUtilities.invokeAndWait {
             component.setSize(30, 100)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
             component.scrollFromScrollbar(scrollbackOffset = 3, valueIsAdjusting = true)
             assertEquals(3.0, component.viewportState().scrollbackOffset)
         }
@@ -389,7 +491,11 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            ).also { it.renderPublisher.updateAndPublish(reader) }
+                workerDispatcher = dispatcher,
+            ).also {
+                sessions += it
+                it.renderPublisher.updateAndPublish(reader)
+            }
         }
         val leftSession = newSession()
         val rightSession = newSession()
@@ -401,6 +507,7 @@ class SwingTerminalScrollbackTest {
             right.setSize(30, 100)
             left.bind(leftSession)
             right.bind(rightSession)
+            dispatcher.scheduler.runCurrent()
         }
         drainEdt()
 
@@ -435,20 +542,22 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
+                workerDispatcher = dispatcher,
                 shellIntegrationState = shellIntegrationState,
-            )
+            ).also(sessions::add)
         session.renderPublisher.updateAndPublish(reader)
         val component =
             scrollTestTerminal(
                 settings =
                     SwingSettings(
-                        padding = Insets(0, 0, 0, 0),
+                        padding = SwingPadding(0, 0, 0, 0),
                     ),
             )
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(3, 3)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
 
             val liveState = component.viewportState()
             assertEquals(0, liveState.historySize)
@@ -496,20 +605,22 @@ class SwingTerminalScrollbackTest {
                 connector = connector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
+                workerDispatcher = dispatcher,
                 shellIntegrationState = shellIntegrationState,
-            )
+            ).also(sessions::add)
         val settingsProvider =
             MutableSettingsProvider(
                 SwingSettings(
-                    padding = Insets(0, 0, 0, 0),
+                    padding = SwingPadding(0, 0, 0, 0),
                     shellIntegrationPromptDotsVisible = false,
                 ),
             )
-        val component = SwingTerminal(settingsProvider = settingsProvider)
+        val component = createComponent(settingsProvider = settingsProvider)
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(3, 3)
             component.bind(session)
+            dispatcher.scheduler.runCurrent()
         }
         drainEdt()
 
@@ -543,19 +654,21 @@ class SwingTerminalScrollbackTest {
                 connector = connector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         val settings =
             SwingSettings(
-                padding = Insets(0, 40, 8, 8),
-                alternateScreenPadding = Insets(0, 8, 8, 8),
+                padding = SwingPadding(0, 40, 8, 8),
+                alternateScreenPadding = SwingPadding(0, 8, 8, 8),
                 shellIntegrationDecorationGutterWidth = 32,
             )
-        val component = SwingTerminal(settingsProvider = SwingSettingsProvider { settings })
+        val component = createComponent(settingsProvider = SwingSettingsProvider { settings })
 
         try {
             SwingUtilities.invokeAndWait {
                 component.size = component.preferredGridSize(10, 3)
                 component.bind(session)
+                dispatcher.scheduler.runCurrent()
             }
             drainEdt()
 
@@ -564,7 +677,7 @@ class SwingTerminalScrollbackTest {
 
             reader.activeBuffer = TerminalRenderBufferKind.ALTERNATE
             session.requestRender(scrollbackOffset = 0)
-            awaitVisibleGridColumnsGreaterThan(component, primaryColumns)
+            publishVisibleGridColumnsGreaterThan(component, primaryColumns)
 
             lateinit var alternateVisibleSize: java.awt.Dimension
             SwingUtilities.invokeAndWait {
@@ -574,7 +687,7 @@ class SwingTerminalScrollbackTest {
             assertTrue(alternateVisibleSize.width > primaryColumns)
             assertEquals(alternateVisibleSize.width, terminal.width)
             assertEquals(alternateVisibleSize.width, connector.lastColumns.get())
-            assertEquals(Insets(0, 8, 8, 8), settings.alternateScreenPadding)
+            assertEquals(SwingPadding(0, 8, 8, 8), settings.alternateScreenPadding)
         } finally {
             session.close()
         }
@@ -593,7 +706,8 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
-            )
+                workerDispatcher = dispatcher,
+            ).also(sessions::add)
         session.renderPublisher.updateAndPublish(reader)
         val component = scrollTestTerminal()
 
@@ -601,6 +715,7 @@ class SwingTerminalScrollbackTest {
             SwingUtilities.invokeAndWait {
                 component.setSize(30, 100)
                 component.bind(session)
+                dispatcher.scheduler.runCurrent()
             }
             component.scrollToScrollbackOffset(3)
             awaitViewportOffset(component, expectedOffset = 3.0)
@@ -609,7 +724,7 @@ class SwingTerminalScrollbackTest {
             reader.historySize = 0
             val alternateGeneration = session.renderGeneration.value
             session.requestRender(scrollbackOffset = 0)
-            awaitRenderGenerationAfter(session, alternateGeneration)
+            publishRenderRequestsAfter(session, alternateGeneration)
             awaitViewportOffset(component, expectedOffset = 0.0)
             assertEquals(0, component.viewportState().renderOffset)
 
@@ -617,7 +732,7 @@ class SwingTerminalScrollbackTest {
             reader.historySize = 5
             val primaryGeneration = session.renderGeneration.value
             session.requestRender(scrollbackOffset = 0)
-            awaitRenderGenerationAfter(session, primaryGeneration)
+            publishRenderRequestsAfter(session, primaryGeneration)
             awaitViewportOffset(component, expectedOffset = 0.0)
             assertEquals(0, component.viewportState().renderOffset)
         } finally {
@@ -673,14 +788,11 @@ class SwingTerminalScrollbackTest {
         }
     }
 
-    private fun awaitRenderGenerationAfter(
+    private fun publishRenderRequestsAfter(
         session: TerminalSession,
         generation: Long,
     ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-        while (session.renderGeneration.value <= generation && System.nanoTime() < deadline) {
-            Thread.onSpinWait()
-        }
+        dispatcher.scheduler.runCurrent()
         assertTrue(session.renderGeneration.value > generation, "render was not published")
     }
 
@@ -689,60 +801,42 @@ class SwingTerminalScrollbackTest {
         expectedOffset: Double,
     ) {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (System.nanoTime() < deadline) {
-            drainEdt()
-            if (component.viewportState().scrollbackOffset == expectedOffset) return
-            Thread.sleep(5)
+        val updates = checkNotNull(viewportUpdates[component])
+        while (true) {
+            val remaining = (deadline - System.nanoTime()).coerceAtLeast(0)
+            val offset = updates.poll(remaining, TimeUnit.NANOSECONDS) ?: fail("Viewport did not publish offset $expectedOffset")
+            if (offset == expectedOffset) break
         }
-        assertEquals(expectedOffset, component.viewportState().scrollbackOffset)
+        SwingUtilities.invokeAndWait {
+            dispatcher.scheduler.runCurrent()
+            assertEquals(expectedOffset, component.viewportState().scrollbackOffset)
+        }
     }
 
-    private fun awaitVisibleGridColumnsGreaterThan(
+    private fun publishVisibleGridColumnsGreaterThan(
         component: SwingTerminal,
         columns: Int,
     ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
-        while (System.nanoTime() < deadline) {
-            drainEdt()
-            if (component.visibleGridSize().width > columns) return
-            Thread.sleep(5)
+        SwingUtilities.invokeAndWait {
+            dispatcher.scheduler.runCurrent()
+            assertTrue(component.visibleGridSize().width > columns, "visible grid was not resized")
         }
-        assertTrue(component.visibleGridSize().width > columns, "visible grid was not resized")
     }
 
-    private fun awaitRequestedRows(
+    private fun publishRequestedRows(
         reader: ScrollbackFrameReader,
         expectedRows: Int,
     ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-        while (expectedRows !in reader.requestedRows && System.nanoTime() < deadline) {
-            Thread.onSpinWait()
-        }
+        SwingUtilities.invokeAndWait { dispatcher.scheduler.runCurrent() }
         assertTrue(expectedRows in reader.requestedRows, "render request did not cover $expectedRows rows")
     }
 
-    private fun awaitRequestedOffset(
-        reader: ScrollbackFrameReader,
-        expectedOffset: Int,
-    ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-        while (expectedOffset !in reader.requestedOffsets && System.nanoTime() < deadline) {
-            Thread.onSpinWait()
-        }
-        assertTrue(expectedOffset in reader.requestedOffsets, "render request did not use offset $expectedOffset")
-    }
-
-    private fun awaitPublishedRows(
+    private fun assertPublishedRows(
         session: TerminalSession,
         expectedRows: Int,
     ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
         var publishedRows = -1
-        while (System.nanoTime() < deadline) {
-            session.renderPublisher.readCurrent { publishedRows = it.rows }
-            if (publishedRows == expectedRows) return
-            Thread.onSpinWait()
-        }
+        session.renderPublisher.readCurrent { publishedRows = it.rows }
         assertEquals(expectedRows, publishedRows)
     }
 
@@ -769,9 +863,9 @@ class SwingTerminalScrollbackTest {
 
     private fun scrollTestTerminal(
         hostServices: SwingHostServices = SwingHostServices(),
-        settings: SwingSettings = SwingSettings(padding = Insets(0, 0, 0, 0)),
+        settings: SwingSettings = SwingSettings(padding = SwingPadding(0, 0, 0, 0)),
     ): SwingTerminal =
-        SwingTerminal(
+        createComponent(
             settingsProvider = SwingSettingsProvider { settings },
             hostServices = hostServices,
         )

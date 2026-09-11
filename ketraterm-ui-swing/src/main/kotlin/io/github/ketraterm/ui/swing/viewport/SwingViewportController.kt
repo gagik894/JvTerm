@@ -22,31 +22,44 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingTerminalChrome
 import java.awt.Dimension
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import javax.swing.Timer
 
 /**
  * EDT-owned viewport and scrollback controller with off-EDT snapshots.
  *
- * The controller owns smooth-scroll state, render-cache row requests, visible
- * grid dimensions, and host-facing viewport snapshots. It does not read or
- * mutate render-cache contents.
+ * Owns scroll input and timer lifecycle. [SwingScrollModel] reconciles the
+ * animation and viewport against history in one operation. [onScroll] reports
+ * whether the integer render window changed and whether scrolling completed;
+ * the component owns render requests and painting. Frame reconciliation does
+ * not call [onScroll], because its caller already owns frame invalidation.
  */
 internal class SwingViewportController(
     private val listener: TerminalViewportListener,
+    private val onScroll: (renderMappingChanged: Boolean, scrollComplete: Boolean) -> Unit,
 ) {
     private val scrollModel = SwingScrollModel()
+    private val accumulator = ScrollDeltaAccumulator()
+    private val scrollTimer =
+        Timer(SCROLL_FRAME_DELAY_MILLIS) { advanceScroll(System.nanoTime()) }.apply {
+            isCoalesce = true
+            initialDelay = 0
+        }
     private val visibleGridSizeSnapshot = AtomicLong(packVisibleGridSize(1, 1))
-    private val viewportHistorySizeSnapshot = AtomicInteger(0)
-    private val viewportScrollbackOffsetSnapshot = AtomicLong(doubleToRawLongBits(0.0))
-    private val viewportRenderOffsetSnapshot = AtomicInteger(0)
-    private val viewportVisibleRowsSnapshot = AtomicInteger(1)
-    private val viewportRequestedRowsSnapshot = AtomicInteger(1)
-    private val viewportVisualOffsetPixelsSnapshot = AtomicLong(doubleToRawLongBits(0.0))
-    private val viewportVisualRangePixelsSnapshot = AtomicInteger(0)
-    private val viewportHeightPixelsSnapshot = AtomicInteger(0)
-    private val viewportContentHeightPixelsSnapshot = AtomicInteger(0)
-    private val viewportCellHeightPixelsSnapshot = AtomicInteger(1)
+
+    // The EDT is the sole writer. Worker snapshots share this monitor with publication;
+    // EDT paint getters read directly because no other thread can modify these fields.
+    private val viewportSnapshotLock = Any()
+    private var publishedHistorySize = 0
+    private var publishedScrollbackOffset = 0.0
+    private var publishedRenderOffset = 0
+    private var publishedVisibleRows = 1
+    private var publishedRequestedRows = 1
+    private var publishedVisualOffsetPixels = 0.0
+    private var publishedVisualRangePixels = 0
+    private var publishedViewportHeightPixels = 0
+    private var publishedContentHeightPixels = 0
+    private var publishedCellHeightPixels = 1
 
     val requestedOffset: Int
         get() = scrollModel.requestedOffset
@@ -54,8 +67,112 @@ internal class SwingViewportController(
     val preciseOffset: Double
         get() = scrollModel.preciseScrollbackOffset
 
+    /** Published scrollbar metrics for EDT painting; other threads use [viewportStateSnapshot]. */
+    val historySize: Int
+        get() = publishedHistorySize
+
+    val visualScrollOffsetPixels: Double
+        get() = publishedVisualOffsetPixels
+
+    val visualScrollRangePixels: Int
+        get() = publishedVisualRangePixels
+
+    val viewportHeightPixels: Int
+        get() = publishedViewportHeightPixels
+
     fun reset() {
+        cancelScroll()
         scrollModel.reset()
+    }
+
+    /** Accumulates precise device input into whole-row animation destinations. */
+    fun scrollByPreciseRows(deltaRows: Double): Boolean {
+        require(deltaRows.isFinite()) { "deltaRows must be finite, was $deltaRows" }
+        if (deltaRows == 0.0) return false
+        val destination = scrollModel.targetRow
+        if ((deltaRows < 0.0 && destination <= 0) || (deltaRows > 0.0 && destination >= scrollModel.historySize)) {
+            accumulator.reset()
+            return scrollModel.isAnimating
+        }
+        val wholeRows = accumulator.accumulate(deltaRows)
+        if (wholeRows == 0) return true
+        val changed = animateBy(wholeRows)
+        if (!changed) accumulator.reset()
+        return changed
+    }
+
+    /** Animates a signed whole-row delta from the current destination. */
+    fun scrollByRows(deltaRows: Int): Boolean {
+        accumulator.reset()
+        return deltaRows != 0 && animateBy(deltaRows)
+    }
+
+    /** Animates to an absolute integer row; repeated targets keep their deadline. */
+    fun scrollToRow(targetRow: Int): Boolean {
+        accumulator.reset()
+        val changed = updateScroll(notifyUnchanged = true) { scrollModel.animateTo(targetRow, System.nanoTime()) }
+        return changed || scrollModel.isAnimating
+    }
+
+    /** Direct manipulation maps immediately to an integer row without easing. */
+    fun jumpToRow(targetRow: Int): Boolean {
+        cancelScroll()
+        return updateScroll(notifyCompletion = false) {
+            scrollModel.scrollTo(targetRow.toDouble(), scrollModel.historySize)
+        }
+    }
+
+    /** Stops timer and input accumulation before a source or position is replaced. */
+    fun cancelScroll() {
+        scrollTimer.stop()
+        scrollModel.cancelAnimation()
+        accumulator.reset()
+    }
+
+    /** Settles on the destination before resizing or changing cell metrics. */
+    fun finishScroll() {
+        accumulator.reset()
+        if (!scrollModel.isAnimating) return
+        updateScroll { scrollModel.finish() }
+    }
+
+    internal fun advanceScroll(nowNanos: Long) {
+        if (!scrollModel.isAnimating) {
+            scrollTimer.stop()
+            return
+        }
+        updateScroll { scrollModel.advance(nowNanos) }
+    }
+
+    private fun animateBy(deltaRows: Int): Boolean {
+        val changed = updateScroll { scrollModel.animateBy(deltaRows, System.nanoTime()) }
+        return changed || scrollModel.isAnimating
+    }
+
+    private inline fun updateScroll(
+        notifyCompletion: Boolean = true,
+        notifyUnchanged: Boolean = false,
+        update: () -> Unit,
+    ): Boolean {
+        val previousOffset = preciseOffset
+        val previousAnchor = requestedOffset
+        val previousOverscan = scrollModel.needsOverscan
+        val wasAnimating = scrollModel.isAnimating
+        update()
+        val complete = !scrollModel.isAnimating
+        if (complete) {
+            scrollTimer.stop()
+        } else if (!scrollTimer.isRunning) {
+            scrollTimer.start()
+        }
+        val changed = previousOffset != preciseOffset
+        if (changed || notifyCompletion && complete && (wasAnimating || notifyUnchanged)) {
+            onScroll(
+                previousAnchor != requestedOffset || previousOverscan != scrollModel.needsOverscan,
+                notifyCompletion && complete,
+            )
+        }
+        return changed
     }
 
     fun visibleGridSizeSnapshot(): Dimension {
@@ -121,55 +238,85 @@ internal class SwingViewportController(
     fun scrollTo(
         offsetLines: Double,
         historySize: Int,
-    ): Boolean = scrollModel.scrollTo(offsetLines, historySize)
+    ): Boolean {
+        cancelScroll()
+        return updateScroll { scrollModel.scrollTo(offsetLines, historySize) }
+    }
 
     fun clamp(
         historySize: Int,
         discardedCount: Long,
         scrollOnOutput: Boolean,
-    ): Boolean = scrollModel.clamp(historySize, discardedCount, scrollOnOutput)
+    ): Boolean {
+        val previousHistorySize = scrollModel.historySize
+        val wasAnimating = scrollModel.isAnimating
+        val changed = scrollModel.clamp(historySize, discardedCount, scrollOnOutput)
+        if (!scrollModel.isAnimating) {
+            scrollTimer.stop()
+            if (wasAnimating || historySize < previousHistorySize) accumulator.reset()
+        }
+        return changed
+    }
 
-    fun updateVisualMetrics(
-        historySize: Int,
-        discardedCount: Long,
-        cellHeight: Int,
-        visualOverflowPixels: Int,
-    ): Boolean = scrollModel.updateVisualMetrics(historySize, discardedCount, cellHeight, visualOverflowPixels)
-
-    fun resizeRequestedOffset(): Int = scrollModel.requestedOffset
+    fun updateCellHeight(cellHeight: Int) = scrollModel.updateCellHeight(cellHeight)
 
     fun anchorAfterResize(
         newOffset: Int,
         newHistorySize: Int,
+        newDiscardedCount: Long,
     ) {
-        scrollModel.scrollTo(newOffset.toDouble(), newHistorySize)
+        cancelScroll()
+        scrollModel.anchorAfterResize(newOffset, newHistorySize, newDiscardedCount)
     }
 
+    /**
+     * Translates the installed cache toward the precise position within its available coverage.
+     *
+     * An outstanding render request does not change which rows are safe to expose. At a
+     * cache edge, translation waits for its replacement. Near live output, the fractional
+     * space below the terminal grid remains empty until scrolling supplies history there.
+     */
     fun contentOriginY(
         cacheScrollbackOffset: Int,
+        cacheRows: Int,
         cellHeight: Int,
+        viewportHeightPixels: Int,
+        visibleGridRows: Int,
     ): Double {
         require(cacheScrollbackOffset >= 0) {
             "cacheScrollbackOffset must be >= 0, was $cacheScrollbackOffset"
         }
+        require(cacheRows >= 0) { "cacheRows must be >= 0, was $cacheRows" }
         require(cellHeight > 0) { "cellHeight must be > 0, was $cellHeight" }
-        if (cacheScrollbackOffset != scrollModel.requestedOffset) return 0.0
-        return scrollModel.contentYOffset(cellHeight)
+        require(viewportHeightPixels >= 0) { "viewportHeightPixels must be >= 0, was $viewportHeightPixels" }
+        require(visibleGridRows > 0) { "visibleGridRows must be > 0, was $visibleGridRows" }
+
+        val requiredBottom = minOf(viewportHeightPixels.toDouble(), (visibleGridRows.toDouble() + preciseOffset) * cellHeight)
+        val minimumOrigin = minOf(0.0, requiredBottom - cacheRows.toDouble() * cellHeight)
+        val desiredOrigin = (preciseOffset - cacheScrollbackOffset) * cellHeight
+        return desiredOrigin.coerceIn(minimumOrigin, 0.0)
     }
 
+    /**
+     * Copies one completed publication under the same short monitor used by its writer.
+     * Only an explicit snapshot request allocates the result. Neither snapshot copying
+     * nor publication dispatches to the EDT or invokes listeners while holding the monitor.
+     */
     fun viewportStateSnapshot(): TerminalViewportState =
-        TerminalViewportState(
-            historySize = viewportHistorySizeSnapshot.get(),
-            scrollbackOffset = longBitsToDouble(viewportScrollbackOffsetSnapshot.get()),
-            renderOffset = viewportRenderOffsetSnapshot.get(),
-            visibleRows = viewportVisibleRowsSnapshot.get(),
-            requestedRows = viewportRequestedRowsSnapshot.get(),
-            visualScrollOffsetPixels = longBitsToDouble(viewportVisualOffsetPixelsSnapshot.get()),
-            visualScrollRangePixels = viewportVisualRangePixelsSnapshot.get(),
-            viewportHeightPixels = viewportHeightPixelsSnapshot.get(),
-            contentHeightPixels = viewportContentHeightPixelsSnapshot.get(),
-            cellHeightPixels = viewportCellHeightPixelsSnapshot.get(),
-        )
+        synchronized(viewportSnapshotLock) {
+            TerminalViewportState(
+                historySize = publishedHistorySize,
+                scrollbackOffset = publishedScrollbackOffset,
+                renderOffset = publishedRenderOffset,
+                visibleRows = publishedVisibleRows,
+                requestedRows = publishedRequestedRows,
+                visualScrollOffsetPixels = publishedVisualOffsetPixels,
+                visualScrollRangePixels = publishedVisualRangePixels,
+                viewportHeightPixels = publishedViewportHeightPixels,
+                contentHeightPixels = publishedContentHeightPixels,
+                cellHeightPixels = publishedCellHeightPixels,
+            )
+        }
 
     fun publishViewportState(
         historySize: Int,
@@ -185,17 +332,20 @@ internal class SwingViewportController(
         val renderOffset = scrollModel.requestedOffset
         val visualScrollOffsetPixels = scrollModel.visualScrollOffsetPixels
         val visualScrollRangePixels = scrollModel.visualScrollRangePixels
+        val cellHeightPixels = scrollModel.cellHeightPixels
 
-        viewportHistorySizeSnapshot.set(historySize)
-        viewportScrollbackOffsetSnapshot.set(doubleToRawLongBits(scrollbackOffset))
-        viewportRenderOffsetSnapshot.set(renderOffset)
-        viewportVisibleRowsSnapshot.set(visibleRows)
-        viewportRequestedRowsSnapshot.set(requestedRows)
-        viewportVisualOffsetPixelsSnapshot.set(doubleToRawLongBits(visualScrollOffsetPixels))
-        viewportVisualRangePixelsSnapshot.set(visualScrollRangePixels)
-        viewportHeightPixelsSnapshot.set(viewportHeightPixels)
-        viewportContentHeightPixelsSnapshot.set(contentHeightPixels)
-        viewportCellHeightPixelsSnapshot.set(scrollModel.cellHeightPixels)
+        synchronized(viewportSnapshotLock) {
+            publishedHistorySize = historySize
+            publishedScrollbackOffset = scrollbackOffset
+            publishedRenderOffset = renderOffset
+            publishedVisibleRows = visibleRows
+            publishedRequestedRows = requestedRows
+            publishedVisualOffsetPixels = visualScrollOffsetPixels
+            publishedVisualRangePixels = visualScrollRangePixels
+            publishedViewportHeightPixels = viewportHeightPixels
+            publishedContentHeightPixels = contentHeightPixels
+            publishedCellHeightPixels = cellHeightPixels
+        }
         if (!notifyListener) {
             if (notifyPrimitiveListener) {
                 listener.viewportChanged(
@@ -220,12 +370,14 @@ internal class SwingViewportController(
                 visualScrollRangePixels = visualScrollRangePixels,
                 viewportHeightPixels = viewportHeightPixels,
                 contentHeightPixels = contentHeightPixels,
-                cellHeightPixels = scrollModel.cellHeightPixels,
+                cellHeightPixels = cellHeightPixels,
             ),
         )
     }
 
     private companion object {
+        private const val SCROLL_FRAME_DELAY_MILLIS = 8
+
         private fun visibleGridColumns(
             settings: SwingSettings,
             metrics: SwingMetrics,
@@ -251,10 +403,6 @@ internal class SwingViewportController(
         fun unpackVisibleColumns(packed: Long): Int = (packed ushr 32).toInt()
 
         fun unpackVisibleRows(packed: Long): Int = packed.toInt()
-
-        private fun doubleToRawLongBits(value: Double): Long = java.lang.Double.doubleToRawLongBits(value)
-
-        private fun longBitsToDouble(value: Long): Double = java.lang.Double.longBitsToDouble(value)
 
         private fun ceilDiv(
             value: Int,

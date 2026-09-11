@@ -21,6 +21,10 @@ package io.github.ketraterm.render.api
  * The frame passed to the consumer is valid only during the callback.
  * Implementations may hold a terminal mutation lock while invoking the consumer.
  * Consumers must copy anything they need before returning.
+ *
+ * A reader instance identifies one source's generation namespace for incremental
+ * consumers. Use a new reader for unrelated terminal content, or explicitly reset
+ * consumer caches before replacing the content behind an existing reader.
  */
 interface TerminalRenderFrameReader {
     /**

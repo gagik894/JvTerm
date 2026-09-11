@@ -19,13 +19,25 @@ import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
+import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
+import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.*
+import java.awt.font.FontRenderContext
+import java.awt.font.GlyphVector
 import java.awt.geom.AffineTransform
+import java.awt.geom.Area
+import java.awt.geom.Ellipse2D
 import java.awt.image.BufferedImage
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
@@ -35,8 +47,316 @@ import kotlin.test.assertTrue
  * according to the terminal's rigid column grid.
  */
 class TerminalTextPainterTest {
+    @ParameterizedTest
+    @CsvSource("ABC, אבג", "אבג, ABC", "אבA, Aאב")
+    fun freshSourceDoesNotReuseOldBidiClassification(
+        previousText: String,
+        replacementText: String,
+    ) {
+        val reused = fixture()
+        val fresh = fixture()
+        val previous = renderCache(TestRenderFrame.text(previousText))
+        val replacement = renderCache(TestRenderFrame.text(replacementText))
+        assertEquals(previous.columns, replacement.columns)
+        assertEquals(previous.rows, replacement.rows)
+        assertEquals(previous.frameGeneration, replacement.frameGeneration)
+        assertEquals(previous.structureGeneration, replacement.structureGeneration)
+        assertContentEquals(previous.lineIds, replacement.lineIds)
+        assertContentEquals(previous.lineGenerations, replacement.lineGenerations)
+        try {
+            reused.paintRow(previous)
+            reused.g.composite = AlphaComposite.Clear
+            reused.g.fillRect(0, 0, reused.image.width, reused.image.height)
+            reused.g.composite = AlphaComposite.SrcOver
+
+            reused.paintRow(replacement)
+            fresh.paintRow(replacement)
+
+            assertContentEquals(
+                fresh.image.getRGB(0, 0, fresh.image.width, fresh.image.height, null, 0, fresh.image.width),
+                reused.image.getRGB(0, 0, reused.image.width, reused.image.height, null, 0, reused.image.width),
+                "Replacement source $replacementText retained bidi state from $previousText",
+            )
+        } finally {
+            reused.g.dispose()
+            fresh.g.dispose()
+        }
+    }
+
+    @Test
+    fun `rtl punctuation segment uses the row direction instead of inferring ltr`() {
+        val actual = fixture()
+        val expected = fixture()
+        try {
+            actual.paintRow(renderCache(TestRenderFrame.text("\u05D0?!")))
+            expected.paintRow(renderCache(TestRenderFrame.text("!?")))
+            for (y in 0 until actual.metrics.cellHeight) {
+                for (x in 0 until actual.metrics.cellWidth * 2) {
+                    assertEquals(expected.image.getRGB(x, y), actual.image.getRGB(x, y), "Punctuation order at ($x,$y)")
+                }
+            }
+        } finally {
+            actual.g.dispose()
+            expected.g.dispose()
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["AAA", "ééé", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+    fun `hover underline stays within its span without an activation color override`(text: String) {
+        val fixture = fixture()
+        val cache = renderCache(TestRenderFrame.text(text))
+        cache.hyperlinkIds.fill(7)
+        try {
+            fixture.paintRow(
+                cache,
+                hoveredHyperlinkId = 7,
+                hoveredHyperlinkStartColumn = 1,
+                hoveredHyperlinkEndColumn = 2,
+                hoveredHyperlinkEndRow = 0,
+            )
+
+            val secondUnderlineY = fixture.metrics.underlineY + 1
+            for (column in 0..2) {
+                val x = column * fixture.metrics.cellWidth
+                assertEquals(TEST_RED, fixture.image.getRGB(x, fixture.metrics.underlineY))
+                assertEquals(if (column == 1) TEST_RED else 0, fixture.image.getRGB(x, secondUnderlineY))
+            }
+        } finally {
+            fixture.g.dispose()
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["AAA", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+    fun `reusing a painter across rows and hover phases matches a fresh painter`(text: String) {
+        val reused = fixture()
+        val cache =
+            renderCache(
+                TestRenderFrame(
+                    Array(2) {
+                        Array(3) { column ->
+                            TestCell(
+                                codeWord = text[column].code,
+                                flags = TerminalRenderCellFlags.CODEPOINT,
+                                attr = TerminalRenderAttrs.pack(blink = column == 1),
+                            )
+                        }
+                    },
+                ),
+            )
+        val discoveredHyperlinks = IntArray(cache.flags.size) { 7 }
+        try {
+            for (phase in 0..3) {
+                for (row in 0..1) {
+                    val fresh = fixture()
+                    try {
+                        reused.g.composite = AlphaComposite.Clear
+                        reused.g.fillRect(0, 0, reused.image.width, reused.image.height)
+                        reused.g.composite = AlphaComposite.SrcOver
+                        for (target in listOf(reused, fresh)) {
+                            target.paintRow(
+                                cache,
+                                row = row,
+                                textBlinkVisible = phase % 2 == 0,
+                                hyperlinkIds = if (phase < 3) discoveredHyperlinks else cache.hyperlinkIds,
+                                hoveredHyperlinkId = if (phase < 2) 7 else 0,
+                                hoveredHyperlinkStartRow = 0,
+                                hoveredHyperlinkStartColumn = 1,
+                                hoveredHyperlinkEndRow = 1,
+                                hoveredHyperlinkEndColumn = 2,
+                                hyperlinkActivationHover = phase == 0,
+                            )
+                        }
+                        for (y in 0 until reused.image.height) {
+                            for (x in 0 until reused.image.width) {
+                                assertEquals(
+                                    fresh.image.getRGB(x, y),
+                                    reused.image.getRGB(x, y),
+                                    "Stale row style at phase=$phase row=$row ($x,$y)",
+                                )
+                            }
+                        }
+                    } finally {
+                        fresh.g.dispose()
+                    }
+                }
+            }
+        } finally {
+            reused.g.dispose()
+        }
+    }
+
+    @Nested
+    inner class ConcealedTextRendering {
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `ASCII overhang cannot paint across a concealed run boundary`(antialiased: Boolean) {
+            val settings =
+                antialiasedSettings(antialiased).copy(
+                    font = Font(Font.MONOSPACED, Font.PLAIN, 18).deriveFont(AffineTransform.getShearInstance(-1.0, 0.0)),
+                )
+            val fixture = fixture(settings = settings)
+            val hidden = TerminalRenderAttrs.pack(invisible = true)
+            val cache = renderCache(TestRenderFrame.text("AAA", attrs = longArrayOf(0L, hidden, 0L)))
+            try {
+                fixture.paintRow(cache)
+                assertTrue(fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth))
+                assertTrue(
+                    !fixture.image.containsPaintedPixelInRange(fixture.metrics.cellWidth, fixture.metrics.cellWidth * 2),
+                    "Visible ASCII ink must stop at the concealed cell, even when the font overhangs its advance",
+                )
+                assertTrue(fixture.image.containsPaintedPixelInRange(fixture.metrics.cellWidth * 2, fixture.metrics.cellWidth * 3))
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = ["AAA", "ééé", "\u2588\u2588\u2588", "\u0915\u0915\u0915", "\u05D0\u05D0\u05D0"])
+        fun `conceal splits visible hyperlink runs without painting glyphs or decorations`(text: String) {
+            for (activationHover in listOf(false, true)) {
+                val fixture = fixture()
+                val visible = TerminalRenderAttrs.pack(underlineStyle = TerminalRenderUnderline.SINGLE)
+                val hidden = TerminalRenderAttrs.pack(invisible = true, underlineStyle = TerminalRenderUnderline.SINGLE)
+                val cache = renderCache(TestRenderFrame.text(text, attrs = longArrayOf(visible, hidden, visible)))
+                cache.hyperlinkIds.fill(1)
+                cache.extraAttrWords.fill(underlineColor(TEST_GREEN))
+
+                try {
+                    fixture.paintRow(cache, hoveredHyperlinkId = 1, hyperlinkActivationHover = activationHover)
+
+                    assertTrue(fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth, 0, fixture.metrics.cellHeight))
+                    assertTrue(
+                        !fixture.image.containsPaintedPixelInRange(
+                            fixture.metrics.cellWidth,
+                            fixture.metrics.cellWidth * 2,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "Concealed $text painted foreground with activationHover=$activationHover",
+                    )
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(
+                            fixture.metrics.cellWidth * 2,
+                            fixture.metrics.cellWidth * 3,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "Visible text after conceal must still paint",
+                    )
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `concealed native emoji stays hidden in row and cursor foreground`(cluster: Boolean) {
+            for (cursorForeground in listOf(false, true)) {
+                var rasterizations = 0
+                val rasterizer =
+                    object : TerminalPlatformEmojiRasterizer {
+                        override val available = true
+
+                        override fun rasterize(
+                            text: String,
+                            pixelSize: Int,
+                        ): BufferedImage {
+                            rasterizations++
+                            return BufferedImage(pixelSize, pixelSize, BufferedImage.TYPE_INT_ARGB).apply {
+                                for (y in 0 until height) for (x in 0 until width) setRGB(x, y, TEST_RED)
+                            }
+                        }
+                    }
+                val fixture = fixture(platformEmojiPainter = TerminalPlatformEmojiPainter(rasterizer))
+                val cache =
+                    renderCache(
+                        TestRenderFrame(
+                            arrayOf(
+                                arrayOf(
+                                    TestCell(
+                                        codeWord = ASTRAL_SMILE_CODE_POINT,
+                                        flags =
+                                            (if (cluster) TerminalRenderCellFlags.CLUSTER else TerminalRenderCellFlags.CODEPOINT) or
+                                                TerminalRenderCellFlags.WIDE_LEADING,
+                                        attr = TerminalRenderAttrs.pack(invisible = true),
+                                        cluster = if (cluster) "\uD83D\uDE42\uFE0F" else null,
+                                    ),
+                                    TestCell(flags = TerminalRenderCellFlags.WIDE_TRAILING),
+                                ),
+                            ),
+                        ),
+                    )
+                try {
+                    for (concealed in listOf(true, false)) {
+                        cache.attrWords[0] = TerminalRenderAttrs.pack(invisible = concealed)
+                        if (cursorForeground) {
+                            fixture.painter.paintCellForeground(
+                                fixture.g,
+                                cache,
+                                fixture.metrics,
+                                column = 0,
+                                row = 0,
+                                columnSpan = 2,
+                                foreground = TEST_GREEN,
+                                fontRenderContext = fixture.g.fontRenderContext,
+                            )
+                        } else {
+                            fixture.paintRow(cache)
+                        }
+                        assertEquals(
+                            !concealed,
+                            fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth * 2, 0, fixture.metrics.cellHeight),
+                            "Native emoji visibility must respect conceal, including cursor foreground",
+                        )
+                        assertEquals(if (concealed) 0 else 1, rasterizations)
+                    }
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+    }
+
     @Nested
     inner class AsciiTextRendering {
+        @ParameterizedTest
+        @CsvSource("false, false", "false, true", "true, false", "true, true")
+        fun `ASCII painting preserves the callers clip`(
+            ellipse: Boolean,
+            contained: Boolean,
+        ) {
+            val fixture = fixture()
+            val cache = renderCache(TestRenderFrame.text("AAA"))
+            val width = if (contained) fixture.metrics.cellWidth * cache.columns - 2 else fixture.image.width - 2
+            val height = if (contained) fixture.metrics.cellHeight - 2 else fixture.image.height - 2
+            val clip: Shape =
+                if (ellipse) {
+                    Ellipse2D.Double(
+                        1.0,
+                        1.0,
+                        width.toDouble(),
+                        height.toDouble(),
+                    )
+                } else {
+                    Rectangle(1, 1, width, height)
+                }
+            try {
+                fixture.g.clip = clip
+                val originalClip = Area(fixture.g.clip)
+                fixture.paintRow(cache)
+
+                val changedClip = Area(originalClip)
+                changedClip.exclusiveOr(Area(fixture.g.clip))
+                assertTrue(changedClip.isEmpty, "ASCII painting must restore the exact caller clip")
+                assertTrue(fixture.image.containsPaintedPixelInRange(0, fixture.metrics.cellWidth * cache.columns))
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
         @Test
         fun `paints contiguous ascii run in consecutive terminal cells`() {
             // Arrange
@@ -429,6 +749,423 @@ class TerminalTextPainterTest {
 
     @Nested
     inner class ComplexTextRendering {
+        @ParameterizedTest
+        @ValueSource(strings = ["uniform", "foreground", "underline", "conceal"])
+        fun `Arabic run retains contextual forms across cell presentation changes`(presentation: String) {
+            val settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18))
+            val actual = fixture(settings = settings)
+            val expected = fixture(settings = settings)
+            val colors = intArrayOf(TEST_RED, TEST_GREEN, TEST_BLUE)
+            val attrs =
+                LongArray(3) { column ->
+                    when (presentation) {
+                        "foreground" ->
+                            TerminalRenderAttrs.pack(
+                                foregroundKind = TerminalRenderColorKind.RGB,
+                                foregroundValue = colors[column] and 0x00FF_FFFF,
+                            )
+                        "underline" -> TerminalRenderAttrs.pack(underlineStyle = TerminalRenderUnderline.SINGLE)
+                        "conceal" -> TerminalRenderAttrs.pack(invisible = column == 1)
+                        else -> TerminalRenderAttrs.DEFAULT
+                    }
+                }
+            val extraAttrs =
+                LongArray(3) { column ->
+                    if (presentation == "underline") underlineColor(colors[column]) else TerminalRenderExtraAttrs.DEFAULT
+                }
+            try {
+                actual.paintRow(renderCache(TestRenderFrame.text("\u0628\u0628\u0628", attrs = attrs, extraAttrs = extraAttrs)))
+                expected.paintRow(renderCache(TestRenderFrame.text("\uFE91\uFE92\uFE90", attrs = attrs, extraAttrs = extraAttrs)))
+
+                assertContentEquals(
+                    expected.image.getRGB(0, 0, expected.image.width, expected.image.height, null, 0, expected.image.width),
+                    actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width),
+                    "The Arabic run must retain its initial, medial, and final Beh forms with $presentation presentation",
+                )
+                if (presentation == "conceal") {
+                    assertTrue(
+                        !actual.image.containsPaintedPixelInRange(
+                            actual.metrics.cellWidth,
+                            actual.metrics.cellWidth * 2,
+                            0,
+                            actual.metrics.cellHeight,
+                        ),
+                        "The hidden neighbor must contribute shaping context without painting foreground",
+                    )
+                }
+            } finally {
+                actual.g.dispose()
+                expected.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `Arabic joiner cluster retains text shaping without native emoji dispatch`(antialiased: Boolean) {
+            var rasterizations = 0
+            val rasterizer =
+                object : TerminalPlatformEmojiRasterizer {
+                    override val available = true
+
+                    override fun rasterize(
+                        text: String,
+                        pixelSize: Int,
+                    ): BufferedImage {
+                        rasterizations++
+                        return BufferedImage(pixelSize, pixelSize, BufferedImage.TYPE_INT_ARGB)
+                    }
+                }
+            val font = RecordingShapingFont()
+            val settings = antialiasedSettings(antialiased).copy(font = font, useSystemFallbackFonts = false)
+            val actual = fixture(settings = settings, platformEmojiPainter = TerminalPlatformEmojiPainter(rasterizer))
+            val cache =
+                renderCache(
+                    TestRenderFrame(
+                        arrayOf(
+                            arrayOf(
+                                TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT),
+                                TestCell(flags = TerminalRenderCellFlags.CLUSTER, cluster = "\u0628\u200D"),
+                                TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT),
+                            ),
+                        ),
+                    ),
+                )
+            try {
+                actual.paintRow(cache)
+                assertEquals(0, rasterizations, "A joiner in Arabic text must not request native emoji rasterization")
+                assertEquals(1, font.shapingCalls, "The cluster and its neighbors must share one shaping context")
+                assertEquals("\u0628\u0628\u200D\u0628", font.shapedText)
+                assertEquals(Font.LAYOUT_RIGHT_TO_LEFT, font.shapingFlags)
+                for (column in 0 until cache.columns) {
+                    assertTrue(
+                        actual.image.containsPaintedPixelInRange(
+                            column * actual.metrics.cellWidth,
+                            (column + 1) * actual.metrics.cellWidth,
+                            0,
+                            actual.metrics.cellHeight,
+                        ),
+                        "The contextual glyph in visual cell $column must be visible",
+                    )
+                }
+                // Keep the joiner in the oracle: Arabic ZWJ can suppress a
+                // ligature, so removing it need not preserve the same pixels.
+                val contextualPixels =
+                    actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width)
+
+                actual.clearCell(visualColumn = 1)
+                actual.painter.paintCellForeground(
+                    actual.g,
+                    cache,
+                    actual.metrics,
+                    column = 1,
+                    visualColumn = 1,
+                    row = 0,
+                    foreground = TEST_WHITE,
+                    fontRenderContext = actual.g.fontRenderContext,
+                )
+                assertEquals(0, rasterizations, "Cursor repaint must retain text dispatch for the joiner cluster")
+                assertEquals(1, font.shapingCalls, "Cursor repaint must reuse the contextual layout")
+                assertContentEquals(
+                    contextualPixels,
+                    actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width),
+                    "Cursor repaint must preserve the same contextual joiner cluster",
+                )
+            } finally {
+                actual.g.dispose()
+            }
+        }
+
+        @Test
+        fun `same style Hebrew glyphs occupy their individual terminal cells`() {
+            val fixture = fixture(settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18)))
+            val cache = renderCache(TestRenderFrame.text("\u05D0\u05D1\u05D2"))
+            try {
+                fixture.paintRow(cache)
+
+                for (visualColumn in 0 until cache.columns) {
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(
+                            visualColumn * fixture.metrics.cellWidth,
+                            (visualColumn + 1) * fixture.metrics.cellWidth,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "The glyph assigned to visual column $visualColumn must occupy that cell",
+                    )
+                }
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `long shaped rows retain their suffix and cursor glyphs across bounded spans`(antialiased: Boolean) {
+            val columns = 2051
+            val settings = antialiasedSettings(antialiased)
+            val fixture = fixture(settings = settings, width = columns * settings.font.size * 2)
+            val cache = renderCache(TestRenderFrame.text("\u05D0".repeat(columns)))
+            try {
+                fixture.paintRow(cache)
+
+                for (visualColumn in 0 until columns) {
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(
+                            visualColumn * fixture.metrics.cellWidth,
+                            (visualColumn + 1) * fixture.metrics.cellWidth,
+                            0,
+                            fixture.metrics.cellHeight,
+                        ),
+                        "Long rows must retain the glyph assigned to visual column $visualColumn",
+                    )
+                }
+                for (column in intArrayOf(2047, 2048, columns - 1)) {
+                    val visualColumn = columns - column - 1
+                    val x = visualColumn * fixture.metrics.cellWidth
+                    val before =
+                        fixture.image.getRGB(
+                            x,
+                            0,
+                            fixture.metrics.cellWidth,
+                            fixture.metrics.cellHeight,
+                            null,
+                            0,
+                            fixture.metrics.cellWidth,
+                        )
+                    fixture.clearCell(visualColumn)
+                    fixture.painter.paintCellForeground(
+                        fixture.g,
+                        cache,
+                        fixture.metrics,
+                        column = column,
+                        visualColumn = visualColumn,
+                        row = 0,
+                        foreground = TEST_WHITE,
+                        fontRenderContext = fixture.g.fontRenderContext,
+                    )
+                    assertContentEquals(
+                        before,
+                        fixture.image.getRGB(
+                            x,
+                            0,
+                            fixture.metrics.cellWidth,
+                            fixture.metrics.cellHeight,
+                            null,
+                            0,
+                            fixture.metrics.cellWidth,
+                        ),
+                        "Cursor at logical column $column must retain the same bounded shaping context as row painting",
+                    )
+                }
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = ["beh", "lam-alef", "marked-beh"])
+        fun `bounded shaping retains the same Arabic context as a short run`(patternName: String) {
+            val beh = TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT)
+            val pattern =
+                when (patternName) {
+                    "lam-alef" ->
+                        arrayOf(
+                            TestCell(codeWord = 0x0644, flags = TerminalRenderCellFlags.CODEPOINT),
+                            TestCell(codeWord = 0x0627, flags = TerminalRenderCellFlags.CODEPOINT),
+                        )
+                    "marked-beh" -> arrayOf(TestCell(flags = TerminalRenderCellFlags.CLUSTER, cluster = "\u0628\u064E\u0651"))
+                    else -> arrayOf(beh)
+                }
+            val codepointsPerPattern = pattern.sumOf { cell -> cell.cluster?.codePointCount(0, cell.cluster.length) ?: 1 }
+            val repetitions = (TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH + 8) / codepointsPerPattern + 1
+
+            fun row(repeats: Int): TestRenderFrame =
+                TestRenderFrame(
+                    arrayOf(
+                        Array(repeats * pattern.size + 2) { column ->
+                            if (column == 0 || column == repeats * pattern.size + 1) beh else pattern[(column - 1) % pattern.size]
+                        },
+                    ),
+                )
+
+            val settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18))
+            val reference = fixture(settings = settings, width = 256)
+            val referenceCache = renderCache(row(3))
+            val cache = renderCache(row(repetitions))
+            val actual = fixture(settings = settings, width = cache.columns * reference.metrics.cellWidth)
+            try {
+                reference.paintRow(referenceCache)
+                actual.paintRow(cache)
+                val cellWidth = reference.metrics.cellWidth
+                val cellHeight = reference.metrics.cellHeight
+                val spanWidth = pattern.size * cellWidth
+                val referenceVisualColumn = referenceCache.columns - (1 + 2 * pattern.size)
+                val expected = reference.image.getRGB(referenceVisualColumn * cellWidth, 0, spanWidth, cellHeight, null, 0, spanWidth)
+
+                // Every interior occurrence has the same neighbors. Checking all of
+                // them finds artificial boundaries without depending on segment size.
+                for (repetition in 1 until repetitions - 1) {
+                    val logicalStart = 1 + repetition * pattern.size
+                    val visualStart = cache.columns - logicalStart - pattern.size
+
+                    fun pixels(): IntArray = actual.image.getRGB(visualStart * cellWidth, 0, spanWidth, cellHeight, null, 0, spanWidth)
+                    assertContentEquals(expected, pixels(), "$patternName differs from short context at logical cell $logicalStart")
+
+                    for (offset in pattern.indices) {
+                        val column = logicalStart + offset
+                        val visualColumn = cache.columns - column - 1
+                        actual.g.composite = AlphaComposite.Clear
+                        actual.g.fillRect(visualColumn * cellWidth, 0, cellWidth, cellHeight)
+                        actual.g.composite = AlphaComposite.SrcOver
+                        actual.painter.paintCellForeground(
+                            actual.g,
+                            cache,
+                            actual.metrics,
+                            column = column,
+                            visualColumn = visualColumn,
+                            row = 0,
+                            foreground = settings.palette.defaultForeground,
+                            fontRenderContext = actual.g.fontRenderContext,
+                        )
+                        assertContentEquals(expected, pixels(), "$patternName cursor lost contextual glyphs at logical cell $column")
+                    }
+                }
+            } finally {
+                actual.g.dispose()
+                reference.g.dispose()
+            }
+        }
+
+        @Test
+        fun `oversized producer cluster still allows the following cell and cursor to paint`() {
+            val cluster = "\u0628" + "\u064E".repeat(TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH + 1)
+            val cache =
+                renderCache(
+                    TestRenderFrame(
+                        arrayOf(
+                            arrayOf(
+                                TestCell(flags = TerminalRenderCellFlags.CLUSTER, cluster = cluster),
+                                TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT),
+                            ),
+                        ),
+                    ),
+                )
+            assertTrue(
+                cache.clusterLength(cache.clusterRefs[0]) in 1 until cluster.length,
+                "Render-cache admission must bound the producer cluster",
+            )
+            val fixture = fixture(settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18)))
+            try {
+                fixture.paintRow(cache)
+                for (column in 0 until cache.columns) {
+                    val visualColumn = cache.columns - column - 1
+                    val startX = visualColumn * fixture.metrics.cellWidth
+                    val endX = startX + fixture.metrics.cellWidth
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(startX, endX, 0, fixture.metrics.cellHeight),
+                        "Painting must progress through retained cluster cell $column",
+                    )
+                    fixture.g.composite = AlphaComposite.Clear
+                    fixture.g.fillRect(startX, 0, fixture.metrics.cellWidth, fixture.metrics.cellHeight)
+                    fixture.g.composite = AlphaComposite.SrcOver
+                    fixture.painter.paintCellForeground(
+                        fixture.g,
+                        cache,
+                        fixture.metrics,
+                        column = column,
+                        visualColumn = visualColumn,
+                        row = 0,
+                        foreground = TEST_WHITE,
+                        fontRenderContext = fixture.g.fontRenderContext,
+                    )
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(startX, endX, 0, fixture.metrics.cellHeight),
+                        "Cursor painting must progress through retained cluster cell $column",
+                    )
+                }
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = [false, true])
+        fun `bidi rows retain native emoji dispatch and visual cell placement`(cluster: Boolean) {
+            val rasterizedTexts = mutableListOf<String>()
+            val rasterizer =
+                object : TerminalPlatformEmojiRasterizer {
+                    override val available = true
+
+                    override fun rasterize(
+                        text: String,
+                        pixelSize: Int,
+                    ): BufferedImage {
+                        rasterizedTexts += text
+                        return BufferedImage(pixelSize, pixelSize, BufferedImage.TYPE_INT_ARGB).apply {
+                            for (y in 0 until height) for (x in 0 until width) setRGB(x, y, TEST_GREEN)
+                        }
+                    }
+                }
+            val emoji = if (cluster) "\u2764\uFE0F" else String(Character.toChars(ASTRAL_SMILE_CODE_POINT))
+            val fixture = fixture(platformEmojiPainter = TerminalPlatformEmojiPainter(rasterizer))
+            val cache =
+                renderCache(
+                    TestRenderFrame(
+                        arrayOf(
+                            arrayOf(
+                                TestCell(codeWord = 0x05D0, flags = TerminalRenderCellFlags.CODEPOINT),
+                                TestCell(
+                                    codeWord = if (cluster) 0 else ASTRAL_SMILE_CODE_POINT,
+                                    flags =
+                                        (if (cluster) TerminalRenderCellFlags.CLUSTER else TerminalRenderCellFlags.CODEPOINT) or
+                                            TerminalRenderCellFlags.WIDE_LEADING,
+                                    cluster = if (cluster) emoji else null,
+                                ),
+                                TestCell(flags = TerminalRenderCellFlags.WIDE_TRAILING),
+                            ),
+                        ),
+                    ),
+                )
+            try {
+                fixture.paintRow(cache)
+
+                assertEquals(listOf(emoji), rasterizedTexts, "Adding RTL text must retain native emoji rendering")
+                for (visualColumn in 0..1) {
+                    assertTrue(
+                        fixture.image.containsColorInRange(
+                            TEST_GREEN,
+                            visualColumn * fixture.metrics.cellWidth,
+                            (visualColumn + 1) * fixture.metrics.cellWidth,
+                        ),
+                        "The wide emoji must occupy visual column $visualColumn",
+                    )
+                }
+                assertTrue(
+                    !fixture.image.containsColorInRange(TEST_GREEN, fixture.metrics.cellWidth * 2, fixture.image.width),
+                    "The emoji must not paint into the Hebrew cell",
+                )
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @Test
+        fun `bidi rows retain full block primitive coverage at its visual cell`() {
+            val fixture = fixture(foreground = TEST_WHITE)
+            val cache = renderCache(TestRenderFrame.text("\u05D0\u2588"))
+            try {
+                fixture.paintRow(cache)
+
+                for (y in 0 until fixture.metrics.cellHeight) {
+                    for (x in 0 until fixture.metrics.cellWidth) {
+                        assertEquals(TEST_WHITE, fixture.image.getRGB(x, y), "Full block must fill its visual cell at ($x,$y)")
+                    }
+                }
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
         @Test
         fun `geometric square meter glyphs are painted as contiguous terminal primitives`() {
             val fixture = fixture()
@@ -960,6 +1697,86 @@ class TerminalTextPainterTest {
 
     @Nested
     inner class CursorForegroundRendering {
+        @ParameterizedTest
+        @CsvSource("false, false", "false, true", "true, false", "true, true")
+        fun `block cursor preserves contextual Arabic glyphs and only recolors its cell`(
+            cluster: Boolean,
+            antialiased: Boolean,
+        ) {
+            val cache =
+                renderCache(
+                    TestRenderFrame(
+                        arrayOf(
+                            Array(3) {
+                                TestCell(
+                                    codeWord = 0x0628,
+                                    flags = if (cluster) TerminalRenderCellFlags.CLUSTER else TerminalRenderCellFlags.CODEPOINT,
+                                    cluster = if (cluster) "\u0628\u064E" else null,
+                                )
+                            },
+                        ),
+                    ),
+                )
+            for (column in 0 until cache.columns) {
+                val fixture = fixture(settings = antialiasedSettings(antialiased))
+                val visualColumn = cache.columns - column - 1
+                try {
+                    fixture.paintRow(cache)
+                    val before = fixture.image.getRGB(0, 0, fixture.image.width, fixture.image.height, null, 0, fixture.image.width)
+                    fixture.clearCell(visualColumn)
+                    fixture.painter.paintCellForeground(
+                        fixture.g,
+                        cache,
+                        fixture.metrics,
+                        column = column,
+                        visualColumn = visualColumn,
+                        row = 0,
+                        foreground = TEST_WHITE,
+                        fontRenderContext = fixture.g.fontRenderContext,
+                    )
+
+                    assertContentEquals(
+                        before,
+                        fixture.image.getRGB(0, 0, fixture.image.width, fixture.image.height, null, 0, fixture.image.width),
+                        "Repainting logical column $column in the existing color must preserve contextual shaping",
+                    )
+
+                    fixture.clearCell(visualColumn)
+                    fixture.painter.paintCellForeground(
+                        fixture.g,
+                        cache,
+                        fixture.metrics,
+                        column = column,
+                        visualColumn = visualColumn,
+                        row = 0,
+                        foreground = TEST_GREEN,
+                        fontRenderContext = fixture.g.fontRenderContext,
+                    )
+                    val cellStart = visualColumn * fixture.metrics.cellWidth
+                    val cellEnd = cellStart + fixture.metrics.cellWidth
+                    assertTrue(fixture.image.containsPaintedPixelInRange(cellStart, cellEnd))
+                    for (y in 0 until fixture.image.height) {
+                        for (x in 0 until fixture.image.width) {
+                            val previousColor = before[y * fixture.image.width + x]
+                            val expectedColor =
+                                if (x in cellStart until cellEnd && previousColor ushr 24 != 0) {
+                                    (previousColor and 0xFF000000.toInt()) or (TEST_GREEN and 0x00FFFFFF)
+                                } else {
+                                    previousColor
+                                }
+                            assertEquals(
+                                expectedColor,
+                                fixture.image.getRGB(x, y),
+                                "Cursor at logical column $column changed the positioned glyph mask at ($x,$y)",
+                            )
+                        }
+                    }
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+
         @Test
         fun `paints ascii cell inverted with supplied cursor foreground`() {
             // Arrange
@@ -1062,6 +1879,28 @@ class TerminalTextPainterTest {
 
     // --- Testing Utilities & Helpers ---
 
+    private class RecordingShapingFont : Font(SERIF, PLAIN, 18) {
+        var shapedText: String? = null
+            private set
+        var shapingCalls = 0
+            private set
+        var shapingFlags = 0
+            private set
+
+        override fun layoutGlyphVector(
+            context: FontRenderContext,
+            text: CharArray,
+            start: Int,
+            limit: Int,
+            flags: Int,
+        ): GlyphVector {
+            shapedText = String(text, start, limit - start)
+            shapingCalls++
+            shapingFlags = flags
+            return super.layoutGlyphVector(context, text, start, limit, flags)
+        }
+    }
+
     private data class Fixture(
         val image: BufferedImage,
         val g: Graphics2D,
@@ -1069,10 +1908,22 @@ class TerminalTextPainterTest {
         val metrics: SwingMetrics,
         val painter: TerminalTextPainter,
     ) {
+        /** Cursor foreground starts after its background has erased the old glyph coverage. */
+        fun clearCell(visualColumn: Int) {
+            val previousComposite = g.composite
+            try {
+                g.composite = AlphaComposite.Clear
+                g.fillRect(visualColumn * metrics.cellWidth, 0, metrics.cellWidth, metrics.cellHeight)
+            } finally {
+                g.composite = previousComposite
+            }
+        }
+
         fun paintRow(
             cache: TerminalRenderCache,
             row: Int = 0,
             textBlinkVisible: Boolean = true,
+            hyperlinkIds: IntArray = cache.hyperlinkIds,
             hoveredHyperlinkId: Int = 0,
             hoveredHyperlinkStartRow: Int = 0,
             hoveredHyperlinkStartColumn: Int = 0,
@@ -1091,6 +1942,7 @@ class TerminalTextPainterTest {
                 row = row,
                 fontRenderContext = g.fontRenderContext,
                 textBlinkVisible = textBlinkVisible,
+                hyperlinkIds = hyperlinkIds,
                 hoveredHyperlinkId = hoveredHyperlinkId,
                 hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
                 hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
@@ -1106,11 +1958,12 @@ class TerminalTextPainterTest {
         foreground: Int = TEST_RED,
         background: Int = TEST_BLACK,
         width: Int = 80,
+        platformEmojiPainter: TerminalPlatformEmojiPainter = TerminalPlatformEmojiPainter(),
+        settings: SwingSettings = defaultTestSettings(foreground = foreground, background = background),
     ): Fixture {
         val image = BufferedImage(width, 40, BufferedImage.TYPE_INT_ARGB)
-        val settings = defaultTestSettings(foreground = foreground, background = background)
         val colorCache = AwtColorCache()
-        val painter = TerminalTextPainter(colorCache, TerminalDecorationPainter(colorCache))
+        val painter = TerminalTextPainter(colorCache, TerminalDecorationPainter(colorCache), platformEmojiPainter)
         painter.updateSettings(settings)
         return Fixture(
             image = image,
@@ -1127,7 +1980,7 @@ class TerminalTextPainterTest {
             palette = defaultTestSettings(foreground = TEST_RED, background = TEST_BLACK).palette,
             textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
             fractionalMetrics = RenderingHints.VALUE_FRACTIONALMETRICS_ON,
-            padding = Insets(0, 0, 0, 0),
+            padding = SwingPadding(0, 0, 0, 0),
         )
 
     private fun createMismatchFixture(settings: SwingSettings): Triple<BufferedImage, SwingMetrics, TerminalTextPainter> {
@@ -1182,6 +2035,11 @@ class TerminalTextPainterTest {
 
     private companion object {
         private const val ASTRAL_SMILE_CODE_POINT = 0x1F642
+
+        private fun antialiasedSettings(enabled: Boolean): SwingSettings =
+            defaultTestSettings().copy(
+                textAntialiasing = if (enabled) RenderingHints.VALUE_TEXT_ANTIALIAS_ON else RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
+            )
 
         private fun underlineColor(rgb: Int): Long =
             TerminalRenderExtraAttrs.pack(

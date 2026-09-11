@@ -27,6 +27,8 @@ import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.render.TestRenderFrame
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -34,10 +36,71 @@ import org.junit.jupiter.api.Test
 import java.awt.event.FocusEvent
 import java.awt.event.KeyEvent
 import java.util.concurrent.TimeUnit
+import javax.swing.JComponent
 import javax.swing.JFrame
+import javax.swing.RepaintManager
 import javax.swing.SwingUtilities
 
 class SwingTerminalCursorBlinkTest {
+    @Test
+    fun `focus reset repaints blinking text even without a terminal cursor`() {
+        val terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 1)
+        val reader = TestRenderFrame.text("ABC", attrs = LongArray(3) { TerminalRenderAttrs.pack(blink = true) })
+        val session =
+            TerminalSession(
+                terminal = terminal,
+                renderPublisher = TerminalRenderPublisher(3, 1),
+                renderReader = reader,
+                responseReader = terminal,
+                connector = NoOpConnector,
+                parser = NoOpParser,
+                inputEncoder = NoOpInputEncoder,
+            )
+        session.renderPublisher.updateAndPublish(reader)
+        try {
+            SwingUtilities.invokeAndWait {
+                val component =
+                    SwingTerminal(settingsProvider = {
+                        SwingSettings(cursorBlinkMillis = 0, padding = SwingPadding(), shellIntegrationDecorationGutterWidth = 0)
+                    })
+                val previousManager = RepaintManager.currentManager(component)
+                val rowRepaints = ArrayList<Int>()
+                val manager =
+                    object : RepaintManager() {
+                        override fun addDirtyRegion(
+                            target: JComponent,
+                            x: Int,
+                            y: Int,
+                            width: Int,
+                            height: Int,
+                        ) {
+                            if (target === component && x == 0 && y == 0 && width == component.width && height > 0) {
+                                rowRepaints += height
+                            }
+                        }
+                    }
+                try {
+                    component.size = component.preferredGridSize(3, 1)
+                    component.bind(session)
+                    component.cursorBlinkVisible = false
+                    RepaintManager.setCurrentManager(manager)
+
+                    val event = FocusEvent(component, FocusEvent.FOCUS_GAINED)
+                    for (listener in component.focusListeners) listener.focusGained(event)
+
+                    assertTrue(component.cursorBlinkVisible)
+                    assertTrue(rowRepaints.isNotEmpty(), "focus reset must invalidate the hidden text row")
+                    assertFalse(component.cursorTimer.isRunning)
+                } finally {
+                    RepaintManager.setCurrentManager(previousManager)
+                    component.dispose()
+                }
+            }
+        } finally {
+            session.close()
+        }
+    }
+
     @Test
     fun `cursor presentation follows terminal focus`() {
         val component = SwingTerminal()

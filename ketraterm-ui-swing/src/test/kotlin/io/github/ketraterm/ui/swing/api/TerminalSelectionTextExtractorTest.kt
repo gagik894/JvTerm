@@ -21,6 +21,8 @@ import io.github.ketraterm.ui.swing.render.TestRenderFrame
 import io.github.ketraterm.ui.swing.render.renderCache
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 
 class TerminalSelectionTextExtractorTest {
     private val extractor = TerminalSelectionTextExtractor()
@@ -116,6 +118,70 @@ class TerminalSelectionTextExtractorTest {
         val selection = CellSelection(anchorColumn = 0, anchorRow = 0, caretColumn = 2, caretRow = 1, isBlock = true)
 
         assertEquals("ab\ncd", extractor.selectedText(cache, selection, joinSoftWrappedRows = true))
+    }
+
+    @Test
+    fun `block copy projects the same visual interval separately on each row`() {
+        val cache = renderCache(TestRenderFrame(arrayOf(textCells("ABC"), textCells("אבג"))))
+        val selection = CellSelection(0, 0, 1, 1, isBlock = true)
+
+        assertEquals("A\nג", extractor.selectedText(cache, selection))
+    }
+
+    @Test
+    fun `block copy preserves logical text order within an rtl row`() {
+        val cache = renderCache(TestRenderFrame.text("אבג"))
+
+        assertEquals("אבג", extractor.selectedText(cache, CellSelection(0, 0, 3, 0, isBlock = true)))
+        assertEquals("אב", extractor.selectedText(cache, CellSelection(3, 0, 1, 0, isBlock = true)))
+    }
+
+    @Test
+    fun `mixed bidi block copy selects disjoint logical spans without filling their gap`() {
+        // Logical "AB אבג" displays as "AB גבא". Visual columns 1..4 select B, space and ג.
+        val cache = renderCache(TestRenderFrame.text("AB אבג"))
+        val selection = CellSelection(1, 0, 4, 0, isBlock = true)
+
+        assertEquals("B ג", extractor.selectedText(cache, selection))
+        assertEquals("B א", extractor.selectedText(cache, selection.copy(isBlock = false)))
+    }
+
+    @ParameterizedTest
+    @CsvSource("1, false", "2, false", "1, true", "2, true")
+    fun `block copy includes a whole wide cell when either visual half is selected`(
+        selectedColumn: Int,
+        clustered: Boolean,
+    ) {
+        val expected = if (clustered) "🙂\uFE0F" else "字"
+        val cell =
+            if (clustered) {
+                TestCell(flags = TerminalRenderCellFlags.CLUSTER or TerminalRenderCellFlags.WIDE_LEADING, cluster = expected)
+            } else {
+                TestCell(codeWord = '字'.code, flags = TerminalRenderCellFlags.CODEPOINT or TerminalRenderCellFlags.WIDE_LEADING)
+            }
+        val cache =
+            renderCache(
+                TestRenderFrame(
+                    arrayOf(
+                        arrayOf(
+                            TestCell(codeWord = 'א'.code, flags = TerminalRenderCellFlags.CODEPOINT),
+                            cell,
+                            TestCell(flags = TerminalRenderCellFlags.WIDE_TRAILING),
+                            TestCell(codeWord = 'ב'.code, flags = TerminalRenderCellFlags.CODEPOINT),
+                        ),
+                    ),
+                ),
+            )
+
+        assertEquals(expected, extractor.selectedText(cache, CellSelection(selectedColumn, 0, selectedColumn + 1, 0, isBlock = true)))
+    }
+
+    @Test
+    fun `block copy updates its row mapping when the cache is replaced`() {
+        val selection = CellSelection(0, 0, 1, 0, isBlock = true)
+
+        assertEquals("A", extractor.selectedText(renderCache(TestRenderFrame.text("ABC")), selection))
+        assertEquals("ג", extractor.selectedText(renderCache(TestRenderFrame.text("אבג")), selection))
     }
 
     @Test

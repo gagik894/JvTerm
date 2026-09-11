@@ -18,9 +18,9 @@ package io.github.ketraterm.ui.swing.render
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import java.awt.Font
-import java.awt.Insets
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 
@@ -44,7 +44,7 @@ internal fun defaultTestSettings(
                 cursorBackground = TEST_BLUE,
             ),
         textAntialiasing = RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
-        padding = Insets(0, 0, 0, 0),
+        padding = SwingPadding(0, 0, 0, 0),
     )
 
 internal fun testMetrics(

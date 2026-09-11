@@ -18,11 +18,12 @@ package io.github.ketraterm.ui.swing.search
 /**
  * Paint-ready search segments in current render-cache viewport coordinates.
  *
- * The arrays are rebuilt only when search results or viewport mapping changes.
- * Row painting reads precomputed row offsets and segment flags without
+ * Projection storage is reused across updates. Row painting reads precomputed
+ * row offsets and segment flags without
  * allocating or scanning unrelated rows.
  */
 internal class TerminalSearchViewportHighlights {
+    private var rows: Int = 0
     var segmentCount: Int = 0
         private set
 
@@ -36,6 +37,7 @@ internal class TerminalSearchViewportHighlights {
     fun reset(rows: Int) {
         require(rows >= 0) { "rows must be >= 0, was $rows" }
         ensureRowCapacity(rows)
+        this.rows = rows
         rowStarts.fill(0, 0, rows)
         rowCounts.fill(0, 0, rows)
         segmentCount = 0
@@ -80,6 +82,46 @@ internal class TerminalSearchViewportHighlights {
     fun endColumn(segmentIndex: Int): Int = segmentEnds[segmentIndex]
 
     fun isActive(segmentIndex: Int): Boolean = segmentActive[segmentIndex]
+
+    /** Copies a completed projection into reusable storage for repaint comparison. */
+    fun copyFrom(source: TerminalSearchViewportHighlights) {
+        ensureRowCapacity(source.rows)
+        ensureSegmentCapacity(source.segmentCount)
+        rows = source.rows
+        segmentCount = source.segmentCount
+        source.rowStarts.copyInto(rowStarts, endIndex = rows)
+        source.rowCounts.copyInto(rowCounts, endIndex = rows)
+        source.segmentRows.copyInto(segmentRows, endIndex = segmentCount)
+        source.segmentStarts.copyInto(segmentStarts, endIndex = segmentCount)
+        source.segmentEnds.copyInto(segmentEnds, endIndex = segmentCount)
+        source.segmentActive.copyInto(segmentActive, endIndex = segmentCount)
+    }
+
+    /** Exact comparison includes active-result styling, without hashing or scanning other rows. */
+    fun rowMatches(
+        row: Int,
+        other: TerminalSearchViewportHighlights?,
+    ): Boolean {
+        val count = if (row < rows) rowCounts[row] else 0
+        val otherCount = if (other != null && row < other.rows) other.rowCounts[row] else 0
+        if (count != otherCount) return false
+        if (count == 0 || other == null) return true
+
+        var index = rowStarts[row]
+        var otherIndex = other.rowStarts[row]
+        val end = index + count
+        while (index < end) {
+            if (segmentStarts[index] != other.segmentStarts[otherIndex] ||
+                segmentEnds[index] != other.segmentEnds[otherIndex] ||
+                segmentActive[index] != other.segmentActive[otherIndex]
+            ) {
+                return false
+            }
+            index++
+            otherIndex++
+        }
+        return true
+    }
 
     private fun ensureRowCapacity(rows: Int) {
         if (rows <= rowStarts.size) return

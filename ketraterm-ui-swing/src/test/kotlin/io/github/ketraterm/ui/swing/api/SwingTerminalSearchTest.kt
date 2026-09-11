@@ -27,19 +27,77 @@ import io.github.ketraterm.render.cache.TerminalRenderPublisher
 import io.github.ketraterm.session.TerminalSession
 import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
+import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import kotlinx.coroutines.Dispatchers
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
-import java.awt.Insets
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import javax.swing.SwingUtilities
 
 class SwingTerminalSearchTest {
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `replacement session cannot reuse searched text from equal row metadata`(unbindFirst: Boolean) {
+        fun session(text: String): TerminalSession {
+            val terminal = TerminalBuffers.create(width = 12, height = 1, maxHistory = 0)
+            for (character in text) terminal.writeCodepoint(character.code)
+            return TerminalSession.create(terminal, NoOpConnector, workerDispatcher = Dispatchers.Unconfined).also {
+                it.renderPublisher.updateAndPublish(it)
+            }
+        }
+
+        val first = session("alpha")
+        val second = session("bravo")
+        try {
+            first.readRenderFrame { previous ->
+                second.readRenderFrame { replacement ->
+                    assertEquals(previous.columns, replacement.columns)
+                    assertEquals(previous.rows, replacement.rows)
+                    assertEquals(previous.contentGeneration, replacement.contentGeneration)
+                    assertEquals(previous.structureGeneration, replacement.structureGeneration)
+                    assertEquals(previous.lineId(0), replacement.lineId(0))
+                    assertEquals(previous.lineGeneration(0), replacement.lineGeneration(0))
+                }
+            }
+            SwingUtilities.invokeAndWait {
+                val settings =
+                    SwingSettings(
+                        columns = 12,
+                        rows = 1,
+                        padding = SwingPadding(),
+                        shellIntegrationDecorationGutterWidth = 0,
+                        cursorBlinkMillis = 0,
+                    )
+                val component = SwingTerminal(settingsProvider = { settings })
+                try {
+                    component.size = component.preferredGridSize(12, 1)
+                    component.bind(first)
+                    component.search("alpha")
+                    assertEquals(1, component.currentSearchState().resultCount)
+
+                    if (unbindFirst) component.unbind()
+                    component.bind(second)
+                    component.search("bravo")
+                    assertEquals(1, component.currentSearchState().resultCount)
+                    component.search("alpha")
+                    assertEquals(0, component.currentSearchState().resultCount)
+                } finally {
+                    component.dispose()
+                }
+            }
+        } finally {
+            first.close()
+            second.close()
+        }
+    }
+
     @Test
     fun `clearSearch clears query and result highlights`() {
         val reader = SearchFrameReader()
         val session = testSession(reader)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 1)
@@ -60,7 +118,7 @@ class SwingTerminalSearchTest {
     fun `search scrolls active scrollback result into viewport`() {
         val reader = SearchFrameReader()
         val session = testSession(reader)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = Insets(0, 0, 0, 0)) })
+        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.size = component.preferredGridSize(12, 1)

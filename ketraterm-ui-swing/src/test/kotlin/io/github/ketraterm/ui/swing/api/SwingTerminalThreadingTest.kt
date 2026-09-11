@@ -33,8 +33,9 @@ import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
-import java.awt.Dimension
-import java.awt.Font
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
+import java.awt.*
 import java.awt.event.ComponentEvent
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
@@ -45,6 +46,81 @@ import javax.swing.SwingUtilities
 import kotlin.concurrent.thread
 
 class SwingTerminalThreadingTest {
+    @ParameterizedTest
+    @ValueSource(strings = ["select", "bind", "unbind"])
+    fun `currentSelection snapshots state after queued EDT changes`(change: String) {
+        val session = testSession()
+        session.renderPublisher.updateAndPublish(session.terminal as TerminalRenderFrameReader)
+        val component = SwingTerminal(settingsProvider = { SwingSettings(columns = 3, rows = 1, cursorBlinkMillis = 0) })
+        val edtBlocked = CountDownLatch(1)
+        val releaseEdt = CountDownLatch(1)
+        val snapshotQueuedOrReturned = CountDownLatch(1)
+        val result = AtomicReference<CellSelection?>()
+        val failure = AtomicReference<Throwable?>()
+        val worker =
+            thread(start = false, name = "selection-snapshot-reader") {
+                try {
+                    result.set(component.currentSelection())
+                } catch (error: Throwable) {
+                    failure.set(error)
+                } finally {
+                    snapshotQueuedOrReturned.countDown()
+                }
+            }
+        val eventQueue =
+            object : EventQueue() {
+                override fun postEvent(event: AWTEvent) {
+                    super.postEvent(event)
+                    if (Thread.currentThread() === worker) snapshotQueuedOrReturned.countDown()
+                }
+
+                fun restore() = pop()
+            }
+        edtCall {
+            Toolkit.getDefaultToolkit().systemEventQueue.push(eventQueue)
+        }
+        try {
+            edtCall {
+                if (change != "bind") component.bind(session)
+                if (change == "unbind") assertTrue(component.selectAll())
+            }
+            SwingUtilities.invokeLater {
+                try {
+                    edtBlocked.countDown()
+                    check(releaseEdt.await(5, TimeUnit.SECONDS)) { "EDT blocker was not released" }
+                    when (change) {
+                        "select" -> assertTrue(component.selectAll())
+                        "bind" -> {
+                            component.bind(session)
+                            assertTrue(component.selectAll())
+                        }
+                        "unbind" -> component.unbind()
+                    }
+                } catch (error: Throwable) {
+                    failure.set(error)
+                }
+            }
+            assertTrue(edtBlocked.await(5, TimeUnit.SECONDS))
+            worker.start()
+            // Wait for dispatch or an incorrect early return, without racing the EDT mutation.
+            assertTrue(snapshotQueuedOrReturned.await(5, TimeUnit.SECONDS))
+            releaseEdt.countDown()
+            worker.join(5_000)
+            assertFalse(worker.isAlive, "Selection snapshot did not complete")
+            drainEdt()
+            failure.get()?.let { throw it }
+            assertEquals(if (change == "unbind") null else CellSelection(0, 0, 3, 0), result.get())
+        } finally {
+            releaseEdt.countDown()
+            edtCall {
+                component.dispose()
+                eventQueue.restore()
+            }
+            worker.join(5_000)
+            session.close()
+        }
+    }
+
     @Test
     fun `dispose cancels the component coroutine scope`() {
         val component = SwingTerminal()

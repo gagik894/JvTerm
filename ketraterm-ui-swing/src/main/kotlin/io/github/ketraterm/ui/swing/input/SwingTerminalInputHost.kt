@@ -25,7 +25,8 @@ internal interface SwingTerminalInputHost {
 
     fun updateHyperlinkActivationHover(active: Boolean)
 
-    fun resetCursorBlink(forceRepaint: Boolean)
+    /** Restarts the shared blink phase and repaints cursor/text regions whose visibility changed. */
+    fun resetCursorBlink()
 
     fun setTerminalFocused(focused: Boolean)
 

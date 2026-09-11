@@ -23,6 +23,7 @@ import io.github.ketraterm.render.api.TerminalRenderCursorShape
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.TerminalTheme
 import io.github.ketraterm.workspace.config.TerminalConfig
+import kotlinx.collections.immutable.persistentListOf
 import java.awt.Font
 import java.util.*
 import java.util.concurrent.CancellationException
@@ -440,7 +441,7 @@ internal object KetraTermIntellijSettingsMapper {
 
         return SwingSettings(
             font = JBFont.create(Font(fontFamily, Font.PLAIN, fontSize)),
-            fallbackFonts = listOf(Font(fallbackFontFamily, Font.PLAIN, fontSize)),
+            fallbackFonts = persistentListOf(Font(fallbackFontFamily, Font.PLAIN, fontSize)),
             columns = state.columns,
             rows = state.rows,
             palette = palette,

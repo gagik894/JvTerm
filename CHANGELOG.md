@@ -1,9 +1,25 @@
-# KetraTerm Changelog
+# KetraTerm Library Changelog
+
+Release notes for library consumers and embedders. Product-specific changes are recorded in the [IntelliJ plugin changelog](ketraterm-intellij-plugin/CHANGELOG.md) and [standalone application changelog](ketraterm-app/CHANGELOG.md).
 
 ## [Unreleased]
 
-- Raised the minimum build and runtime requirement from Java 21 to Java 25. Library consumers and standalone archives that do not bundle a runtime must provide Java 25 or newer; native KetraTerm packages continue to include a compatible JBR 25 runtime.
+- Raised the minimum build and runtime requirement from Java 21 to Java 25. Library consumers must provide Java 25 or newer.
 - Refactored session and render orchestration around coroutine-based lifecycle and bounded latest-frame publication, reducing redundant frame extraction during heavy output while keeping Swing/workspace rendering off core read paths.
+- Made Swing settings immutable: padding uses `SwingPadding` instead of AWT `Insets`, and fallback font lists use `ImmutableList`. Hosts should convert mutable font lists with `toImmutableList()`; font-cache configuration changes now reliably invalidate cached resolutions. Consolidated duplicate string-keyed font LRU implementations while retaining separate bounded caches.
+- Fixed concealed text becoming visible through block cursors, hyperlink foreground overrides, or native emoji. ASCII foreground runs now clip glyph ink at style and visibility boundaries. Resetting a hidden blink phase now repaints unchanged cursor and blinking-text pixels.
+- Aligned bidirectional text with backgrounds, decorations, cursor, selection, search overlays, and hit testing. Contextually shaped glyph groups occupy their terminal cells; cursor repaint and bounded shaping windows preserve neighboring Arabic forms, combining marks, and ligatures. Mixed bidi rows retain native emoji and geometric primitive rendering.
+- Prevented ordinary Unicode from initializing the native emoji rasterizer. Warm scalar and cluster image-cache lookups reuse primitive keys and slices; successful and unsupported rasterizations share a bounded cache, preventing repeated native work for unsupported text until eviction.
+- Unified native emoji dispatch and font-preference classification. Arabic joiners and text-presentation selectors no longer give emoji fonts or host emoji overrides precedence over a capable primary text font, including platforms whose emoji fonts advertise native substitute glyphs.
+- Added explicit render-cache source lifetimes and frame availability. Session replacement invalidates retained render, bidi, and search data, and an unpublished session displays an empty surface. Direct `TerminalRenderCache.accept` consumers must call `reset()` when changing sources; allocated storage is retained.
+- Added render `contentGeneration` tracking so cursor-only and viewport-only publications can reuse active search results without rescanning retained history. Repaint planning includes previous and current search highlights, including matches spanning changed and unchanged wrapped rows.
+- Fixed rectangular selection across bidi rows by storing visual horizontal bounds and mapping each row for text extraction. Vertical viewport clipping preserves block-selection columns; linear selections retain logical-column semantics.
+- Fixed global reverse video and relevant reset transitions leaving cached history attributes stale. Global render invalidation now covers retained history without walking every history row to mark it dirty.
+- Consolidated smooth-scroll position, animation, and history anchoring. Output rebases active motion without restarting its deadline; direct scrollbar dragging applies immediately, and translation stays within installed cache coverage while replacement frames are pending. Resize and buffer transitions preserve coherent viewport coordinates through `TerminalSession.resizeViewport` and its atomic history/discard baseline.
+- Reused bidi and repaint metadata capacity across smooth-scroll overscan changes, preserving unchanged row layouts. Scrollbar painting retains geometry and palette colors, and handles tracks shorter or narrower than the normal thumb size.
+- Fixed public snapshot threading: `currentSelection()` reads selection and viewport together on the EDT, while `viewportState()` copies one complete publication under a short monitor. Viewport callbacks run outside synchronization, and primitive animation publication and EDT scrollbar reads avoid snapshot allocations.
+- Clarified rendering and API contracts for logical cluster columns, font resolution, bounded shaping, cache lifetimes, and EDT-only `currentSearchState()` and `preferredGridSize()` access. Documented synchronous first-use native emoji initialization and the scope of allocation measurements; these measurements do not establish whole-frame allocation or latency guarantees.
+- Moved Swing allocation measurements from unit-test counters into the existing JMH suite with GC profiling. Unit tests retain cache and rendering semantics, and scrollback/selection fixtures control frame publication and release timers reliably. Whole-component painting benchmarks now bind, paint, and dispose on the EDT; CI compiles the benchmark harnesses.
 
 ## [0.2.1] - 2026-07-14
 

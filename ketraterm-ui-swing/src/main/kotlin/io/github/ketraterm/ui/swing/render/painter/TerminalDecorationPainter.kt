@@ -27,6 +27,25 @@ internal class TerminalDecorationPainter(
     private val colorCache: AwtColorCache,
 ) {
     /**
+     * Paints terminal and hyperlink decorations using the style retained by the run scanner.
+     */
+    fun paintTextRun(
+        g: Graphics2D,
+        palette: TerminalColorPalette,
+        style: TerminalTextRunStyle,
+        startColumn: Int,
+        endColumn: Int,
+        row: Int,
+        metrics: SwingMetrics,
+    ) {
+        if (style.textHidden) return
+        paint(g, palette, style.attr, style.extraAttr, style.foreground, startColumn, endColumn, row, metrics)
+        if (style.hyperlinkId != 0) {
+            paintHyperlink(g, style.foreground, startColumn, endColumn, row, metrics, style.hovered)
+        }
+    }
+
+    /**
      * Paints underline, strikethrough, and overline for a contiguous cell span.
      */
     fun paint(

@@ -47,7 +47,28 @@ inline fun <T> readCurrent(block: (TerminalRenderCache) -> T): T?
 
 ---
 
-## 3. Allocation-Free Multi-Grapheme Clustered Text Copy
+## 3. Source Lifetime
+
+Row IDs and generations identify content only within one
+`TerminalRenderFrameReader` instance. Both viewport reads (`updateFrom`) and
+retained-range reads (`updateFromAbsoluteRange`) track that identity and force
+a complete copy when the reader changes. Copying a published cache preserves
+the reader identity; rotating publisher buffers does not start a new source
+lifetime.
+
+Owners call `reset()` when unbinding a source. It clears copied cells and
+metadata while retaining dimensions and primitive-array capacity. Direct
+`TerminalRenderFrameConsumer.accept` callers must also reset before supplying
+frames from another source, because a short-lived frame does not identify its
+owner.
+
+`hasFrame` is false initially, after reset, and during an incomplete copy. It
+becomes true only after the complete frame has been copied. Consumers use this
+validity state to distinguish retained storage from available content. A UI
+bound to a publisher with no first frame paints its empty surface and avoids
+cell-dependent interaction until publication succeeds.
+
+## 4. Allocation-Free Multi-Grapheme Clustered Text Copy
 
 `TerminalRenderCache` optimizes grapheme cluster copies by using a packed primitive structure:
 * **`clusterRefs` (LongArray)**: Packed indices mapped 1:1 to grid columns.

@@ -42,6 +42,13 @@ class TerminalRenderCache(
     rows: Int,
     private val rowCapacityReserve: Int,
 ) : TerminalRenderFrameConsumer {
+    private val emptyPalette = TerminalColorPalette()
+    private var sourceReader: TerminalRenderFrameReader? = null
+
+    /** Whether this cache contains a successfully copied frame from its current source. */
+    var hasFrame: Boolean = false
+        private set
+
     /**
      * Creates a cache whose primitive planes exactly fit its initial shape.
      *
@@ -173,6 +180,10 @@ class TerminalRenderCache(
     var structureGeneration: Long = UNINITIALIZED_GENERATION
         private set
 
+    /** Last copied [TerminalRenderFrame.contentGeneration], including a reader's conservative fallback. */
+    var contentGeneration: Long = UNINITIALIZED_GENERATION
+        private set
+
     /**
      * Last copied active buffer kind.
      */
@@ -182,7 +193,7 @@ class TerminalRenderCache(
     /**
      * Last copied color palette.
      */
-    var palette: TerminalColorPalette = TerminalColorPalette()
+    var palette: TerminalColorPalette = emptyPalette
         private set
 
     /**
@@ -316,6 +327,37 @@ class TerminalRenderCache(
     }
 
     /**
+     * Ends the current source lifetime and clears its copied cells and metadata.
+     *
+     * Dimensions and all primitive storage are retained for reuse. [hasFrame] remains
+     * false until another frame is copied. Owners must reset when unbinding a source,
+     * including owners that deliver frames directly through [accept].
+     */
+    fun reset() {
+        sourceReader = null
+        codeWords.fill(0)
+        attrWords.fill(TerminalRenderAttrs.DEFAULT)
+        flags.fill(TerminalRenderCellFlags.EMPTY)
+        extraAttrWords.fill(TerminalRenderExtraAttrs.DEFAULT)
+        hyperlinkIds.fill(0)
+        clusterRefs.fill(NO_CLUSTER_REF)
+        clusterCodepoints.fill(0)
+        nextClusterCodepoints.fill(0)
+        lineGenerations.fill(UNINITIALIZED_GENERATION)
+        lineIds.fill(0L)
+        lineWrapped.fill(false)
+        lineHasBlinkingText.fill(false)
+        shapeChangedOnLastUpdate = false
+        resetMetadata()
+    }
+
+    private fun prepareForRead(reader: TerminalRenderFrameReader) {
+        if (sourceReader === reader) return
+        reset()
+        sourceReader = reader
+    }
+
+    /**
      * Copies changed rows and cursor state from [reader].
      *
      * The read callback is used only to copy primitive frame data into this
@@ -356,6 +398,8 @@ class TerminalRenderCache(
      * before exposing [TerminalRenderFrame.rows], and this cache resizes only to
      * the resolved frame shape.
      *
+     * Reader identity owns the generation namespace; replacement readers force a full copy.
+     *
      * @param reader source of the short-lived render frame.
      * @param scrollbackOffset requested lines above the live bottom viewport.
      * @param viewportRows requested render rows, or zero for the reader default.
@@ -365,11 +409,28 @@ class TerminalRenderCache(
         scrollbackOffset: Int,
         viewportRows: Int,
     ) {
+        prepareForRead(reader)
         if (viewportRows > 0) {
             reader.readRenderFrame(scrollbackOffset, viewportRows, this)
         } else {
             reader.readRenderFrame(scrollbackOffset, this)
         }
+    }
+
+    /**
+     * Copies retained rows in an inclusive absolute range from [reader].
+     *
+     * Uses the same source lifetime as viewport reads, so equal generations from a
+     * replacement reader cannot reuse old cells. Bounds are resolved by the reader
+     * inside its frame callback, using this cache as the consumer.
+     */
+    fun updateFromAbsoluteRange(
+        reader: TerminalRenderFrameReader,
+        startAbsoluteRow: Long,
+        endAbsoluteRow: Long,
+    ) {
+        prepareForRead(reader)
+        reader.readRenderFrameForAbsoluteRange(startAbsoluteRow, endAbsoluteRow, this)
     }
 
     /**
@@ -383,6 +444,7 @@ class TerminalRenderCache(
      */
     fun updateFrom(source: TerminalRenderCache) {
         require(source !== this) { "source cache must differ from destination cache" }
+        hasFrame = false
 
         val previousColumns = columns
         val previousRows = rows
@@ -399,6 +461,11 @@ class TerminalRenderCache(
             resizeStorage(source.columns, source.rows)
         } else {
             rows = source.rows
+        }
+
+        if (!source.hasFrame) {
+            reset()
+            return
         }
 
         val cellCount = source.columns * source.rows
@@ -447,6 +514,7 @@ class TerminalRenderCache(
         discardedCount = source.discardedCount
         hasBlinkingText = source.hasBlinkingText
         frameGeneration = source.frameGeneration
+        contentGeneration = source.contentGeneration
         structureGeneration = source.structureGeneration
         activeBuffer = source.activeBuffer
         palette = source.palette
@@ -465,15 +533,23 @@ class TerminalRenderCache(
             oldCursorBlinking != cursorBlinking ||
             oldCursorShape != cursorShape ||
             oldCursorGeneration != cursorGeneration
+        sourceReader = source.sourceReader
+        hasFrame = true
     }
 
     /**
      * Copies row data, cursor state, active buffer kind, and color palette
      * from the given [frame] into this cache's primitive storage.
      *
+     * Direct consumers own the source lifetime: call [reset] before delivering frames
+     * from another source. Prefer [updateFrom] or [updateFromAbsoluteRange] when a reader
+     * is available; they qualify row generations by reader identity automatically.
+     *
      * @param frame the short-lived render frame snapshot to copy from.
      */
     override fun accept(frame: TerminalRenderFrame) {
+        val previouslyHadFrame = hasFrame
+        hasFrame = false
         shapeChangedOnLastUpdate = false
 
         if (columns != frame.columns || rows != frame.rows) {
@@ -489,7 +565,8 @@ class TerminalRenderCache(
         cursorChangedOnLastUpdate = false
 
         val viewportChanged = this.scrollbackOffset != frame.scrollbackOffset
-        val structureChanged = structureGeneration != frame.structureGeneration || viewportChanged
+        val structureChanged =
+            !previouslyHadFrame || shapeChangedOnLastUpdate || structureGeneration != frame.structureGeneration || viewportChanged
         if (structureChanged) {
             clearAllClusters()
         }
@@ -555,8 +632,10 @@ class TerminalRenderCache(
         historySize = frame.historySize
         this.scrollbackOffset = frame.scrollbackOffset
         frameGeneration = frame.frameGeneration
+        contentGeneration = frame.contentGeneration
         structureGeneration = frame.structureGeneration
         discardedCount = frame.discardedCount
+        hasFrame = true
     }
 
     private fun resizeStorage(
@@ -593,8 +672,14 @@ class TerminalRenderCache(
         lineIds = LongArray(newStorageRows)
         lineWrapped = BooleanArray(newStorageRows)
         lineHasBlinkingText = BooleanArray(newStorageRows)
-        hasBlinkingText = false
+        resetMetadata()
+    }
 
+    private fun resetMetadata() {
+        hasFrame = false
+        hasBlinkingText = false
+        clusterCodepointCount = 0
+        nextClusterCodepointCount = 0
         hasCursor = false
         cursorColumn = 0
         cursorRow = 0
@@ -606,8 +691,10 @@ class TerminalRenderCache(
         scrollbackOffset = 0
         discardedCount = 0L
         frameGeneration = UNINITIALIZED_GENERATION
+        contentGeneration = UNINITIALIZED_GENERATION
         structureGeneration = UNINITIALIZED_GENERATION
         activeBuffer = TerminalRenderBufferKind.PRIMARY
+        palette = emptyPalette
         cursorChangedOnLastUpdate = false
         clusterSinkRow = NO_CLUSTER_SINK_ROW
         clusterSinkRefs = EMPTY_LONG_REFS

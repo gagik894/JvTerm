@@ -53,7 +53,8 @@ interface TerminalBuffer :
      * @param oldScrollbackOffset The active scrollback offset before the resize.
      * @return A [Pair] of (newScrollbackOffset, newHistorySize), allowing the caller to
      *   re-anchor a scrollback viewport that was active at [oldScrollbackOffset] before
-     *   the reflow.
+     *   the reflow. Both values describe the active buffer, with the offset clamped
+     *   to its history. An active alternate screen returns zero for both values.
      * @throws IllegalArgumentException if either dimension is <= 0.
      */
     fun resize(

@@ -16,13 +16,85 @@
 package io.github.ketraterm.core.render
 
 import io.github.ketraterm.core.buffer.DefaultTerminalBuffer
+import io.github.ketraterm.core.buffer.impl.TerminalModeControllerImpl
+import io.github.ketraterm.core.engine.CursorEngine
 import io.github.ketraterm.core.model.CellColor
 import io.github.ketraterm.core.model.UnderlineStyle
+import io.github.ketraterm.core.state.TerminalState
 import io.github.ketraterm.render.api.*
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 
 class CoreTerminalRenderFrameTest {
+    @Test
+    fun `content generation ignores cursor title and viewport changes`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        buffer.writeText("one")
+        buffer.carriageReturn()
+        buffer.newLine()
+        buffer.newLine()
+        var contentGeneration = 0L
+        var frameGeneration = 0L
+        buffer.readRenderFrame {
+            contentGeneration = it.contentGeneration
+            frameGeneration = it.frameGeneration
+        }
+
+        buffer.positionCursor(1, 0)
+        buffer.setCursorShape(TerminalRenderCursorShape.UNDERLINE)
+        buffer.setWindowTitle("changed title")
+        buffer.readRenderFrame(scrollbackOffset = 1) {
+            assertNotEquals(frameGeneration, it.frameGeneration)
+            assertEquals(contentGeneration, it.contentGeneration)
+        }
+    }
+
+    @Test
+    fun `content generation includes mutations outside the requested viewport`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        buffer.writeText("old")
+        buffer.newLine()
+        buffer.newLine()
+        var contentGeneration = 0L
+        var lineGeneration = 0L
+        buffer.readRenderFrame(scrollbackOffset = 1, viewportRows = 1) {
+            contentGeneration = it.contentGeneration
+            lineGeneration = it.lineGeneration(0)
+        }
+
+        buffer.carriageReturn()
+        buffer.writeText("new")
+
+        buffer.readRenderFrame(scrollbackOffset = 1, viewportRows = 1) {
+            assertNotEquals(contentGeneration, it.contentGeneration)
+            assertEquals(lineGeneration, it.lineGeneration(0))
+        }
+    }
+
+    @Test
+    fun `content generation changes for edits scrolling resize buffer switches and reset`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+
+        fun assertContentChanges(change: () -> Unit) {
+            var previous = 0L
+            buffer.readRenderFrame { previous = it.contentGeneration }
+            change()
+            buffer.readRenderFrame { assertNotEquals(previous, it.contentGeneration) }
+        }
+
+        assertContentChanges { buffer.writeText("text") }
+        assertContentChanges { buffer.eraseCurrentLine() }
+        buffer.positionCursor(0, 1)
+        assertContentChanges { buffer.newLine() }
+        assertContentChanges { buffer.resize(5, 3) }
+        assertContentChanges { buffer.enterAltBuffer() }
+        assertContentChanges { buffer.exitAltBuffer() }
+        assertContentChanges { buffer.eraseScreenAndHistory() }
+        assertContentChanges { buffer.reset() }
+    }
+
     @Test
     fun `terminal buffer exposes render frame reader callback`() {
         val buffer = DefaultTerminalBuffer(initialWidth = 3, initialHeight = 2)
@@ -394,6 +466,193 @@ class CoreTerminalRenderFrameTest {
                 { assertEquals(TerminalRenderColorKind.INDEXED, TerminalRenderAttrs.backgroundKind(attr)) },
                 { assertEquals(42, TerminalRenderAttrs.backgroundValue(attr)) },
             )
+        }
+    }
+
+    @Test
+    fun `reverse video invalidates every retained row without changing content or mapping`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2, maxHistory = 4)
+        repeat(3) { buffer.writeLogicalLine("L$it") }
+        val generations = LongArray(4)
+        val lineIds = LongArray(4)
+        val contents = arrayOfNulls<IntArray>(4)
+        var contentGeneration = 0L
+        var structureGeneration = 0L
+        buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+            assertEquals(2, frame.historySize)
+            assertEquals(4, frame.rows)
+            contentGeneration = frame.contentGeneration
+            structureGeneration = frame.structureGeneration
+            for (row in 0 until frame.rows) {
+                generations[row] = frame.lineGeneration(row)
+                lineIds[row] = frame.lineId(row)
+                contents[row] = copyRow(frame, row).codeWords
+            }
+        }
+
+        for (enabled in booleanArrayOf(true, false)) {
+            buffer.setReverseVideo(enabled)
+
+            buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+                for (row in 0 until frame.rows) {
+                    assertNotEquals(generations[row], frame.lineGeneration(row), "render row $row")
+                    assertEquals(lineIds[row], frame.lineId(row))
+                    val copied = copyRow(frame, row)
+                    assertArrayEquals(contents[row], copied.codeWords)
+                    assertTrue(copied.attrWords.all { TerminalRenderAttrs.isInverse(it) == enabled })
+                    generations[row] = frame.lineGeneration(row)
+                }
+                assertEquals(contentGeneration, frame.contentGeneration)
+                assertEquals(structureGeneration, frame.structureGeneration)
+            }
+        }
+    }
+
+    @Test
+    fun `setting the current reverse video mode preserves frame and row generations`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        for (enabled in booleanArrayOf(false, true)) {
+            buffer.setReverseVideo(enabled)
+            var generation = 0L
+            val rows = LongArray(2)
+            buffer.readRenderFrame { frame ->
+                generation = frame.frameGeneration
+                for (row in rows.indices) rows[row] = frame.lineGeneration(row)
+            }
+
+            buffer.setReverseVideo(enabled)
+
+            buffer.readRenderFrame { frame ->
+                assertEquals(generation, frame.frameGeneration)
+                for (row in rows.indices) assertEquals(rows[row], frame.lineGeneration(row))
+            }
+        }
+    }
+
+    @Test
+    fun `editing after global attribute invalidation still invalidates only the edited row`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2, maxHistory = 4)
+        repeat(3) { buffer.writeLogicalLine("L$it") }
+        buffer.setReverseVideo(true)
+        val generations = LongArray(4)
+        buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+            for (row in generations.indices) generations[row] = frame.lineGeneration(row)
+        }
+
+        buffer.positionCursor(col = 0, row = 0)
+        buffer.writeCodepoint('X'.code)
+
+        buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+            for (row in generations.indices) {
+                if (row == frame.historySize) {
+                    assertNotEquals(generations[row], frame.lineGeneration(row))
+                    assertEquals('X'.code, copyRow(frame, row).codeWords[0])
+                } else {
+                    assertEquals(generations[row], frame.lineGeneration(row))
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `soft reset invalidates primary history even while the alternate buffer is active`(alternate: Boolean) {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2, maxHistory = 4)
+        repeat(3) { buffer.writeLogicalLine("L$it") }
+        buffer.setReverseVideo(true)
+        val generations = LongArray(4)
+        val lineIds = LongArray(4)
+        buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+            for (row in generations.indices) {
+                generations[row] = frame.lineGeneration(row)
+                lineIds[row] = frame.lineId(row)
+            }
+        }
+        if (alternate) {
+            buffer.enterAltBuffer()
+            buffer.writeCodepoint('A'.code)
+        }
+        var contentGeneration = 0L
+        buffer.readRenderFrame { contentGeneration = it.contentGeneration }
+
+        buffer.softReset()
+
+        buffer.readRenderFrame { frame ->
+            assertEquals(contentGeneration, frame.contentGeneration)
+            for (row in 0 until frame.rows) {
+                assertTrue(copyRow(frame, row).attrWords.none(TerminalRenderAttrs::isInverse))
+            }
+        }
+        if (alternate) buffer.exitAltBuffer()
+        buffer.readRenderFrame(scrollbackOffset = Int.MAX_VALUE, viewportRows = Int.MAX_VALUE) { frame ->
+            for (row in generations.indices) {
+                assertNotEquals(generations[row], frame.lineGeneration(row), "primary row $row")
+                assertEquals(lineIds[row], frame.lineId(row))
+                assertTrue(copyRow(frame, row).attrWords.none(TerminalRenderAttrs::isInverse))
+            }
+        }
+    }
+
+    @Test
+    fun `soft reset preserves row generations when reverse video is already disabled`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        val generations = LongArray(2)
+        var contentGeneration = 0L
+        buffer.readRenderFrame { frame ->
+            contentGeneration = frame.contentGeneration
+            for (row in generations.indices) generations[row] = frame.lineGeneration(row)
+        }
+
+        buffer.softReset()
+
+        buffer.readRenderFrame { frame ->
+            assertEquals(contentGeneration, frame.contentGeneration)
+            for (row in generations.indices) assertEquals(generations[row], frame.lineGeneration(row))
+        }
+    }
+
+    @Test
+    fun `full reset invalidates rendered attributes of preserved inactive alternate rows`() {
+        val buffer = DefaultTerminalBuffer(initialWidth = 4, initialHeight = 2)
+        buffer.enterAltBufferWithoutCursorSave(clearBeforeEnter = false)
+        buffer.writeCodepoint('A'.code)
+        buffer.setReverseVideo(true)
+        var generation = 0L
+        var lineId = 0L
+        buffer.readRenderFrame { frame ->
+            generation = frame.lineGeneration(0)
+            lineId = frame.lineId(0)
+            assertTrue(TerminalRenderAttrs.isInverse(copyRow(frame).attrWords[0]))
+        }
+        buffer.exitAltBufferWithoutCursorRestore()
+
+        buffer.reset()
+
+        buffer.enterAltBufferWithoutCursorSave(clearBeforeEnter = false)
+        buffer.readRenderFrame { frame ->
+            assertEquals(lineId, frame.lineId(0))
+            assertNotEquals(generation, frame.lineGeneration(0))
+            val row = copyRow(frame)
+            assertEquals('A'.code, row.codeWords[0])
+            assertFalse(TerminalRenderAttrs.isInverse(row.attrWords[0]))
+        }
+    }
+
+    @Test
+    fun `global attribute invalidation changes row generations across signed overflow`() {
+        val state = TerminalState(initialWidth = 2, initialHeight = 1, maxHistory = 0)
+        state.ring[0].renderGeneration = Long.MAX_VALUE
+        val modes = TerminalModeControllerImpl(state, CursorEngine(state))
+        val frame = CoreTerminalRenderFrame(state)
+        var generation = frame.use(scrollbackOffset = 0) { frame.lineGeneration(0) }
+
+        for (enabled in booleanArrayOf(true, false)) {
+            modes.setReverseVideo(enabled)
+            frame.use(scrollbackOffset = 0) {
+                assertNotEquals(generation, frame.lineGeneration(0))
+                generation = frame.lineGeneration(0)
+                assertTrue(generation < 0L)
+            }
         }
     }
 

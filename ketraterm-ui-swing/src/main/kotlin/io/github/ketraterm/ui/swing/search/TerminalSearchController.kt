@@ -24,8 +24,9 @@ import io.github.ketraterm.session.TerminalSession
  * The controller owns literal match scanning, active-result navigation, and
  * viewport highlight projection. It does not own visible search chrome, does
  * not paint, and does not allocate from the frame paint loop; painting consumes
- * [viewportHighlights], which is rebuilt only when search state or viewport
- * mapping changes.
+ * precomputed [viewportHighlights].
+ * Retained content is rescanned only when the query, case policy, source, or
+ * content generation changes. Cursor-only frames reuse matches.
  *
  * @param host Swing terminal hooks needed to refresh caches and move viewport.
  */
@@ -38,11 +39,16 @@ internal class TerminalSearchController(
 
     private val model = TerminalSearchModel()
 
+    // Command navigation also refreshes the host cache; track the content actually searched.
+    private var searchedSession: TerminalSession? = null
+    private var searchedContentGeneration: Long = 0L
+
     val viewportHighlights = TerminalSearchViewportHighlights()
 
     fun reset(viewportRows: Int) {
         query = ""
         highlights = null
+        searchedSession = null
         viewportHighlights.reset(viewportRows)
     }
 
@@ -78,13 +84,12 @@ internal class TerminalSearchController(
         }
 
         val boundSession = host.session ?: return
-        val oldActive = highlights?.activeResultIndex ?: NO_ACTIVE_RESULT
-        refreshSearchCache(boundSession)
-        val nextHighlights = model.search(host.searchCache, query, ignoreCase = ignoreCase)
-        if (oldActive in 0 until nextHighlights.resultCount) {
-            nextHighlights.activate(oldActive)
+        val cache = host.renderCache
+        if (searchedSession !== boundSession ||
+            searchedContentGeneration != cache.contentGeneration
+        ) {
+            refreshMatches(boundSession, preserveActiveResult = true)
         }
-        highlights = nextHighlights
         updateViewportHighlights()
     }
 
@@ -107,8 +112,7 @@ internal class TerminalSearchController(
         }
 
         val boundSession = host.session ?: return
-        refreshSearchCache(boundSession)
-        highlights = model.search(host.searchCache, nextQuery, ignoreCase = ignoreCase)
+        refreshMatches(boundSession, preserveActiveResult = false)
         scrollToActiveResult()
         updateViewportHighlights()
         host.repaint()
@@ -144,13 +148,23 @@ internal class TerminalSearchController(
         )
     }
 
-    private fun refreshSearchCache(boundSession: TerminalSession) {
-        val historySize = host.renderCache.historySize
-        host.searchCache.updateFrom(
+    private fun refreshMatches(
+        boundSession: TerminalSession,
+        preserveActiveResult: Boolean,
+    ) {
+        val oldActive = if (preserveActiveResult) highlights?.activeResultIndex ?: NO_ACTIVE_RESULT else NO_ACTIVE_RESULT
+        // Resolve retained bounds under the session lock; the published viewport may lag output.
+        host.searchCache.updateFromAbsoluteRange(
             reader = boundSession,
-            scrollbackOffset = historySize,
-            viewportRows = (historySize + host.visibleGridRows()).coerceAtLeast(1),
+            startAbsoluteRow = 0L,
+            endAbsoluteRow = Long.MAX_VALUE,
         )
+        val cache = host.searchCache
+        val nextHighlights = model.search(cache, query, ignoreCase = ignoreCase)
+        if (oldActive in 0 until nextHighlights.resultCount) nextHighlights.activate(oldActive)
+        highlights = nextHighlights
+        searchedSession = boundSession
+        searchedContentGeneration = cache.contentGeneration
     }
 
     private companion object {

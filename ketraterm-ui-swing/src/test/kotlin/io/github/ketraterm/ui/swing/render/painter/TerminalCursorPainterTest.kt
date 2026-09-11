@@ -15,6 +15,7 @@
  */
 package io.github.ketraterm.ui.swing.render.painter
 
+import io.github.ketraterm.render.api.TerminalRenderAttrs
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.api.TerminalRenderCursor
 import io.github.ketraterm.render.api.TerminalRenderCursorShape
@@ -27,6 +28,8 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Graphics2D
 import java.awt.RenderingHints
 import java.awt.image.BufferedImage
@@ -75,6 +78,29 @@ class TerminalCursorPainterTest {
 
     @Nested
     inner class Shapes {
+        @ParameterizedTest
+        @ValueSource(ints = [0x41, 0xE9, 0x2588])
+        fun `concealed block cursor paints only its background in either blink phase`(codePoint: Int) {
+            for (textBlinkVisible in listOf(false, true)) {
+                val fixture = fixture(cursor(shape = TerminalRenderCursorShape.BLOCK))
+                fixture.cache.codeWords[0] = codePoint
+                fixture.cache.attrWords[0] = TerminalRenderAttrs.pack(invisible = true, blink = true, inverse = true)
+
+                try {
+                    fixture.paint(textBlinkVisible = textBlinkVisible)
+
+                    for (y in 0 until fixture.metrics.cellHeight) {
+                        for (x in 0 until fixture.metrics.cellWidth) {
+                            assertEquals(TEST_BLUE, fixture.image.getRGB(x, y), "Concealed cursor glyph at ($x, $y)")
+                        }
+                    }
+                    assertEquals(TEST_BLACK, fixture.image.getRGB(fixture.metrics.cellWidth, 0))
+                } finally {
+                    fixture.g.dispose()
+                }
+            }
+        }
+
         @Test
         fun `block cursor fills full cell and redraws foreground`() {
             val fixture = fixture(cursor(shape = TerminalRenderCursorShape.BLOCK))
@@ -188,7 +214,7 @@ class TerminalCursorPainterTest {
         val metrics = testMetrics(image, settings)
         val colorCache = AwtColorCache()
         val textPainter = TerminalTextPainter(colorCache, TerminalDecorationPainter(colorCache))
-        val cache = renderCache(TestRenderFrame.text("A").copyWithCursor(cursor))
+        val cache = renderCache(copyWithCursor(cursor))
         return Fixture(
             image = image,
             g =
@@ -327,7 +353,7 @@ class TerminalCursorPainterTest {
             generation = 1,
         )
 
-    private fun TestRenderFrame.copyWithCursor(cursor: TerminalRenderCursor): TestRenderFrame =
+    private fun copyWithCursor(cursor: TerminalRenderCursor): TestRenderFrame =
         TestRenderFrame(
             cells = arrayOf(arrayOf(TestCell(codeWord = 'A'.code, flags = TerminalRenderCellFlags.CODEPOINT))),
             cursorValue = cursor,

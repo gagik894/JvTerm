@@ -27,6 +27,7 @@ dependencies {
     val kotlinxCoroutinesVersion = rootProject.extra["kotlinxCoroutinesVersion"] as String
 
     api(project(":ketraterm-session"))
+    api("org.jetbrains.kotlinx:kotlinx-collections-immutable:0.5.2")
     implementation(project(":ketraterm-input"))
     implementation(project(":ketraterm-render-api"))
     implementation(project(":ketraterm-render-cache"))

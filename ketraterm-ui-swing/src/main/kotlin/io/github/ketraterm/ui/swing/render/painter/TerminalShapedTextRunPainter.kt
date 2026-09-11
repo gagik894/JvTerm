@@ -16,862 +16,431 @@
 package io.github.ketraterm.ui.swing.render.painter
 
 import io.github.ketraterm.render.api.TerminalColorPalette
-import io.github.ketraterm.render.api.TerminalRenderAttrs
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
-import io.github.ketraterm.ui.swing.render.SwingColors
+import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.cache.FontCache
-import io.github.ketraterm.ui.swing.render.cache.TerminalComplexTextLayoutCache
-import io.github.ketraterm.ui.swing.render.hasDrawableText
-import io.github.ketraterm.ui.swing.render.isFastAsciiCell
-import io.github.ketraterm.ui.swing.render.terminalFontStyle
+import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
+import io.github.ketraterm.ui.swing.render.primitives.TerminalCellPrimitivePainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 import java.awt.font.FontRenderContext
-import java.awt.font.TextLayout
-import java.text.Bidi
 
 /**
- * Paints row-shaped complex text spans that cannot be rendered correctly one
- * terminal cell at a time.
+ * Shapes compatible text with its neighboring context, then paints it at terminal-cell positions.
  *
- * This helper owns Unicode Bidirectional Algorithm row planning and
- * complex-script run shaping for Brahmic and Southeast Asian scripts. The
- * ordinary ASCII path remains in [TerminalTextPainter] so the common repaint
- * path does not pay for Bidi or script-run machinery.
+ * Font, script and direction delimit shaping spans. Foreground, decorations and visibility only
+ * delimit paint spans: changing one cell's presentation must not reshape its neighbors. The block
+ * cursor resolves the same bounded windows and reuses their positioned glyph vectors.
+ * Overlapping shaped clusters provide context across the size cap; only each window's
+ * owned interval is painted, and the next interval starts at its first unpainted cell.
+ *
+ * Primitive and native-emoji cells retain [TerminalTextPainter]'s shared cell dispatch. Reusable
+ * UTF-16 and ownership arrays keep unchanged shaped-run lookups allocation-free.
  */
 internal class TerminalShapedTextRunPainter(
     private val colorCache: AwtColorCache,
     private val decorationPainter: TerminalDecorationPainter,
     private val fontCache: FontCache,
-    private val complexTextLayouts: TerminalComplexTextLayoutCache,
+    private val runStyle: TerminalTextRunStyle,
+    private val cellPrimitives: TerminalCellPrimitivePainter,
 ) {
-    private var rowChars = CharArray(INITIAL_TEXT_RUN_CAPACITY)
-    private var segmentCodepoints = IntArray(INITIAL_TEXT_RUN_CAPACITY)
-    private var bidiRows = arrayOfNulls<Bidi>(0)
-    private var rowGenerations = LongArray(0)
-    private var rowLineIds = LongArray(0)
-    private var rowHasStrongRtl = BooleanArray(0)
-    private var cachedColumns = 0
+    private val glyphVectors = TerminalShapedGlyphVectorCache()
+    private var chars = CharArray(INITIAL_TEXT_RUN_CAPACITY)
+    private var charColumns = IntArray(INITIAL_TEXT_RUN_CAPACITY)
 
-    fun cachedRowContainsStrongRtl(
-        cache: TerminalRenderCache,
-        row: Int,
-    ): Boolean {
-        ensureBidiRowCache(cache)
-        val generation = cache.lineGenerations[row]
-        val lineId = cache.lineIds[row]
-        if (rowGenerations[row] == generation && rowLineIds[row] == lineId) return rowHasStrongRtl[row]
-
-        val hasStrongRtl = rowContainsStrongRtl(cache, row)
-        bidiRows[row] = null
-        rowGenerations[row] = generation
-        rowLineIds[row] = lineId
-        rowHasStrongRtl[row] = hasStrongRtl
-        return hasStrongRtl
+    fun clear() {
+        glyphVectors.clear()
     }
 
-    fun paintBidiRow(
-        g: Graphics2D,
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        metrics: SwingMetrics,
-        row: Int,
-        fontRenderContext: FontRenderContext,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ) {
-        val bidi = bidiForRow(cache, row)
-        val baselineY = row * metrics.cellHeight + metrics.baseline
-        var visualStartColumn = 0
-        var runIndex = 0
-        while (runIndex < bidi.runCount) {
-            val runStart = bidi.getRunStart(runIndex)
-            val runLimit = bidi.getRunLimit(runIndex)
-            val rtlRun = bidi.getRunLevel(runIndex) and 1 != 0
-            var segmentStart = runStart
-            while (segmentStart < runLimit) {
-                val segmentLimit =
-                    bidiSegmentLimit(
-                        cache = cache,
-                        palette = palette,
-                        row = row,
-                        startColumn = segmentStart,
-                        runLimit = runLimit,
-                        textBlinkVisible = textBlinkVisible,
-                        hyperlinkIds = hyperlinkIds,
-                        hoveredHyperlinkId = hoveredHyperlinkId,
-                        hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                        hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                        hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                        hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                        hyperlinkActivationHover = hyperlinkActivationHover,
-                        hyperlinkActivationForeground = hyperlinkActivationForeground,
-                    )
-                val segmentVisualStart =
-                    if (rtlRun) {
-                        visualStartColumn + runLimit - segmentLimit
-                    } else {
-                        visualStartColumn + segmentStart - runStart
-                    }
-                paintShapedLogicalSegment(
-                    g = g,
-                    cache = cache,
-                    palette = palette,
-                    metrics = metrics,
-                    row = row,
-                    startColumn = segmentStart,
-                    endColumn = segmentLimit,
-                    visualStartColumn = segmentVisualStart,
-                    baselineY = baselineY,
-                    fontRenderContext = fontRenderContext,
-                    textBlinkVisible = textBlinkVisible,
-                    hyperlinkIds = hyperlinkIds,
-                    hoveredHyperlinkId = hoveredHyperlinkId,
-                    hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                    hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                    hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                    hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                    hyperlinkActivationHover = hyperlinkActivationHover,
-                    hyperlinkActivationForeground = hyperlinkActivationForeground,
-                )
-                segmentStart = segmentLimit
-            }
-            visualStartColumn += runLimit - runStart
-            runIndex++
-        }
-    }
-
-    fun paintComplexShapingRun(
-        g: Graphics2D,
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        metrics: SwingMetrics,
-        row: Int,
-        startColumn: Int,
-        baselineY: Int,
-        fontRenderContext: FontRenderContext,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ): Int {
-        val endColumn =
-            complexShapingRunEnd(
-                cache = cache,
-                palette = palette,
-                row = row,
-                startColumn = startColumn,
-                textBlinkVisible = textBlinkVisible,
-                hyperlinkIds = hyperlinkIds,
-                hoveredHyperlinkId = hoveredHyperlinkId,
-                hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        paintShapedLogicalSegment(
-            g = g,
-            cache = cache,
-            palette = palette,
-            metrics = metrics,
-            row = row,
-            startColumn = startColumn,
-            endColumn = endColumn,
-            visualStartColumn = startColumn,
-            baselineY = baselineY,
-            fontRenderContext = fontRenderContext,
-            textBlinkVisible = textBlinkVisible,
-            hyperlinkIds = hyperlinkIds,
-            hoveredHyperlinkId = hoveredHyperlinkId,
-            hoveredHyperlinkStartRow = hoveredHyperlinkStartRow,
-            hoveredHyperlinkStartColumn = hoveredHyperlinkStartColumn,
-            hoveredHyperlinkEndRow = hoveredHyperlinkEndRow,
-            hoveredHyperlinkEndColumn = hoveredHyperlinkEndColumn,
-            hyperlinkActivationHover = hyperlinkActivationHover,
-            hyperlinkActivationForeground = hyperlinkActivationForeground,
-        )
-        return endColumn
-    }
-
-    fun isComplexShapingCell(
+    /** Whether this cell can start a contextual span in its bidi direction. */
+    fun isShapingCell(
         cache: TerminalRenderCache,
         index: Int,
+        rtl: Boolean,
     ): Boolean {
         val flags = cache.flags[index]
         if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return false
         if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-            val clusterRef = cache.clusterRefs[index]
-            if (clusterRef == 0L) return false
-            val offset = cache.clusterOffset(clusterRef)
-            val end = offset + cache.clusterLength(clusterRef)
-            var clusterIndex = offset
-            while (clusterIndex < end) {
-                if (isComplexShapingCodePoint(cache.clusterCodepoints[clusterIndex])) return true
-                clusterIndex++
+            val ref = cache.clusterRefs[index]
+            if (ref == 0L) return false
+            val offset = cache.clusterOffset(ref)
+            val length = cache.clusterLength(ref)
+            if (length > MAX_RUN_CODEPOINTS || TerminalEmojiPresentation.usesEmojiPresentation(cache.clusterCodepoints, offset, length)) {
+                return false
+            }
+            if (rtl) return true
+            var cp = offset
+            val end = offset + length
+            while (cp < end) {
+                if (isComplexShapingCodePoint(cache.clusterCodepoints[cp++])) return true
             }
             return false
         }
-        return isComplexShapingCodePoint(cache.codeWords[index])
+        val codePoint = cache.codeWords[index]
+        return !(cellPrimitives.canPaint(codePoint) || TerminalEmojiPresentation.usesEmojiPresentation(codePoint)) &&
+            (rtl || isComplexShapingCodePoint(codePoint))
     }
 
-    private fun bidiForRow(
-        cache: TerminalRenderCache,
-        row: Int,
-    ): Bidi {
-        ensureBidiRowCache(cache)
-        val generation = cache.lineGenerations[row]
-        val lineId = cache.lineIds[row]
-        val cached = bidiRows[row]
-        if (cached != null && rowGenerations[row] == generation && rowLineIds[row] == lineId) return cached
-
-        ensureRowCharCapacity(cache.columns)
-        fillBidiRowChars(cache, row)
-        val bidi =
-            Bidi(
-                rowChars,
-                0,
-                null,
-                0,
-                cache.columns,
-                Bidi.DIRECTION_DEFAULT_LEFT_TO_RIGHT,
-            )
-        bidiRows[row] = bidi
-        rowGenerations[row] = generation
-        rowLineIds[row] = lineId
-        return bidi
-    }
-
-    private fun cellCategory(
-        cache: TerminalRenderCache,
-        index: Int,
-    ): Int {
-        val flags = cache.flags[index]
-        val codeWord = cache.codeWords[index]
-        return when {
-            isFastAsciiCell(flags, codeWord) -> 0
-            isComplexShapingCell(cache, index) -> 1
-            else -> 2
-        }
-    }
-
-    private fun bidiSegmentLimit(
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        row: Int,
-        startColumn: Int,
-        runLimit: Int,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ): Int {
-        val rowOffset = cache.rowOffset(row)
-        val startIndex = rowOffset + startColumn
-        val category = cellCategory(cache, startIndex)
-        val attr = cache.attrWords[startIndex]
-        val extraAttr = cache.extraAttrWords[startIndex]
-        val hyperlinkId = hyperlinkIds[startIndex]
-        val hovered =
-            isHoveredHyperlink(
-                hyperlinkId,
-                row,
-                startColumn,
-                hoveredHyperlinkId,
-                hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn,
-            )
-        val foreground =
-            effectiveForeground(
-                palette = palette,
-                attr = attr,
-                codePoint = cache.codeWords[startIndex],
-                hovered = hovered,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        val fontStyle = terminalFontStyle(attr)
-        val decoration = decorationKey(attr, extraAttr)
-        val blinkHidden = isBlinkHidden(attr, textBlinkVisible)
-        val script = scriptKeyForSegment(cache, rowOffset, startColumn, runLimit)
-        var column = startColumn + 1
-        while (column < runLimit) {
-            val index = rowOffset + column
-            if (cellCategory(cache, index) != category) {
-                break
-            }
-            if (!isCompatibleScriptCell(cache, rowOffset, column, runLimit, script)) {
-                break
-            }
-            val currentAttr = cache.attrWords[index]
-            val currentExtraAttr = cache.extraAttrWords[index]
-            val currentHyperlinkId = hyperlinkIds[index]
-            val currentHovered =
-                isHoveredHyperlink(
-                    currentHyperlinkId,
-                    row,
-                    column,
-                    hoveredHyperlinkId,
-                    hoveredHyperlinkStartRow,
-                    hoveredHyperlinkStartColumn,
-                    hoveredHyperlinkEndRow,
-                    hoveredHyperlinkEndColumn,
-                )
-            val currentForeground =
-                effectiveForeground(
-                    palette = palette,
-                    attr = currentAttr,
-                    codePoint = cache.codeWords[index],
-                    hovered = currentHovered,
-                    hyperlinkActivationHover = hyperlinkActivationHover,
-                    hyperlinkActivationForeground = hyperlinkActivationForeground,
-                )
-            if (
-                isBlinkHidden(currentAttr, textBlinkVisible) != blinkHidden ||
-                currentForeground != foreground ||
-                terminalFontStyle(currentAttr) != fontStyle ||
-                decorationKey(currentAttr, currentExtraAttr) != decoration ||
-                currentHyperlinkId != hyperlinkId
-            ) {
-                break
-            }
-            column++
-        }
-        return column
-    }
-
-    private fun complexShapingRunEnd(
-        cache: TerminalRenderCache,
-        palette: TerminalColorPalette,
-        row: Int,
-        startColumn: Int,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ): Int {
-        val rowOffset = cache.rowOffset(row)
-        val startIndex = rowOffset + startColumn
-        val attr = cache.attrWords[startIndex]
-        val extraAttr = cache.extraAttrWords[startIndex]
-        val hyperlinkId = hyperlinkIds[startIndex]
-        val hovered =
-            isHoveredHyperlink(
-                hyperlinkId,
-                row,
-                startColumn,
-                hoveredHyperlinkId,
-                hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn,
-            )
-        val foreground =
-            effectiveForeground(
-                palette = palette,
-                attr = attr,
-                codePoint = cache.codeWords[startIndex],
-                hovered = hovered,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        val fontStyle = terminalFontStyle(attr)
-        val decoration = decorationKey(attr, extraAttr)
-        val script = scriptKeyForSegment(cache, rowOffset, startColumn, cache.columns)
-        var column = startColumn + 1
-        while (column < cache.columns) {
-            val index = rowOffset + column
-            if (!isComplexShapingRunContinuation(cache, rowOffset, column)) break
-            if (!isCompatibleScriptCell(cache, rowOffset, column, cache.columns, script)) break
-
-            val currentAttr = cache.attrWords[index]
-            val currentExtraAttr = cache.extraAttrWords[index]
-            val currentHyperlinkId = hyperlinkIds[index]
-            val currentHovered =
-                isHoveredHyperlink(
-                    currentHyperlinkId,
-                    row,
-                    column,
-                    hoveredHyperlinkId,
-                    hoveredHyperlinkStartRow,
-                    hoveredHyperlinkStartColumn,
-                    hoveredHyperlinkEndRow,
-                    hoveredHyperlinkEndColumn,
-                )
-            val currentForeground =
-                effectiveForeground(
-                    palette = palette,
-                    attr = currentAttr,
-                    codePoint = cache.codeWords[index],
-                    hovered = currentHovered,
-                    hyperlinkActivationHover = hyperlinkActivationHover,
-                    hyperlinkActivationForeground = hyperlinkActivationForeground,
-                )
-            if (
-                isBlinkHidden(currentAttr, textBlinkVisible) ||
-                currentForeground != foreground ||
-                terminalFontStyle(currentAttr) != fontStyle ||
-                decorationKey(currentAttr, currentExtraAttr) != decoration ||
-                currentHyperlinkId != hyperlinkId
-            ) {
-                break
-            }
-
-            column++
-        }
-        return column
-    }
-
-    private fun isComplexShapingRunContinuation(
-        cache: TerminalRenderCache,
-        rowOffset: Int,
-        column: Int,
-    ): Boolean {
-        val index = rowOffset + column
-        if (isComplexShapingCell(cache, index)) return true
-        if (isAsciiSpaceCell(cache.flags[index], cache.codeWords[index])) {
-            val nextColumn = column + 1
-            return nextColumn < cache.columns && isComplexShapingCell(cache, rowOffset + nextColumn)
-        }
-        return false
-    }
-
-    private fun paintShapedLogicalSegment(
+    /** Paints a compatible span in bounded windows and returns its first unpainted logical column. */
+    fun paintRun(
         g: Graphics2D,
         cache: TerminalRenderCache,
         palette: TerminalColorPalette,
         metrics: SwingMetrics,
         row: Int,
         startColumn: Int,
-        endColumn: Int,
-        visualStartColumn: Int,
-        baselineY: Int,
+        runLimit: Int,
         fontRenderContext: FontRenderContext,
-        textBlinkVisible: Boolean,
-        hyperlinkIds: IntArray,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ) {
+        bidi: TerminalBidiLayout.Row?,
+    ): Int {
         val rowOffset = cache.rowOffset(row)
-        val index = rowOffset + startColumn
-        val attr = cache.attrWords[index]
-        if (isBlinkHidden(attr, textBlinkVisible)) return
-
-        val extraAttr = cache.extraAttrWords[index]
-        val hyperlinkId = hyperlinkIds[index]
-        val hovered =
-            isHoveredHyperlink(
-                hyperlinkId,
-                row,
-                startColumn,
-                hoveredHyperlinkId,
-                hoveredHyperlinkStartRow,
-                hoveredHyperlinkStartColumn,
-                hoveredHyperlinkEndRow,
-                hoveredHyperlinkEndColumn,
-            )
-        val foreground =
-            effectiveForeground(
-                palette = palette,
-                attr = attr,
-                codePoint = cache.codeWords[index],
-                hovered = hovered,
-                hyperlinkActivationHover = hyperlinkActivationHover,
-                hyperlinkActivationForeground = hyperlinkActivationForeground,
-            )
-        val fontStyle = terminalFontStyle(attr)
-        val cellPixelWidth = metrics.cellWidth * (endColumn - startColumn)
-        val x = visualStartColumn * metrics.cellWidth
-        val length = fillSegmentCodepoints(cache, row, startColumn, endColumn)
-        if (length > 0) {
-            g.font = fontCache.font(fontStyle)
-            g.color = colorCache.color(foreground)
-            val oldClip = g.clip
-            try {
-                g.clipRect(x, row * metrics.cellHeight, cellPixelWidth, metrics.cellHeight)
-                val layout =
-                    complexTextLayouts.scriptRunLayout(
-                        segmentCodepoints,
-                        0,
-                        length,
-                        fontStyle,
-                        fontRenderContext,
-                        fontCache,
+        val rtl = bidi?.isRtl(startColumn) == true
+        val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
+        forEachSegment(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext) {
+                shapedRun,
+                windowStart,
+                windowEnd,
+                paintStart,
+                paintEnd,
+            ->
+            val runVisualStart = visualStart(cache, rowOffset, windowStart, windowEnd, bidi)
+            var column = paintStart
+            while (column < paintEnd) {
+                runStyle.begin(cache, palette, rowOffset, column)
+                var styleLimit = minOf(paintEnd, column + cellSpan(cache.flags[rowOffset + column]))
+                while (styleLimit < paintEnd && runStyle.matches(cache, palette, rowOffset, styleLimit)) {
+                    styleLimit += minOf(cellSpan(cache.flags[rowOffset + styleLimit]), paintEnd - styleLimit)
+                }
+                if (!runStyle.textHidden) {
+                    val styleVisualStart = visualStart(cache, rowOffset, column, styleLimit, bidi)
+                    drawGlyphVector(
+                        g,
+                        shapedRun,
+                        metrics,
+                        row,
+                        runVisualStart,
+                        styleVisualStart,
+                        styleLimit - column,
+                        runStyle.foreground,
                     )
-                drawFittedLayout(g, layout, x.toFloat(), baselineY.toFloat(), x + cellPixelWidth)
-            } finally {
-                g.clip = oldClip
+                    decorationPainter.paintTextRun(
+                        g,
+                        palette,
+                        runStyle,
+                        styleVisualStart,
+                        styleVisualStart + styleLimit - column,
+                        row,
+                        metrics,
+                    )
+                }
+                column = styleLimit
             }
         }
-
-        decorationPainter.paint(
-            g = g,
-            palette = palette,
-            attr = attr,
-            extraAttr = extraAttr,
-            foreground = foreground,
-            startColumn = visualStartColumn,
-            endColumn = visualStartColumn + endColumn - startColumn,
-            row = row,
-            metrics = metrics,
-        )
-        paintHyperlinkDecoration(
-            g = g,
-            hyperlinkId = hyperlinkId,
-            hovered = hovered,
-            color = foreground,
-            startColumn = visualStartColumn,
-            endColumn = visualStartColumn + endColumn - startColumn,
-            row = row,
-            metrics = metrics,
-        )
+        return endColumn
     }
 
-    private fun rowContainsStrongRtl(
+    /**
+     * Repaints the positioned contextual span containing [column], under the caller's cursor clip.
+     * Returns false when that cell belongs to the ordinary ASCII or specialized-cell path.
+     */
+    fun paintCellForeground(
+        g: Graphics2D,
         cache: TerminalRenderCache,
+        metrics: SwingMetrics,
+        column: Int,
         row: Int,
+        foreground: Int,
+        fontRenderContext: FontRenderContext,
+        bidi: TerminalBidiLayout.Row?,
     ): Boolean {
         val rowOffset = cache.rowOffset(row)
-        var column = 0
-        while (column < cache.columns) {
-            val index = rowOffset + column
-            val flags = cache.flags[index]
-            if (hasDrawableText(flags)) {
-                if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                    val clusterRef = cache.clusterRefs[index]
-                    if (clusterRef != 0L) {
-                        val offset = cache.clusterOffset(clusterRef)
-                        val end = offset + cache.clusterLength(clusterRef)
-                        var clusterIndex = offset
-                        while (clusterIndex < end) {
-                            if (isStrongRtl(cache.clusterCodepoints[clusterIndex])) return true
-                            clusterIndex++
+        var startColumn = 0
+        while (startColumn <= column) {
+            val runLimit = bidi?.runLimit(startColumn) ?: cache.columns
+            if (runLimit <= column) {
+                startColumn = runLimit
+                continue
+            }
+            val rtl = bidi?.isRtl(startColumn) == true
+            while (startColumn <= column) {
+                val index = rowOffset + startColumn
+                if (!isShapingCell(cache, index, rtl)) {
+                    startColumn += minOf(cellSpan(cache.flags[index]), runLimit - startColumn)
+                    continue
+                }
+                val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
+                if (column < endColumn) {
+                    forEachSegment(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext) {
+                            shapedRun,
+                            windowStart,
+                            windowEnd,
+                            paintStart,
+                            paintEnd,
+                        ->
+                        if (column in paintStart until paintEnd) {
+                            g.color = colorCache.color(foreground)
+                            val runVisualStart = visualStart(cache, rowOffset, windowStart, windowEnd, bidi)
+                            val cellVisualStart = bidi?.visualColumn(column) ?: column
+                            val clipStart = (cellVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
+                            val span = minOf(cellSpan(cache.flags[rowOffset + column]), cache.columns - column)
+                            shapedRun.draw(
+                                g,
+                                (runVisualStart * metrics.cellWidth).toFloat(),
+                                (row * metrics.cellHeight + metrics.baseline).toFloat(),
+                                clipStart,
+                                clipStart + span * metrics.cellWidth,
+                            )
+                            return true
                         }
                     }
-                } else if (isStrongRtl(cache.codeWords[index])) {
-                    return true
                 }
+                startColumn = endColumn
             }
-            column++
         }
         return false
     }
 
-    private fun ensureBidiRowCache(cache: TerminalRenderCache) {
-        if (bidiRows.size == cache.rows && cachedColumns == cache.columns) return
-
-        bidiRows = arrayOfNulls(cache.rows)
-        rowGenerations = LongArray(cache.rows) { INVALID_GENERATION }
-        rowLineIds = LongArray(cache.rows)
-        rowHasStrongRtl = BooleanArray(cache.rows)
-        cachedColumns = cache.columns
+    private fun runEnd(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        startColumn: Int,
+        runLimit: Int,
+        rtl: Boolean,
+    ): Int {
+        val fontStyle = terminalFontStyle(cache.attrWords[rowOffset + startColumn])
+        var script = COMMON_SCRIPT
+        var column = startColumn
+        while (column < runLimit) {
+            val index = rowOffset + column
+            if (!isShapingCell(cache, index, rtl) && !isShapingSpace(cache, rowOffset, column, runLimit, rtl)) break
+            if (terminalFontStyle(cache.attrWords[index]) != fontStyle) break
+            val currentScript = cellScript(cache, index)
+            if (currentScript != COMMON_SCRIPT && script != COMMON_SCRIPT && currentScript != script) break
+            if (currentScript != COMMON_SCRIPT) script = currentScript
+            column += minOf(cellSpan(cache.flags[index]), runLimit - column)
+        }
+        return column
     }
 
-    private fun fillBidiRowChars(
+    /**
+     * Owns segmentation for both row painting and cursor repaint. Withhold the last shaped
+     * cluster as lookahead and retain the preceding consumed cluster as lookbehind. Glyph
+     * ownership, rather than an arbitrary cell count, keeps marks and ligatures together.
+     * If a cluster occupies the window's entire budget, consume that window; if lookbehind
+     * prevents admitting new text, drop it. These bounded fallbacks always make progress.
+     */
+    private inline fun forEachSegment(
         cache: TerminalRenderCache,
-        row: Int,
+        metrics: SwingMetrics,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+        rtl: Boolean,
+        fontRenderContext: FontRenderContext,
+        paint: (TerminalShapedGlyphVectorCache.Run, Int, Int, Int, Int) -> Unit,
     ) {
-        val rowOffset = cache.rowOffset(row)
-        var column = 0
-        while (column < cache.columns) {
-            val index = rowOffset + column
-            rowChars[column] = bidiClassChar(cache, index)
-            column++
+        var windowStart = startColumn
+        var previousWindowEnd = startColumn
+        var paintStart = startColumn
+        while (paintStart < endColumn) {
+            var windowEnd = boundedWindowEnd(cache, rowOffset, windowStart, endColumn)
+            if (windowEnd <= previousWindowEnd) {
+                windowStart = paintStart
+                windowEnd = boundedWindowEnd(cache, rowOffset, windowStart, endColumn)
+            }
+            check(windowEnd > paintStart) { "A shaping window must admit an unpainted terminal cell" }
+            val shapedRun = positionedRun(cache, metrics, rowOffset, windowStart, windowEnd, rtl, fontRenderContext)
+            val lastClusterStart = windowStart + shapedRun.lastClusterStart
+            val paintEnd = if (windowEnd < endColumn && lastClusterStart > paintStart) lastClusterStart else windowEnd
+            paint(shapedRun, windowStart, windowEnd, paintStart, paintEnd)
+            if (paintEnd == endColumn) return
+            windowStart += if (paintEnd == windowEnd) shapedRun.lastClusterStart else shapedRun.previousClusterStart
+            previousWindowEnd = windowEnd
+            paintStart = paintEnd
         }
     }
 
-    private fun bidiClassChar(
+    private fun boundedWindowEnd(
         cache: TerminalRenderCache,
-        index: Int,
-    ): Char {
-        val flags = cache.flags[index]
-        if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return ' '
-        val codePoint =
-            if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                val clusterRef = cache.clusterRefs[index]
-                if (clusterRef == 0L) {
-                    SPACE_CODE_POINT
-                } else {
-                    cache.clusterCodepoints[cache.clusterOffset(clusterRef)]
-                }
-            } else {
-                cache.codeWords[index]
-            }
-        return if (codePoint in 0..0xffff) codePoint.toChar() else REPLACEMENT_CHAR
-    }
-
-    private fun fillSegmentCodepoints(
-        cache: TerminalRenderCache,
-        row: Int,
+        rowOffset: Int,
         startColumn: Int,
         endColumn: Int,
     ): Int {
-        ensureSegmentCodepointCapacity((endColumn - startColumn) * MAX_CODEPOINTS_PER_CELL)
-        val rowOffset = cache.rowOffset(row)
+        var codepoints = 0
+        var column = startColumn
+        while (column < endColumn) {
+            val index = rowOffset + column
+            val ref = cache.clusterRefs[index]
+            val length = if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) cache.clusterLength(ref) else 1
+            if (length > MAX_RUN_CODEPOINTS - codepoints) break
+            codepoints += length
+            column += minOf(cellSpan(cache.flags[index]), endColumn - column)
+        }
+        return column
+    }
+
+    private fun isShapingSpace(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        column: Int,
+        runLimit: Int,
+        rtl: Boolean,
+    ): Boolean =
+        cache.flags[rowOffset + column] == TerminalRenderCellFlags.CODEPOINT &&
+            cache.codeWords[rowOffset + column] == SPACE_CODE_POINT &&
+            column + 1 < runLimit &&
+            isShapingCell(cache, rowOffset + column + 1, rtl)
+
+    private fun positionedRun(
+        cache: TerminalRenderCache,
+        metrics: SwingMetrics,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+        rtl: Boolean,
+        fontRenderContext: FontRenderContext,
+    ): TerminalShapedGlyphVectorCache.Run {
+        val length = fillChars(cache, rowOffset, startColumn, endColumn)
+        return glyphVectors.run(
+            chars = chars,
+            length = length,
+            charColumns = charColumns,
+            columns = endColumn - startColumn,
+            style = terminalFontStyle(cache.attrWords[rowOffset + startColumn]),
+            cellWidth = metrics.cellWidth,
+            fontCache = fontCache,
+            fontRenderContext = fontRenderContext,
+            rtl = rtl,
+        )
+    }
+
+    private fun drawGlyphVector(
+        g: Graphics2D,
+        shapedRun: TerminalShapedGlyphVectorCache.Run,
+        metrics: SwingMetrics,
+        row: Int,
+        runVisualStart: Int,
+        styleVisualStart: Int,
+        styleColumns: Int,
+        foreground: Int,
+    ) {
+        val oldClip = g.clip
+        try {
+            g.clipRect(styleVisualStart * metrics.cellWidth, row * metrics.cellHeight, styleColumns * metrics.cellWidth, metrics.cellHeight)
+            g.color = colorCache.color(foreground)
+            val clipStart = (styleVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
+            shapedRun.draw(
+                g,
+                (runVisualStart * metrics.cellWidth).toFloat(),
+                (row * metrics.cellHeight + metrics.baseline).toFloat(),
+                clipStart,
+                clipStart + styleColumns * metrics.cellWidth,
+            )
+        } finally {
+            g.clip = oldClip
+        }
+    }
+
+    private fun fillChars(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+    ): Int {
         var length = 0
         var column = startColumn
         while (column < endColumn) {
             val index = rowOffset + column
             val flags = cache.flags[index]
-            if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) {
-                segmentCodepoints[length++] = SPACE_CODE_POINT
-            } else if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-                val clusterRef = cache.clusterRefs[index]
-                if (clusterRef == 0L) {
-                    segmentCodepoints[length++] = SPACE_CODE_POINT
-                } else {
-                    val offset = cache.clusterOffset(clusterRef)
-                    val clusterLength = cache.clusterLength(clusterRef)
-                    ensureSegmentCodepointCapacity(length + clusterLength)
-                    System.arraycopy(cache.clusterCodepoints, offset, segmentCodepoints, length, clusterLength)
-                    length += clusterLength
-                }
+            val ref = cache.clusterRefs[index]
+            if (flags and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) {
+                var cp = cache.clusterOffset(ref)
+                val end = cp + cache.clusterLength(ref)
+                while (cp < end) length = appendCodePoint(cache.clusterCodepoints[cp++], column - startColumn, length)
             } else {
-                segmentCodepoints[length++] = cache.codeWords[index]
+                length = appendCodePoint(cache.codeWords[index], column - startColumn, length)
             }
-            column++
+            column += minOf(cellSpan(flags), endColumn - column)
         }
         return length
     }
 
-    private fun scriptKeyForSegment(
+    private fun appendCodePoint(
+        codePoint: Int,
+        column: Int,
+        offset: Int,
+    ): Int {
+        if (offset + 2 > chars.size) {
+            val capacity = minOf(TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH, chars.size * 2)
+            chars = chars.copyOf(capacity)
+            charColumns = charColumns.copyOf(capacity)
+        }
+        val safeCodePoint = if (Character.isValidCodePoint(codePoint) && codePoint !in 0xD800..0xDFFF) codePoint else 0xFFFD
+        val charCount = Character.toChars(safeCodePoint, chars, offset)
+        charColumns[offset] = column
+        if (charCount == 2) charColumns[offset + 1] = column
+        return offset + charCount
+    }
+
+    private fun visualStart(
         cache: TerminalRenderCache,
         rowOffset: Int,
         startColumn: Int,
-        limitColumn: Int,
+        endColumn: Int,
+        bidi: TerminalBidiLayout.Row?,
     ): Int {
-        var column = startColumn
-        while (column < limitColumn) {
-            val script = cellScript(cache, rowOffset + column)
-            if (script != COMMON_SCRIPT) return script
-            column++
-        }
-        return COMMON_SCRIPT
-    }
-
-    private fun isCompatibleScriptCell(
-        cache: TerminalRenderCache,
-        rowOffset: Int,
-        column: Int,
-        limitColumn: Int,
-        script: Int,
-    ): Boolean {
-        val currentScript = cellScript(cache, rowOffset + column)
-        if (currentScript == COMMON_SCRIPT || currentScript == script) return true
-        if (script != COMMON_SCRIPT) return false
-        return currentScript == scriptKeyForSegment(cache, rowOffset, column, limitColumn)
+        if (bidi == null) return startColumn
+        val lastColumn = endColumn - 1
+        val lastOwner = visualCellRangeStart(cache.flags[rowOffset + lastColumn], lastColumn)
+        return minOf(bidi.visualColumn(startColumn), bidi.visualColumn(lastOwner))
     }
 
     private fun cellScript(
         cache: TerminalRenderCache,
         index: Int,
     ): Int {
-        val flags = cache.flags[index]
-        if (!hasDrawableText(flags) || flags and TerminalRenderCellFlags.WIDE_TRAILING != 0) return COMMON_SCRIPT
-        if (flags and TerminalRenderCellFlags.CLUSTER != 0) {
-            val clusterRef = cache.clusterRefs[index]
-            if (clusterRef == 0L) return COMMON_SCRIPT
-            val offset = cache.clusterOffset(clusterRef)
-            val end = offset + cache.clusterLength(clusterRef)
-            var clusterIndex = offset
-            while (clusterIndex < end) {
-                val script = codePointScript(cache.clusterCodepoints[clusterIndex])
+        if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0) {
+            val ref = cache.clusterRefs[index]
+            if (ref == 0L) return COMMON_SCRIPT
+            var cp = cache.clusterOffset(ref)
+            val end = cp + cache.clusterLength(ref)
+            while (cp < end) {
+                val script = codePointScript(cache.clusterCodepoints[cp++])
                 if (script != COMMON_SCRIPT) return script
-                clusterIndex++
             }
             return COMMON_SCRIPT
         }
         return codePointScript(cache.codeWords[index])
     }
 
-    private fun ensureRowCharCapacity(columns: Int) {
-        if (rowChars.size >= columns) return
-        var capacity = rowChars.size
-        while (capacity < columns) {
-            capacity *= 2
-        }
-        rowChars = rowChars.copyOf(capacity)
-    }
-
-    private fun ensureSegmentCodepointCapacity(required: Int) {
-        if (segmentCodepoints.size >= required) return
-        var capacity = segmentCodepoints.size
-        while (capacity < required) {
-            capacity *= 2
-        }
-        segmentCodepoints = segmentCodepoints.copyOf(capacity)
-    }
-
-    private fun isAsciiSpaceCell(
-        flags: Int,
-        codeWord: Int,
-    ): Boolean = flags == TerminalRenderCellFlags.CODEPOINT && codeWord == SPACE_CODE_POINT
-
-    private fun isHoveredHyperlink(
-        hyperlinkId: Int,
-        row: Int,
-        column: Int,
-        hoveredHyperlinkId: Int,
-        hoveredHyperlinkStartRow: Int,
-        hoveredHyperlinkStartColumn: Int,
-        hoveredHyperlinkEndRow: Int,
-        hoveredHyperlinkEndColumn: Int,
-    ): Boolean =
-        hyperlinkId != NO_HYPERLINK_ID &&
-            hyperlinkId == hoveredHyperlinkId &&
-            row >= hoveredHyperlinkStartRow &&
-            row <= hoveredHyperlinkEndRow &&
-            (row > hoveredHyperlinkStartRow || column >= hoveredHyperlinkStartColumn) &&
-            (row < hoveredHyperlinkEndRow || column < hoveredHyperlinkEndColumn)
-
-    private fun effectiveForeground(
-        palette: TerminalColorPalette,
-        attr: Long,
-        codePoint: Int = 0,
-        hovered: Boolean,
-        hyperlinkActivationHover: Boolean,
-        hyperlinkActivationForeground: Int,
-    ): Int =
-        if (hovered && hyperlinkActivationHover) {
-            hyperlinkActivationForeground
-        } else {
-            SwingColors.foreground(palette, attr, codePoint)
-        }
-
-    private fun isBlinkHidden(
-        attr: Long,
-        textBlinkVisible: Boolean,
-    ): Boolean = !textBlinkVisible && TerminalRenderAttrs.isBlink(attr)
-
-    private fun paintHyperlinkDecoration(
-        g: Graphics2D,
-        hyperlinkId: Int,
-        hovered: Boolean,
-        color: Int,
-        startColumn: Int,
-        endColumn: Int,
-        row: Int,
-        metrics: SwingMetrics,
-    ) {
-        if (hyperlinkId == NO_HYPERLINK_ID) return
-        decorationPainter.paintHyperlink(
-            g = g,
-            color = color,
-            startColumn = startColumn,
-            endColumn = endColumn,
-            row = row,
-            metrics = metrics,
-            hovered = hovered,
-        )
-    }
-
-    private fun drawFittedLayout(
-        g: Graphics2D,
-        layout: TextLayout,
-        x: Float,
-        baselineY: Float,
-        spanEndX: Int,
-    ) {
-        val available = spanEndX - x
-        val advance = layout.advance
-        if (available <= 0f || advance <= 0f) return
-        if (advance <= available) {
-            layout.draw(g, x, baselineY)
-            return
-        }
-
-        val oldTransform = g.transform
-        try {
-            val scaleX = available / advance
-            g.translate(x.toDouble(), 0.0)
-            g.scale(scaleX.toDouble(), 1.0)
-            layout.draw(g, 0f, baselineY)
-        } finally {
-            g.transform = oldTransform
-        }
-    }
-
-    private fun decorationKey(
-        attr: Long,
-        extraAttr: Long,
-    ): Long =
-        TerminalRenderAttrs.underlineStyle(attr).toLong() or
-            (if (TerminalRenderAttrs.isStrikethrough(attr)) STRIKETHROUGH_KEY else 0L) or
-            (extraAttr shl EXTRA_ATTR_KEY_SHIFT)
-
     private companion object {
         private const val INITIAL_TEXT_RUN_CAPACITY = 256
-        private const val STRIKETHROUGH_KEY = 1L shl 8
-        private const val EXTRA_ATTR_KEY_SHIFT = 9
-        private const val NO_HYPERLINK_ID = 0
+        private const val MAX_RUN_CODEPOINTS = TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH / 2
         private const val SPACE_CODE_POINT = 0x20
-        private const val MAX_CODEPOINTS_PER_CELL = 4
-        private const val REPLACEMENT_CHAR = '\uFFFD'
-        private const val INVALID_GENERATION = Long.MIN_VALUE
         private const val COMMON_SCRIPT = 0
 
-        @JvmStatic
         private fun codePointScript(codePoint: Int): Int =
-            when (val script = Character.UnicodeScript.of(codePoint)) {
-                Character.UnicodeScript.COMMON,
-                Character.UnicodeScript.INHERITED,
-                Character.UnicodeScript.UNKNOWN,
-                -> COMMON_SCRIPT
+            if (!Character.isValidCodePoint(codePoint)) {
+                COMMON_SCRIPT
+            } else {
+                when (val script = Character.UnicodeScript.of(codePoint)) {
+                    Character.UnicodeScript.COMMON,
+                    Character.UnicodeScript.INHERITED,
+                    Character.UnicodeScript.UNKNOWN,
+                    -> COMMON_SCRIPT
 
-                else -> script.ordinal + 1
+                    else -> script.ordinal + 1
+                }
             }
 
-        @JvmStatic
-        private fun isStrongRtl(codePoint: Int): Boolean =
-            when (Character.getDirectionality(codePoint)) {
-                Character.DIRECTIONALITY_RIGHT_TO_LEFT,
-                Character.DIRECTIONALITY_RIGHT_TO_LEFT_ARABIC,
-                -> true
-                else -> false
-            }
-
-        @JvmStatic
         private fun isComplexShapingCodePoint(codePoint: Int): Boolean =
             codePoint in 0x0900..0x0DFF ||
                 codePoint in 0x0E00..0x0EFF ||
                 codePoint in 0x1200..0x139F ||
-                // Ethiopic & Supplement
                 codePoint in 0x2D80..0x2DDF ||
-                // Ethiopic Extended
                 codePoint in 0xAB00..0xAB2F ||
-                // Ethiopic Extended-A
                 codePoint in 0x1780..0x17FF ||
                 codePoint in 0x19E0..0x19FF ||
                 codePoint in 0x1A20..0x1AAF ||

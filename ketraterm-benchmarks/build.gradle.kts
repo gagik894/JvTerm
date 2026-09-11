@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+import org.gradle.api.artifacts.component.ProjectComponentIdentifier
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     kotlin("jvm")
     id("me.champeau.jmh") version "0.7.3"
@@ -41,6 +44,18 @@ dependencies {
 
     implementation("org.openjdk.jmh:jmh-core:1.37")
     annotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
+}
+
+// Benchmark internal helpers without widening the Swing production API.
+tasks.named<KotlinCompile>("compileJmhKotlin") {
+    friendPaths.from(
+        configurations.named("jmhCompileClasspath").map { classpath ->
+            classpath.incoming
+                .artifactView {
+                    componentFilter { it is ProjectComponentIdentifier && it.projectPath == ":ketraterm-ui-swing" }
+                }.files
+        },
+    )
 }
 
 jmh {

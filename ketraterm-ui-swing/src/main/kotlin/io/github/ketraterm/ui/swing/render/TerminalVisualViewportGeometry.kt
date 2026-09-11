@@ -21,7 +21,7 @@ import kotlin.math.ceil
 import kotlin.math.floor
 
 /**
- * EDT-owned fixed-row pixel geometry for the current Swing render-cache viewport.
+ * EDT-owned viewport geometry with fixed row pitch and shared bidi cell mapping.
  *
  * Terminal rows always have the same pitch as the PTY-visible grid:
  * `rowTop(row) = row * cellHeight`. Shell-integration prompt metadata is a
@@ -29,6 +29,9 @@ import kotlin.math.floor
  * hit testing, cursor geometry, mouse coordinates, or scrollback math.
  */
 internal class TerminalVisualViewportGeometry {
+    /** Cell permutation shared by rendering, pointer input and repaint planning. */
+    val bidiLayout = TerminalBidiLayout()
+
     var rowCount: Int = 0
         private set
     var cellHeight: Int = 0
@@ -87,6 +90,7 @@ internal class TerminalVisualViewportGeometry {
      * Clears retained row geometry.
      */
     fun reset() {
+        bidiLayout.reset()
         rowCount = 0
         cellHeight = 0
         visualHeight = 0
