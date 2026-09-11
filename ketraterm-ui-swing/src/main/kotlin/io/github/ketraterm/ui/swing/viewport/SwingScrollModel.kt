@@ -193,9 +193,7 @@ internal class SwingScrollModel {
     }
 
     /** Applies a clock tick and returns whether the precise visual position changed. */
-    fun advance(nowNanos: Long): Boolean {
-        return animation.isActive && applyOffset(animation.positionAt(nowNanos))
-    }
+    fun advance(nowNanos: Long): Boolean = animation.isActive && applyOffset(animation.positionAt(nowNanos))
 
     /** Settles an active animation on its destination and reports visual movement. */
     fun finish(): Boolean {
