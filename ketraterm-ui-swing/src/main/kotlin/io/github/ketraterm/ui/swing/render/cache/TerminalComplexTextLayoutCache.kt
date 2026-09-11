@@ -235,16 +235,13 @@ internal class TerminalComplexTextLayoutCache(
     }
 
     /**
-     * ARCHITECTURAL WARNING: MANUAL MONOMORPHIZATION
-     * * Do not attempt to DRY (Don't Repeat Yourself) this cache logic using
-     * generic base classes (e.g., `<T>`).
-     * * This terminal emulator relies on a strict zero-allocation render loop.
-     * Because the JVM uses Type Erasure, passing primitives (Int, Long) to a
-     * generic type parameter forces boxing (allocating `java.lang.Integer` on the heap).
-     * * To maintain 60FPS without Garbage Collection stutter, this hash map logic
-     * is manually duplicated to operate directly on contiguous primitive arrays
-     * (`IntArray`, `LongArray`). Suppress IDE duplication warnings and leave
-     * this math alone.
+     * Primitive-key LRU; [ClusterTextLayoutLru] instead compares primitive code-point slices.
+     * These specialized lookup paths avoid boxing keys or constructing lookup objects.
+     *
+     * LRU links and free-slot bookkeeping do not inherently require duplication. Share
+     * that bookkeeping only when it reduces complexity, preserves eviction and collision
+     * handling, and before/after measurements confirm no regression in warmed allocation
+     * or throughput. Primitive key storage alone does not justify duplicating all behavior.
      */
     @Suppress("DuplicatedCode")
     private class LongTextLayoutLru(
