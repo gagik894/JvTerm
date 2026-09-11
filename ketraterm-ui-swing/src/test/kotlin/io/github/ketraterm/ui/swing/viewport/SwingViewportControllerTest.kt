@@ -15,6 +15,7 @@
  */
 package io.github.ketraterm.ui.swing.viewport
 
+import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.TerminalViewportListener
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
@@ -22,8 +23,13 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import java.lang.management.ManagementFactory
+import java.util.concurrent.*
+import java.util.concurrent.atomic.AtomicBoolean
+import javax.swing.SwingUtilities
 
 class SwingViewportControllerTest {
     private val settings = SwingSettings(padding = SwingPadding(3, 5, 7, 11), shellIntegrationDecorationGutterWidth = 0)
@@ -235,6 +241,129 @@ class SwingViewportControllerTest {
             assertEquals(2.5, listener.lastState?.scrollbackOffset)
             assertEquals(3, listener.lastState?.renderOffset)
         }
+
+        @Test
+        fun `primitive callbacks expose the completed publication to workers while EDT is occupied`() {
+            Executors.newSingleThreadExecutor().use { worker ->
+                worker.submit {}.get(5, TimeUnit.SECONDS)
+                lateinit var controller: SwingViewportController
+                var pendingSnapshot: Future<TerminalViewportState>? = null
+                var callbackTimedOut = false
+                val listener =
+                    object : TerminalViewportListener {
+                        override fun viewportChanged(
+                            historySize: Int,
+                            scrollbackOffset: Double,
+                            renderOffset: Int,
+                            visibleRows: Int,
+                            requestedRows: Int,
+                        ) {
+                            val snapshot = worker.submit<TerminalViewportState> { controller.viewportStateSnapshot() }
+                            pendingSnapshot = snapshot
+                            try {
+                                snapshot.get(5, TimeUnit.SECONDS)
+                            } catch (_: TimeoutException) {
+                                // Let publication finish before asserting, so a failed implementation can release its reader.
+                                callbackTimedOut = true
+                            }
+                        }
+                    }
+                SwingUtilities.invokeAndWait {
+                    controller = SwingViewportController(listener) { _, _ -> }
+                    controller.setFractionalViewport(firstPublishedState)
+                    controller.publishFractionalViewport(firstPublishedState, notifyPrimitiveListener = true)
+                }
+                val first = requireNotNull(pendingSnapshot).get(5, TimeUnit.SECONDS)
+                assertFalse(callbackTimedOut, "a worker snapshot must complete while the EDT remains inside the callback")
+                assertEquals(firstPublishedState, first)
+
+                SwingUtilities.invokeAndWait {
+                    controller.setFractionalViewport(secondPublishedState)
+                    controller.publishFractionalViewport(secondPublishedState, notifyPrimitiveListener = true)
+                }
+                val second = requireNotNull(pendingSnapshot).get(5, TimeUnit.SECONDS)
+                assertFalse(callbackTimedOut)
+                assertEquals(secondPublishedState, second)
+                assertEquals(firstPublishedState, first, "earlier snapshots remain immutable after another publication")
+            }
+        }
+
+        @Test
+        fun `concurrent snapshots contain fields from exactly one publication`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            SwingUtilities.invokeAndWait {
+                controller.setFractionalViewport(firstPublishedState)
+                controller.publishFractionalViewport(firstPublishedState)
+            }
+            val reading = CountDownLatch(1)
+            val finished = AtomicBoolean(false)
+            Executors.newSingleThreadExecutor().use { worker ->
+                val reads =
+                    worker.submit<Int> {
+                        var count = 0
+                        do {
+                            val snapshot = controller.viewportStateSnapshot()
+                            check(snapshot == firstPublishedState || snapshot == secondPublishedState) {
+                                "snapshot combines different publications: $snapshot"
+                            }
+                            count++
+                            if (count == 1) reading.countDown()
+                        } while (!finished.get())
+                        count
+                    }
+                assertTrue(reading.await(5, TimeUnit.SECONDS))
+                try {
+                    SwingUtilities.invokeAndWait {
+                        repeat(100_000) { iteration ->
+                            val state = if (iteration and 1 == 0) secondPublishedState else firstPublishedState
+                            controller.setFractionalViewport(state)
+                            controller.publishFractionalViewport(state)
+                        }
+                    }
+                } finally {
+                    finished.set(true)
+                }
+                assertTrue(reads.get(5, TimeUnit.SECONDS) > 0)
+            }
+        }
+
+        @Test
+        fun `primitive snapshot publication allocates no memory after warmup`() {
+            val bean = ManagementFactory.getThreadMXBean()
+            assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
+            val allocationBean = bean as ThreadMXBean
+            assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+            SwingUtilities.invokeAndWait {
+                var callbackCount = 0
+                val listener =
+                    object : TerminalViewportListener {
+                        override fun viewportChanged(
+                            historySize: Int,
+                            scrollbackOffset: Double,
+                            renderOffset: Int,
+                            visibleRows: Int,
+                            requestedRows: Int,
+                        ) {
+                            callbackCount++
+                        }
+                    }
+                val controller = SwingViewportController(listener) { _, _ -> }
+                controller.setFractionalViewport(firstPublishedState)
+                val threadId = Thread.currentThread().threadId()
+                var minimum = Long.MAX_VALUE
+                repeat(10) { batch ->
+                    val before = allocationBean.getThreadAllocatedBytes(threadId)
+                    repeat(10_000) {
+                        controller.publishFractionalViewport(firstPublishedState, notifyPrimitiveListener = true)
+                    }
+                    val allocated = allocationBean.getThreadAllocatedBytes(threadId) - before
+                    if (batch >= 5) minimum = minOf(minimum, allocated)
+                }
+                assertEquals(0L, minimum)
+                assertEquals(100_000, callbackCount)
+                assertEquals(firstPublishedState, controller.viewportStateSnapshot())
+            }
+        }
     }
 
     @Nested
@@ -427,6 +556,53 @@ class SwingViewportControllerTest {
                 controller.scrollTo(offsetLines = Double.NaN, historySize = 10)
             }
         }
+    }
+
+    private val firstPublishedState =
+        TerminalViewportState(
+            historySize = 100,
+            scrollbackOffset = 12.5,
+            renderOffset = 13,
+            visibleRows = 24,
+            requestedRows = 26,
+            visualScrollOffsetPixels = 250.0,
+            visualScrollRangePixels = 2000,
+            viewportHeightPixels = 480,
+            contentHeightPixels = 500,
+            cellHeightPixels = 20,
+        )
+    private val secondPublishedState =
+        TerminalViewportState(
+            historySize = 200,
+            scrollbackOffset = 23.75,
+            renderOffset = 24,
+            visibleRows = 48,
+            requestedRows = 50,
+            visualScrollOffsetPixels = 712.5,
+            visualScrollRangePixels = 6000,
+            viewportHeightPixels = 1440,
+            contentHeightPixels = 1500,
+            cellHeightPixels = 30,
+        )
+
+    private fun SwingViewportController.setFractionalViewport(state: TerminalViewportState) {
+        updateCellHeight(state.cellHeightPixels)
+        scrollTo(state.scrollbackOffset, state.historySize)
+    }
+
+    private fun SwingViewportController.publishFractionalViewport(
+        state: TerminalViewportState,
+        notifyPrimitiveListener: Boolean = false,
+    ) {
+        publishViewportState(
+            historySize = state.historySize,
+            visibleRows = state.visibleRows,
+            renderRows = state.requestedRows - 1,
+            viewportHeightPixels = state.viewportHeightPixels,
+            contentHeightPixels = state.contentHeightPixels,
+            notifyListener = false,
+            notifyPrimitiveListener = notifyPrimitiveListener,
+        )
     }
 
     private class RecordingViewportListener : TerminalViewportListener {

@@ -687,7 +687,8 @@ class SwingTerminal
          *
          * This method may be called from any thread. EDT callers refresh the
          * snapshot from live component and render-cache state before reading it;
-         * off-EDT callers read the last EDT-published snapshot without blocking.
+         * off-EDT callers copy one complete EDT publication without dispatching
+         * to the EDT, retrying if publication overlaps the read.
          *
          * @return current scrollback viewport state.
          */
@@ -1005,7 +1006,10 @@ class SwingTerminal
                         palette = renderCache.palette,
                         componentWidth = width,
                         componentHeight = height,
-                        state = viewportController.viewportStateSnapshot(),
+                        historySize = viewportController.historySize,
+                        visualScrollOffsetPixels = viewportController.visualScrollOffsetPixels,
+                        visualScrollRangePixels = viewportController.visualScrollRangePixels,
+                        viewportHeightPixels = viewportController.viewportHeightPixels,
                     )
                 }
                 visualBellController.paint(g, width, height)

@@ -35,6 +35,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.CountDownLatch
@@ -356,6 +358,58 @@ class TerminalSessionTest {
         assertEquals(5, session.terminal.height)
         assertEquals(listOf(10 to 3, 20 to 5), connector.resizeCalls)
         session.close()
+    }
+
+    @ParameterizedTest
+    @CsvSource("false, 8, 3", "false, 8, 4", "true, 8, 3", "true, 8, 4")
+    fun `resize tolerates a stale primary anchor before alternate publication`(
+        usePairResult: Boolean,
+        columns: Int,
+        rows: Int,
+    ) = runTest {
+        val connector = MockConnector()
+        val terminal = TerminalBuffers.create(width = 8, height = 3, maxHistory = 16)
+        val session =
+            TerminalSession.create(
+                terminal,
+                connector,
+                workerDispatcher = StandardTestDispatcher(testScheduler),
+            )
+        session.start(columns = 8, rows = 3)
+        try {
+            connector.feedFromHost((0..6).joinToString("\r\n") { "row$it" }.ascii())
+            runCurrent()
+            val beforeResizeGeneration = session.renderGeneration.value
+            assertEquals(TerminalRenderBufferKind.PRIMARY, session.renderPublisher.current()?.activeBuffer)
+            assertEquals(4, session.renderPublisher.current()?.historySize)
+
+            connector.feedFromHost("\u001B[?1049h".ascii())
+            assertEquals(TerminalRenderBufferKind.PRIMARY, session.renderPublisher.current()?.activeBuffer)
+
+            if (usePairResult) {
+                assertEquals(0 to 0, session.resize(columns, rows, oldScrollbackOffset = 2))
+            } else {
+                assertEquals(
+                    TerminalViewportResizeResult(scrollbackOffset = 0, historySize = 0, discardedCount = 0L),
+                    session.resizeViewport(columns, rows, oldScrollbackOffset = 2),
+                )
+            }
+
+            assertEquals(columns, terminal.width)
+            assertEquals(rows, terminal.height)
+            assertEquals(listOf(8 to 3, columns to rows), connector.resizeCalls)
+            advanceTimeBy(TerminalSession.RENDER_PUBLICATION_INTERVAL_MS.milliseconds)
+            runCurrent()
+            assertTrue(session.renderGeneration.value > beforeResizeGeneration)
+            val published = requireNotNull(session.renderPublisher.current())
+            assertEquals(TerminalRenderBufferKind.ALTERNATE, published.activeBuffer)
+            assertEquals(columns, published.columns)
+            assertEquals(rows, published.rows)
+            assertEquals(0, published.scrollbackOffset)
+            assertEquals(0, published.historySize)
+        } finally {
+            session.close()
+        }
     }
 
     @Test
