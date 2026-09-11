@@ -24,8 +24,9 @@ import io.github.ketraterm.ui.swing.search.TerminalSearchViewportHighlights
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.EnumSource
+import org.junit.jupiter.params.provider.CsvSource
 import org.junit.jupiter.params.provider.ValueSource
+import java.awt.RenderingHints
 import java.awt.image.BufferedImage
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -51,15 +52,30 @@ class TerminalBidiRenderingTest {
     }
 
     @ParameterizedTest
-    @EnumSource(TerminalRenderCursorShape::class)
-    fun `cursor stays over its logical rtl cell`(shape: TerminalRenderCursorShape) {
-        val image = paint(cursor = TerminalRenderCursor(0, 0, true, false, shape, 1))
+    @CsvSource("BLOCK, false", "BLOCK, true", "UNDERLINE, false", "UNDERLINE, true", "BAR, false", "BAR, true")
+    fun `cursor stays over its logical rtl cell`(
+        shape: TerminalRenderCursorShape,
+        antialiased: Boolean,
+    ) {
+        val image =
+            paint(
+                cursor = TerminalRenderCursor(0, 0, true, false, shape, 1),
+                textAntialiasing =
+                    if (antialiased) RenderingHints.VALUE_TEXT_ANTIALIAS_ON else RenderingHints.VALUE_TEXT_ANTIALIAS_OFF,
+            )
         val x = 2 * metrics.cellWidth
         val y = if (shape == TerminalRenderCursorShape.UNDERLINE) metrics.cellHeight - 1 else 0
         assertEquals(settings.palette.cursorBackground, image.getRGB(x, y))
         assertEquals(TEST_BLUE, image.getRGB(0, y))
         if (shape == TerminalRenderCursorShape.BLOCK) {
-            assertTrue(image.containsColorInRange(settings.palette.cursorForeground, x, x + metrics.cellWidth))
+            // The opaque cursor fill replaces the row's text and underline before its glyph is repainted.
+            val containsCursorGlyph =
+                (0 until metrics.cellHeight).any { row ->
+                    (x until x + metrics.cellWidth).any { column ->
+                        image.getRGB(column, row) != settings.palette.cursorBackground
+                    }
+                }
+            assertTrue(containsCursorGlyph, "The block cursor must repaint visible glyph coverage inside its logical cell")
         }
     }
 
@@ -153,6 +169,7 @@ class TerminalBidiRenderingTest {
         cursor: TerminalRenderCursor = TerminalRenderCursor(0, 0, false, false, TerminalRenderCursorShape.BLOCK, 1),
         selection: CellSelection? = null,
         highlights: TerminalSearchViewportHighlights? = null,
+        textAntialiasing: Any = settings.textAntialiasing,
     ): BufferedImage {
         val cache =
             renderCache(
@@ -187,7 +204,7 @@ class TerminalBidiRenderingTest {
             GridPainter().paint(
                 g,
                 cache,
-                settings,
+                settings.copy(textAntialiasing = textAntialiasing),
                 metrics,
                 image.width,
                 image.height,

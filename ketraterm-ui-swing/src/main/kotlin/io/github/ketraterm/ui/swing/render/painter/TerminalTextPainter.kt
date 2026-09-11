@@ -28,6 +28,7 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import java.awt.Font
 import java.awt.Graphics2D
+import java.awt.Rectangle
 import java.awt.font.FontRenderContext
 import java.awt.font.TextLayout
 
@@ -47,6 +48,7 @@ internal class TerminalTextPainter(
     private val asciiDrawChars = TerminalAsciiDrawCharsCache()
     private val cellPrimitives = TerminalCellPrimitivePainter()
     private val textRun = TerminalTextRunBuffer(INITIAL_TEXT_RUN_CAPACITY)
+    private val asciiClipBounds = Rectangle()
     private val runStyle = TerminalTextRunStyle()
     private val shapedTextRuns =
         TerminalShapedTextRunPainter(
@@ -267,10 +269,31 @@ internal class TerminalTextPainter(
 
         if (runStyle.textHidden) return column
 
-        g.font = fontCache.font(runStyle.fontStyle)
-        g.color = colorCache.color(runStyle.foreground)
-        drawAsciiRun(g, metrics, visualStartColumn, baselineY, runStyle.fontStyle, fontRenderContext)
-        decorationPainter.paintTextRun(g, palette, runStyle, visualStartColumn, visualStartColumn + column - startColumn, row, metrics)
+        // Matching advances do not constrain glyph ink: italic or antialiased
+        // ASCII must respect the same paint-span boundaries as shaped text.
+        val x = visualStartColumn * metrics.cellWidth
+        val y = row * metrics.cellHeight
+        val width = (column - startColumn) * metrics.cellWidth
+        // getClipBounds leaves the supplied rectangle unchanged for a null clip.
+        val clip = asciiClipBounds
+        clip.setBounds(0, 0, -1, -1)
+        g.getClipBounds(clip)
+        val needsClip =
+            clip.width < 0 || clip.x < x || clip.y < y ||
+                clip.x.toLong() + clip.width > x.toLong() + width ||
+                clip.y.toLong() + clip.height > y.toLong() + metrics.cellHeight
+        // A caller's narrower clip already enforces the boundary, including
+        // nonrectangular clips. Avoid copying/intersecting Java2D clip state.
+        val oldClip = if (needsClip) g.clip else null
+        try {
+            if (needsClip) g.clipRect(x, y, width, metrics.cellHeight)
+            g.font = fontCache.font(runStyle.fontStyle)
+            g.color = colorCache.color(runStyle.foreground)
+            drawAsciiRun(g, metrics, visualStartColumn, baselineY, runStyle.fontStyle, fontRenderContext)
+            decorationPainter.paintTextRun(g, palette, runStyle, visualStartColumn, visualStartColumn + column - startColumn, row, metrics)
+        } finally {
+            if (needsClip) g.clip = oldClip
+        }
         return column
     }
 
