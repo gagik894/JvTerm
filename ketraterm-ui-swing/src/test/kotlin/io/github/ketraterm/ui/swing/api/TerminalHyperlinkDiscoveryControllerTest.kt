@@ -17,19 +17,189 @@ package io.github.ketraterm.ui.swing.api
 
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
+import io.github.ketraterm.ui.swing.render.painter.TerminalTextRunStyle
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
+import java.awt.Cursor
+import java.awt.event.MouseEvent
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.JButton
 import javax.swing.SwingUtilities
 import kotlin.coroutines.CoroutineContext
 
 class TerminalHyperlinkDiscoveryControllerTest {
+    @ParameterizedTest
+    @CsvSource("true, false", "false, false", "true, true", "false, true")
+    fun `frame carry keeps wrapped hover and activation intact without merging distinct links`(
+        stableLineIds: Boolean,
+        scroll: Boolean,
+    ) {
+        val cache = TerminalRenderCache(24, 4)
+        val rows = arrayOf("go https://example.com/ab", "cdefghijklmnopqrstuvwxyz", "012345 end")
+
+        fun frame(generation: Long): StaticTextFrame {
+            val shifted = scroll && generation > 1L
+            return StaticTextFrame(
+                frameGeneration = generation,
+                structureGeneration = if (shifted) 2L else 1L,
+                rowTexts = if (shifted) rows + "after" else arrayOf("before") + rows,
+                lineIds =
+                    when {
+                        !stableLineIds -> LongArray(4)
+                        shifted -> longArrayOf(2, 3, 4, 5)
+                        else -> longArrayOf(1, 2, 3, 4)
+                    },
+                wrappedRows =
+                    if (shifted) booleanArrayOf(true, true, false, false) else booleanArrayOf(false, true, true, false),
+            )
+        }
+        cache.accept(frame(1L))
+        val detectorCalls = AtomicInteger()
+        var opened = 0
+        val sharedAction =
+            SwingHyperlinkAction {
+                opened++
+                true
+            }
+        val repaintObserved = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { _, sink ->
+                    detectorCalls.incrementAndGet()
+                    sink.addHyperlink(1, 3, 54, sharedAction)
+                    sink.addHyperlink(1, 55, 58, sharedAction)
+                },
+                repaintObserved,
+            )
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        val repaints = ArrayList<CellSelection>()
+        val hoverHost =
+            object : TerminalHyperlinkHost {
+                override val renderCache = cache
+                override var cursor: Cursor = Cursor.getDefaultCursor()
+
+                override fun cellAt(
+                    x: Int,
+                    y: Int,
+                ): Long = (x.toLong() shl 32) or y.toLong()
+
+                override fun hyperlinkIdAt(
+                    row: Int,
+                    column: Int,
+                ): Int = controller.hyperlinkIdAt(row, column, cache)
+
+                override fun isHyperlinkResolvable(hyperlinkId: Int): Boolean =
+                    controller.isDiscoveredHyperlinkResolvable(hyperlinkId, cache)
+
+                override fun openHyperlink(hyperlinkId: Int): Boolean = controller.openDiscoveredHyperlink(hyperlinkId, cache)
+
+                override fun repaintHyperlinkSpan(
+                    startRow: Int,
+                    startColumn: Int,
+                    endRow: Int,
+                    endColumn: Int,
+                ) {
+                    repaints += CellSelection(startColumn, startRow, endColumn, endRow)
+                }
+            }
+        val hover = TerminalHyperlinkController(hoverHost)
+        val source = JButton()
+        val style = TerminalTextRunStyle()
+        val activationForeground = 0xFF4DA3FF.toInt()
+        try {
+            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            awaitRepaintAndDrainEdt(repaintObserved)
+            SwingUtilities.invokeAndWait {
+                repeat(3) { iteration ->
+                    cache.accept(frame(iteration + 2L))
+                    controller.scheduleForFrame()
+                    val ids = controller.hyperlinkIdsFor(cache)
+                    val firstRow = if (scroll) 0 else 1
+                    val offset = cache.rowOffset(firstRow)
+                    val linkId = ids[offset + 3]
+                    assertTrue(linkId < 0)
+                    for (index in 3 until 54) {
+                        assertEquals(linkId, ids[offset + index], "cell $index after carry $iteration")
+                    }
+                    assertEquals(0, ids[offset + 2])
+                    assertEquals(0, ids[offset + 54])
+                    val otherId = ids[offset + 55]
+                    assertTrue(otherId < 0)
+                    assertNotEquals(linkId, otherId, "Distinct matches may share one action")
+                    assertTrue(controller.openDiscoveredHyperlink(otherId, cache))
+                    assertEquals(1, detectorCalls.get())
+
+                    hover.clearHyperlinkHover()
+                    repaints.clear()
+                    val expectedSpan = CellSelection(3, firstRow, 6, firstRow + 2)
+                    for (row in firstRow..firstRow + 2) {
+                        hover.handleMouseMoved(MouseEvent(source, MouseEvent.MOUSE_MOVED, 0L, 0, 4, row, 0, false))
+                        assertEquals(linkId, hover.hoveredHyperlinkId)
+                        assertEquals(firstRow, hover.hoveredHyperlinkStartRow)
+                        assertEquals(3, hover.hoveredHyperlinkStartColumn)
+                        assertEquals(firstRow + 2, hover.hoveredHyperlinkEndRow)
+                        assertEquals(6, hover.hoveredHyperlinkEndColumn)
+                        val click =
+                            MouseEvent(
+                                source,
+                                MouseEvent.MOUSE_PRESSED,
+                                0L,
+                                MouseEvent.CTRL_DOWN_MASK,
+                                4,
+                                row,
+                                1,
+                                false,
+                                MouseEvent.BUTTON1,
+                            )
+                        assertTrue(hover.handleMousePressed(click))
+                        assertTrue(click.isConsumed)
+                    }
+                    assertEquals(
+                        listOf(expectedSpan),
+                        repaints,
+                        "Moving between segments must not repaint separate row spans",
+                    )
+                    hover.updateHyperlinkActivationHover(true)
+                    assertEquals(listOf(expectedSpan, expectedSpan), repaints)
+                    for (row in firstRow..firstRow + 2) {
+                        style.configureRow(
+                            row,
+                            true,
+                            ids,
+                            hover.hoveredHyperlinkId,
+                            hover.hoveredHyperlinkStartRow,
+                            hover.hoveredHyperlinkStartColumn,
+                            hover.hoveredHyperlinkEndRow,
+                            hover.hoveredHyperlinkEndColumn,
+                            hover.hyperlinkActivationHover,
+                            activationForeground,
+                        )
+                        for (column in 0 until cache.columns) {
+                            val index = cache.rowOffset(row) + column
+                            style.begin(cache, cache.palette, cache.rowOffset(row), column)
+                            assertEquals(ids[index] == linkId, style.hovered)
+                            val expectedForeground =
+                                if (ids[index] == linkId) activationForeground else cache.palette.defaultForeground
+                            assertEquals(expectedForeground, style.foreground)
+                        }
+                    }
+                }
+                assertEquals(12, opened, "Every carried segment and the separate match must retain its action")
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
     @Test
     fun `scheduled analysis publishes discovered url overlay after debounce`() {
         val cache = TerminalRenderCache(24, 1)

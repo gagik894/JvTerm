@@ -270,6 +270,7 @@ private class TerminalHyperlinkOverlay {
     private var hyperlinkIds: IntArray = IntArray(0)
     private var actions: Array<SwingHyperlinkAction> = emptyArray()
     private var rowEntries: Array<TerminalHyperlinkRowEntry?> = emptyArray()
+    private var carriedIds = IntArray(0)
 
     fun clear() {
         key = null
@@ -319,29 +320,34 @@ private class TerminalHyperlinkOverlay {
 
         var preservedIds: IntArray? = null
         val preservedActions = ArrayList<SwingHyperlinkAction>()
+        // Remap each detected link once, even when its cells occupy several row runs.
+        // Action identity cannot identify a link: detectors may reuse actions for distinct matches.
+        if (carriedIds.size < actions.size) carriedIds = IntArray(actions.size)
+        carriedIds.fill(NO_HYPERLINK_ID, 0, actions.size)
         var targetRow = 0
         while (targetRow < cache.rows) {
             val rowEntry = matchingRowEntry(cache, targetRow)
             if (rowEntry != null) {
                 val targetOffset = cache.rowOffset(targetRow)
                 for (run in rowEntry.runs) {
-                    val nextId = -(preservedActions.size + 1)
-                    var accepted = false
+                    val actionIndex = -run.hyperlinkId - 1
+                    var nextId = carriedIds[actionIndex]
                     var column = run.startColumn
                     val endColumn = minOf(run.endColumn, cache.columns)
                     while (column < endColumn) {
                         if (cache.hyperlinkIds[targetOffset + column] == NO_HYPERLINK_ID) {
+                            if (nextId == NO_HYPERLINK_ID) {
+                                nextId = -(preservedActions.size + 1)
+                                carriedIds[actionIndex] = nextId
+                                preservedActions += actions[actionIndex]
+                            }
                             val ids =
                                 preservedIds ?: cache.hyperlinkIds
                                     .copyOf(cache.rows * cache.columns)
                                     .also { preservedIds = it }
                             ids[targetOffset + column] = nextId
-                            accepted = true
                         }
                         column++
-                    }
-                    if (accepted) {
-                        preservedActions += run.action
                     }
                 }
             }
@@ -404,7 +410,7 @@ private class TerminalHyperlinkOverlay {
             val actionIndex = -hyperlinkId - 1
             if (actionIndex in candidate.actions.indices) {
                 val rowRuns = runs ?: ArrayList<TerminalHyperlinkRowRun>().also { runs = it }
-                rowRuns += TerminalHyperlinkRowRun(startColumn, column, candidate.actions[actionIndex])
+                rowRuns += TerminalHyperlinkRowRun(startColumn, column, hyperlinkId)
             }
         }
         return runs?.toTypedArray() ?: EMPTY_ROW_RUNS
@@ -504,7 +510,7 @@ private data class TerminalHyperlinkRowEntry(
 private data class TerminalHyperlinkRowRun(
     val startColumn: Int,
     val endColumn: Int,
-    val action: SwingHyperlinkAction,
+    val hyperlinkId: Int,
 )
 
 private const val EMPTY_ROW_FINGERPRINT = 0L
