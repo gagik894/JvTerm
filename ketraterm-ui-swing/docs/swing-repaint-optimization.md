@@ -72,13 +72,14 @@ reflows while the alternate buffer is active, but the alternate viewport has
 zero history and offset. Core returns that coherent pair; session captures it
 with the discard baseline before notifying the connector and publishing.
 
-Viewport snapshots copy a completed EDT publication. A version brackets the
-primitive stores, and a reader accepts its copy only if the version is unchanged
-and even. Every payload field is volatile, so those reads participate in the
-same synchronization order as the version checks. Calculations happen before
-publication starts; listener callbacks happen after it completes. This keeps
-animation publication allocation-free and lets off-EDT readers obtain a coherent
-immutable snapshot without dispatching to the EDT.
+Viewport snapshots copy a completed EDT publication under a short monitor shared
+with primitive field publication. The EDT is the sole writer and captures model
+fields before entering the monitor; listener callbacks happen after it is
+released. An explicit snapshot read constructs its immutable result while holding
+the same monitor, without dispatching to the EDT. Animation publication and EDT
+paint getters allocate no snapshot objects. A concurrent read can briefly delay
+publication, so the synchronized sections contain only primitive stores or
+snapshot construction, with no callbacks or event-queue work.
 
 Scrollbar painting reads the published primitive metrics on the EDT, avoiding
 an intermediate viewport snapshot. Its geometry storage and palette-derived

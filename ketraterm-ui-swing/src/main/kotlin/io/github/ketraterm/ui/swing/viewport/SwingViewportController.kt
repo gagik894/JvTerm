@@ -47,29 +47,19 @@ internal class SwingViewportController(
         }
     private val visibleGridSizeSnapshot = AtomicLong(packVisibleGridSize(1, 1))
 
-    // The EDT is the sole writer. All payload fields are volatile so their reads
-    // participate in the same synchronization order as the version reads.
-    @Volatile private var viewportVersion = 0L
-
-    @Volatile private var publishedHistorySize = 0
-
-    @Volatile private var publishedScrollbackOffset = 0.0
-
-    @Volatile private var publishedRenderOffset = 0
-
-    @Volatile private var publishedVisibleRows = 1
-
-    @Volatile private var publishedRequestedRows = 1
-
-    @Volatile private var publishedVisualOffsetPixels = 0.0
-
-    @Volatile private var publishedVisualRangePixels = 0
-
-    @Volatile private var publishedViewportHeightPixels = 0
-
-    @Volatile private var publishedContentHeightPixels = 0
-
-    @Volatile private var publishedCellHeightPixels = 1
+    // The EDT is the sole writer. Worker snapshots share this monitor with publication;
+    // EDT paint getters read directly because no other thread can modify these fields.
+    private val viewportSnapshotLock = Any()
+    private var publishedHistorySize = 0
+    private var publishedScrollbackOffset = 0.0
+    private var publishedRenderOffset = 0
+    private var publishedVisibleRows = 1
+    private var publishedRequestedRows = 1
+    private var publishedVisualOffsetPixels = 0.0
+    private var publishedVisualRangePixels = 0
+    private var publishedViewportHeightPixels = 0
+    private var publishedContentHeightPixels = 0
+    private var publishedCellHeightPixels = 1
 
     val requestedOffset: Int
         get() = scrollModel.requestedOffset
@@ -308,45 +298,25 @@ internal class SwingViewportController(
     }
 
     /**
-     * Copies one completed publication without dispatching to or locking the EDT.
-     * A concurrent publication retries the primitive reads; only the accepted
-     * result allocates. The writer cannot call user code while its version is odd.
+     * Copies one completed publication under the same short monitor used by its writer.
+     * Only an explicit snapshot request allocates the result. Neither snapshot copying
+     * nor publication dispatches to the EDT or invokes listeners while holding the monitor.
      */
-    fun viewportStateSnapshot(): TerminalViewportState {
-        while (true) {
-            val version = viewportVersion
-            if (version and 1L != 0L) {
-                Thread.onSpinWait()
-                continue
-            }
-            val historySize = publishedHistorySize
-            val scrollbackOffset = publishedScrollbackOffset
-            val renderOffset = publishedRenderOffset
-            val visibleRows = publishedVisibleRows
-            val requestedRows = publishedRequestedRows
-            val visualScrollOffsetPixels = publishedVisualOffsetPixels
-            val visualScrollRangePixels = publishedVisualRangePixels
-            val viewportHeightPixels = publishedViewportHeightPixels
-            val contentHeightPixels = publishedContentHeightPixels
-            val cellHeightPixels = publishedCellHeightPixels
-            if (version != viewportVersion) {
-                Thread.onSpinWait()
-                continue
-            }
-            return TerminalViewportState(
-                historySize = historySize,
-                scrollbackOffset = scrollbackOffset,
-                renderOffset = renderOffset,
-                visibleRows = visibleRows,
-                requestedRows = requestedRows,
-                visualScrollOffsetPixels = visualScrollOffsetPixels,
-                visualScrollRangePixels = visualScrollRangePixels,
-                viewportHeightPixels = viewportHeightPixels,
-                contentHeightPixels = contentHeightPixels,
-                cellHeightPixels = cellHeightPixels,
+    fun viewportStateSnapshot(): TerminalViewportState =
+        synchronized(viewportSnapshotLock) {
+            TerminalViewportState(
+                historySize = publishedHistorySize,
+                scrollbackOffset = publishedScrollbackOffset,
+                renderOffset = publishedRenderOffset,
+                visibleRows = publishedVisibleRows,
+                requestedRows = publishedRequestedRows,
+                visualScrollOffsetPixels = publishedVisualOffsetPixels,
+                visualScrollRangePixels = publishedVisualRangePixels,
+                viewportHeightPixels = publishedViewportHeightPixels,
+                contentHeightPixels = publishedContentHeightPixels,
+                cellHeightPixels = publishedCellHeightPixels,
             )
         }
-    }
 
     fun publishViewportState(
         historySize: Int,
@@ -364,18 +334,18 @@ internal class SwingViewportController(
         val visualScrollRangePixels = scrollModel.visualScrollRangePixels
         val cellHeightPixels = scrollModel.cellHeightPixels
 
-        viewportVersion++
-        publishedHistorySize = historySize
-        publishedScrollbackOffset = scrollbackOffset
-        publishedRenderOffset = renderOffset
-        publishedVisibleRows = visibleRows
-        publishedRequestedRows = requestedRows
-        publishedVisualOffsetPixels = visualScrollOffsetPixels
-        publishedVisualRangePixels = visualScrollRangePixels
-        publishedViewportHeightPixels = viewportHeightPixels
-        publishedContentHeightPixels = contentHeightPixels
-        publishedCellHeightPixels = cellHeightPixels
-        viewportVersion++
+        synchronized(viewportSnapshotLock) {
+            publishedHistorySize = historySize
+            publishedScrollbackOffset = scrollbackOffset
+            publishedRenderOffset = renderOffset
+            publishedVisibleRows = visibleRows
+            publishedRequestedRows = requestedRows
+            publishedVisualOffsetPixels = visualScrollOffsetPixels
+            publishedVisualRangePixels = visualScrollRangePixels
+            publishedViewportHeightPixels = viewportHeightPixels
+            publishedContentHeightPixels = contentHeightPixels
+            publishedCellHeightPixels = cellHeightPixels
+        }
         if (!notifyListener) {
             if (notifyPrimitiveListener) {
                 listener.viewportChanged(

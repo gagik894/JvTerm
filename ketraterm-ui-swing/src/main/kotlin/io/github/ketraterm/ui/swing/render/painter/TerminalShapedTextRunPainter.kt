@@ -33,7 +33,9 @@ import java.awt.font.FontRenderContext
  *
  * Font, script and direction delimit shaping spans. Foreground, decorations and visibility only
  * delimit paint spans: changing one cell's presentation must not reshape its neighbors. The block
- * cursor resolves the same bounded span and reuses its positioned glyph vector.
+ * cursor resolves the same bounded windows and reuses their positioned glyph vectors.
+ * Overlapping shaped clusters provide context across the size cap; only each window's
+ * owned interval is painted, and the next interval starts at its first unpainted cell.
  *
  * Primitive and native-emoji cells retain [TerminalTextPainter]'s shared cell dispatch. Reusable
  * UTF-16 and ownership arrays keep unchanged shaped-run lookups allocation-free.
@@ -79,10 +81,11 @@ internal class TerminalShapedTextRunPainter(
             return false
         }
         val codePoint = cache.codeWords[index]
-        return !(cellPrimitives.canPaint(codePoint) || platformEmojiPainter.usesEmojiPresentation(codePoint)) && (rtl || isComplexShapingCodePoint(codePoint))
+        return !(cellPrimitives.canPaint(codePoint) || platformEmojiPainter.usesEmojiPresentation(codePoint)) &&
+            (rtl || isComplexShapingCodePoint(codePoint))
     }
 
-    /** Paints one bounded contextual span and returns its next logical column. */
+    /** Paints a compatible span in bounded windows and returns its first unpainted logical column. */
     fun paintRun(
         g: Graphics2D,
         cache: TerminalRenderCache,
@@ -97,38 +100,45 @@ internal class TerminalShapedTextRunPainter(
         val rowOffset = cache.rowOffset(row)
         val rtl = bidi?.isRtl(startColumn) == true
         val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
-        val shapedRun = positionedRun(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext)
-        val runVisualStart = visualStart(cache, rowOffset, startColumn, endColumn, bidi)
-        var column = startColumn
-        while (column < endColumn) {
-            runStyle.begin(cache, palette, rowOffset, column)
-            var styleLimit = minOf(endColumn, column + cellSpan(cache.flags[rowOffset + column]))
-            while (styleLimit < endColumn && runStyle.matches(cache, palette, rowOffset, styleLimit)) {
-                styleLimit += minOf(cellSpan(cache.flags[rowOffset + styleLimit]), endColumn - styleLimit)
+        forEachSegment(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext) {
+                shapedRun,
+                windowStart,
+                windowEnd,
+                paintStart,
+                paintEnd,
+            ->
+            val runVisualStart = visualStart(cache, rowOffset, windowStart, windowEnd, bidi)
+            var column = paintStart
+            while (column < paintEnd) {
+                runStyle.begin(cache, palette, rowOffset, column)
+                var styleLimit = minOf(paintEnd, column + cellSpan(cache.flags[rowOffset + column]))
+                while (styleLimit < paintEnd && runStyle.matches(cache, palette, rowOffset, styleLimit)) {
+                    styleLimit += minOf(cellSpan(cache.flags[rowOffset + styleLimit]), paintEnd - styleLimit)
+                }
+                if (!runStyle.textHidden) {
+                    val styleVisualStart = visualStart(cache, rowOffset, column, styleLimit, bidi)
+                    drawGlyphVector(
+                        g,
+                        shapedRun,
+                        metrics,
+                        row,
+                        runVisualStart,
+                        styleVisualStart,
+                        styleLimit - column,
+                        runStyle.foreground,
+                    )
+                    decorationPainter.paintTextRun(
+                        g,
+                        palette,
+                        runStyle,
+                        styleVisualStart,
+                        styleVisualStart + styleLimit - column,
+                        row,
+                        metrics,
+                    )
+                }
+                column = styleLimit
             }
-            if (!runStyle.textHidden) {
-                val styleVisualStart = visualStart(cache, rowOffset, column, styleLimit, bidi)
-                drawGlyphVector(
-                    g,
-                    shapedRun,
-                    metrics,
-                    row,
-                    runVisualStart,
-                    styleVisualStart,
-                    styleLimit - column,
-                    runStyle.foreground,
-                )
-                decorationPainter.paintTextRun(
-                    g,
-                    palette,
-                    runStyle,
-                    styleVisualStart,
-                    styleVisualStart + styleLimit - column,
-                    row,
-                    metrics,
-                )
-            }
-            column = styleLimit
         }
         return endColumn
     }
@@ -164,20 +174,29 @@ internal class TerminalShapedTextRunPainter(
                 }
                 val endColumn = runEnd(cache, rowOffset, startColumn, runLimit, rtl)
                 if (column < endColumn) {
-                    val shapedRun = positionedRun(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext)
-                    g.color = colorCache.color(foreground)
-                    val runVisualStart = visualStart(cache, rowOffset, startColumn, endColumn, bidi)
-                    val cellVisualStart = bidi?.visualColumn(column) ?: column
-                    val clipStart = (cellVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
-                    val span = minOf(cellSpan(cache.flags[rowOffset + column]), cache.columns - column)
-                    shapedRun.draw(
-                        g,
-                        (runVisualStart * metrics.cellWidth).toFloat(),
-                        (row * metrics.cellHeight + metrics.baseline).toFloat(),
-                        clipStart,
-                        clipStart + span * metrics.cellWidth,
-                    )
-                    return true
+                    forEachSegment(cache, metrics, rowOffset, startColumn, endColumn, rtl, fontRenderContext) {
+                            shapedRun,
+                            windowStart,
+                            windowEnd,
+                            paintStart,
+                            paintEnd,
+                        ->
+                        if (column in paintStart until paintEnd) {
+                            g.color = colorCache.color(foreground)
+                            val runVisualStart = visualStart(cache, rowOffset, windowStart, windowEnd, bidi)
+                            val cellVisualStart = bidi?.visualColumn(column) ?: column
+                            val clipStart = (cellVisualStart - runVisualStart) * metrics.cellWidth.toFloat()
+                            val span = minOf(cellSpan(cache.flags[rowOffset + column]), cache.columns - column)
+                            shapedRun.draw(
+                                g,
+                                (runVisualStart * metrics.cellWidth).toFloat(),
+                                (row * metrics.cellHeight + metrics.baseline).toFloat(),
+                                clipStart,
+                                clipStart + span * metrics.cellWidth,
+                            )
+                            return true
+                        }
+                    }
                 }
                 startColumn = endColumn
             }
@@ -194,7 +213,6 @@ internal class TerminalShapedTextRunPainter(
     ): Int {
         val fontStyle = terminalFontStyle(cache.attrWords[rowOffset + startColumn])
         var script = COMMON_SCRIPT
-        var codepoints = 0
         var column = startColumn
         while (column < runLimit) {
             val index = rowOffset + column
@@ -202,12 +220,65 @@ internal class TerminalShapedTextRunPainter(
             if (terminalFontStyle(cache.attrWords[index]) != fontStyle) break
             val currentScript = cellScript(cache, index)
             if (currentScript != COMMON_SCRIPT && script != COMMON_SCRIPT && currentScript != script) break
-            val ref = cache.clusterRefs[index]
-            val length = if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) cache.clusterLength(ref) else 1
-            if (codepoints + length > MAX_RUN_CODEPOINTS) break
-            codepoints += length
             if (currentScript != COMMON_SCRIPT) script = currentScript
             column += minOf(cellSpan(cache.flags[index]), runLimit - column)
+        }
+        return column
+    }
+
+    /**
+     * Owns segmentation for both row painting and cursor repaint. Withhold the last shaped
+     * cluster as lookahead and retain the preceding consumed cluster as lookbehind. Glyph
+     * ownership, rather than an arbitrary cell count, keeps marks and ligatures together.
+     * If a cluster occupies the window's entire budget, consume that window; if lookbehind
+     * prevents admitting new text, drop it. These bounded fallbacks always make progress.
+     */
+    private inline fun forEachSegment(
+        cache: TerminalRenderCache,
+        metrics: SwingMetrics,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+        rtl: Boolean,
+        fontRenderContext: FontRenderContext,
+        paint: (TerminalShapedGlyphVectorCache.Run, Int, Int, Int, Int) -> Unit,
+    ) {
+        var windowStart = startColumn
+        var previousWindowEnd = startColumn
+        var paintStart = startColumn
+        while (paintStart < endColumn) {
+            var windowEnd = boundedWindowEnd(cache, rowOffset, windowStart, endColumn)
+            if (windowEnd <= previousWindowEnd) {
+                windowStart = paintStart
+                windowEnd = boundedWindowEnd(cache, rowOffset, windowStart, endColumn)
+            }
+            check(windowEnd > paintStart) { "A shaping window must admit an unpainted terminal cell" }
+            val shapedRun = positionedRun(cache, metrics, rowOffset, windowStart, windowEnd, rtl, fontRenderContext)
+            val lastClusterStart = windowStart + shapedRun.lastClusterStart
+            val paintEnd = if (windowEnd < endColumn && lastClusterStart > paintStart) lastClusterStart else windowEnd
+            paint(shapedRun, windowStart, windowEnd, paintStart, paintEnd)
+            if (paintEnd == endColumn) return
+            windowStart += if (paintEnd == windowEnd) shapedRun.lastClusterStart else shapedRun.previousClusterStart
+            previousWindowEnd = windowEnd
+            paintStart = paintEnd
+        }
+    }
+
+    private fun boundedWindowEnd(
+        cache: TerminalRenderCache,
+        rowOffset: Int,
+        startColumn: Int,
+        endColumn: Int,
+    ): Int {
+        var codepoints = 0
+        var column = startColumn
+        while (column < endColumn) {
+            val index = rowOffset + column
+            val ref = cache.clusterRefs[index]
+            val length = if (cache.flags[index] and TerminalRenderCellFlags.CLUSTER != 0 && ref != 0L) cache.clusterLength(ref) else 1
+            if (length > MAX_RUN_CODEPOINTS - codepoints) break
+            codepoints += length
+            column += minOf(cellSpan(cache.flags[index]), endColumn - column)
         }
         return column
     }

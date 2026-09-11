@@ -86,8 +86,8 @@ internal class TerminalShapedGlyphVectorCache(
         val font = fontCache.fontForText(String(key.chars), key.style)
         val direction = if (rtl) Font.LAYOUT_RIGHT_TO_LEFT else Font.LAYOUT_LEFT_TO_RIGHT
         val vector = font.layoutGlyphVector(fontRenderContext, key.chars, 0, length, direction)
-        positionClusters(vector, key)
-        val run = Run(vector, key.columns * key.cellWidth.toFloat())
+        val clusterEnds = positionClusters(vector, key)
+        val run = Run(vector, key.columns * key.cellWidth.toFloat(), clusterEnds)
         layouts[key] = run
         return run
     }
@@ -118,7 +118,7 @@ internal class TerminalShapedGlyphVectorCache(
     private fun positionClusters(
         vector: GlyphVector,
         key: Key,
-    ) {
+    ): IntArray {
         val glyphCount = vector.numGlyphs
         val positions = vector.getGlyphPositions(0, glyphCount + 1, null)
         val owners = IntArray(glyphCount)
@@ -182,6 +182,7 @@ internal class TerminalShapedGlyphVectorCache(
         glyphPosition.x = key.columns * key.cellWidth.toFloat()
         glyphPosition.y = positions[glyphCount * 2 + 1]
         vector.setGlyphPosition(glyphCount, glyphPosition)
+        return ends
     }
 
     /**
@@ -193,7 +194,14 @@ internal class TerminalShapedGlyphVectorCache(
     class Run internal constructor(
         val glyphVector: GlyphVector,
         private val width: Float,
+        clusterEnds: IntArray,
     ) {
+        /** Logical owner of the final shaped cluster, including its ligature and wide cells. */
+        val lastClusterStart: Int = clusterStartBefore(clusterEnds, clusterEnds.size)
+
+        /** Logical owner before [lastClusterStart], or zero when the window has only one cluster. */
+        val previousClusterStart: Int = if (lastClusterStart > 0) clusterStartBefore(clusterEnds, lastClusterStart) else 0
+
         private val batches: Array<GlyphVector>
         private val minX: FloatArray
         private val maxX: FloatArray
@@ -287,6 +295,15 @@ internal class TerminalShapedGlyphVectorCache(
 
         private companion object {
             const val GLYPHS_PER_BATCH = 64
+
+            private fun clusterStartBefore(
+                clusterEnds: IntArray,
+                column: Int,
+            ): Int {
+                var owner = column - 1
+                while (owner > 0 && clusterEnds[owner] == 0) owner--
+                return owner
+            }
         }
     }
 

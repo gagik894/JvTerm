@@ -65,9 +65,23 @@ the cursor-cell clip. It does not shape an isolated Arabic character or reconstr
 the neighboring context from cursor colors. Concealed or hidden blinking cells
 still reject foreground painting.
 
-Shaping work is bounded, and segments advance only at terminal-cell boundaries.
-The scalar/cluster fallback retains its separate protection for oversized single
-clusters. Cached vectors are read-only after positioning. Cache identity includes
+Each shaping window admits at most 2,048 code points (4,096 UTF-16 units), stopping
+before a whole terminal cluster would exceed that budget. A longer compatible
+span is processed through explicit windows until every cell has been painted.
+When more text follows, the final shaped glyph cluster is retained as lookahead;
+the preceding consumed cluster supplies lookbehind for the next window. These
+boundaries come from the positioned glyph ownership, so a lam-alef ligature is
+kept together. Row painting and cursor repaint use the same window traversal and
+clip to each window's owned interval. Cached windows retain just the two cluster
+boundaries needed for continuation, alongside their positioned glyphs.
+
+A shaped cluster filling the entire budget is consumed as one window. Lookbehind
+is dropped if it would prevent the next window from admitting new text. These
+bounded fallbacks preserve progress and cell coverage; they cannot promise
+unbounded contextual equivalence for arbitrary fonts. The scalar/cluster fallback
+retains its separate protection for oversized single terminal clusters.
+
+Cached vectors are read-only after positioning. Cache identity includes
 text, cell ownership, cell span, font style, direction, and cell width; font-source,
 font-generation, and font-render-context changes invalidate the cache. Repeated
 lookups use reusable primitive buffers and a reusable lookup key.

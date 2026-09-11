@@ -20,6 +20,7 @@ import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
+import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
@@ -937,6 +938,132 @@ class TerminalTextPainterTest {
                             fixture.metrics.cellWidth,
                         ),
                         "Cursor at logical column $column must retain the same bounded shaping context as row painting",
+                    )
+                }
+            } finally {
+                fixture.g.dispose()
+            }
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = ["beh", "lam-alef", "marked-beh"])
+        fun `bounded shaping retains the same Arabic context as a short run`(patternName: String) {
+            val beh = TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT)
+            val pattern =
+                when (patternName) {
+                    "lam-alef" ->
+                        arrayOf(
+                            TestCell(codeWord = 0x0644, flags = TerminalRenderCellFlags.CODEPOINT),
+                            TestCell(codeWord = 0x0627, flags = TerminalRenderCellFlags.CODEPOINT),
+                        )
+                    "marked-beh" -> arrayOf(TestCell(flags = TerminalRenderCellFlags.CLUSTER, cluster = "\u0628\u064E\u0651"))
+                    else -> arrayOf(beh)
+                }
+            val codepointsPerPattern = pattern.sumOf { cell -> cell.cluster?.codePointCount(0, cell.cluster.length) ?: 1 }
+            val repetitions = (TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH + 8) / codepointsPerPattern + 1
+
+            fun row(repeats: Int): TestRenderFrame =
+                TestRenderFrame(
+                    arrayOf(
+                        Array(repeats * pattern.size + 2) { column ->
+                            if (column == 0 || column == repeats * pattern.size + 1) beh else pattern[(column - 1) % pattern.size]
+                        },
+                    ),
+                )
+
+            val settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18))
+            val reference = fixture(settings = settings, width = 256)
+            val referenceCache = renderCache(row(3))
+            val cache = renderCache(row(repetitions))
+            val actual = fixture(settings = settings, width = cache.columns * reference.metrics.cellWidth)
+            try {
+                reference.paintRow(referenceCache)
+                actual.paintRow(cache)
+                val cellWidth = reference.metrics.cellWidth
+                val cellHeight = reference.metrics.cellHeight
+                val spanWidth = pattern.size * cellWidth
+                val referenceVisualColumn = referenceCache.columns - (1 + 2 * pattern.size)
+                val expected = reference.image.getRGB(referenceVisualColumn * cellWidth, 0, spanWidth, cellHeight, null, 0, spanWidth)
+
+                // Every interior occurrence has the same neighbors. Checking all of
+                // them finds artificial boundaries without depending on segment size.
+                for (repetition in 1 until repetitions - 1) {
+                    val logicalStart = 1 + repetition * pattern.size
+                    val visualStart = cache.columns - logicalStart - pattern.size
+
+                    fun pixels(): IntArray = actual.image.getRGB(visualStart * cellWidth, 0, spanWidth, cellHeight, null, 0, spanWidth)
+                    assertContentEquals(expected, pixels(), "$patternName differs from short context at logical cell $logicalStart")
+
+                    for (offset in pattern.indices) {
+                        val column = logicalStart + offset
+                        val visualColumn = cache.columns - column - 1
+                        actual.g.composite = AlphaComposite.Clear
+                        actual.g.fillRect(visualColumn * cellWidth, 0, cellWidth, cellHeight)
+                        actual.g.composite = AlphaComposite.SrcOver
+                        actual.painter.paintCellForeground(
+                            actual.g,
+                            cache,
+                            actual.metrics,
+                            column = column,
+                            visualColumn = visualColumn,
+                            row = 0,
+                            foreground = settings.palette.defaultForeground,
+                            fontRenderContext = actual.g.fontRenderContext,
+                        )
+                        assertContentEquals(expected, pixels(), "$patternName cursor lost contextual glyphs at logical cell $column")
+                    }
+                }
+            } finally {
+                actual.g.dispose()
+                reference.g.dispose()
+            }
+        }
+
+        @Test
+        fun `oversized producer cluster still allows the following cell and cursor to paint`() {
+            val cluster = "\u0628" + "\u064E".repeat(TerminalShapedGlyphVectorCache.MAX_RUN_LENGTH + 1)
+            val cache =
+                renderCache(
+                    TestRenderFrame(
+                        arrayOf(
+                            arrayOf(
+                                TestCell(flags = TerminalRenderCellFlags.CLUSTER, cluster = cluster),
+                                TestCell(codeWord = 0x0628, flags = TerminalRenderCellFlags.CODEPOINT),
+                            ),
+                        ),
+                    ),
+                )
+            assertTrue(
+                cache.clusterLength(cache.clusterRefs[0]) in 1 until cluster.length,
+                "Render-cache admission must bound the producer cluster",
+            )
+            val fixture = fixture(settings = defaultTestSettings().copy(font = Font(Font.SERIF, Font.PLAIN, 18)))
+            try {
+                fixture.paintRow(cache)
+                for (column in 0 until cache.columns) {
+                    val visualColumn = cache.columns - column - 1
+                    val startX = visualColumn * fixture.metrics.cellWidth
+                    val endX = startX + fixture.metrics.cellWidth
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(startX, endX, 0, fixture.metrics.cellHeight),
+                        "Painting must progress through retained cluster cell $column",
+                    )
+                    fixture.g.composite = AlphaComposite.Clear
+                    fixture.g.fillRect(startX, 0, fixture.metrics.cellWidth, fixture.metrics.cellHeight)
+                    fixture.g.composite = AlphaComposite.SrcOver
+                    fixture.painter.paintCellForeground(
+                        fixture.g,
+                        cache,
+                        fixture.metrics,
+                        column = column,
+                        visualColumn = visualColumn,
+                        row = 0,
+                        foreground = TEST_WHITE,
+                        fontRenderContext = fixture.g.fontRenderContext,
+                    )
+                    assertTrue(
+                        fixture.image.containsPaintedPixelInRange(startX, endX, 0, fixture.metrics.cellHeight),
+                        "Cursor painting must progress through retained cluster cell $column",
                     )
                 }
             } finally {

@@ -687,8 +687,8 @@ class SwingTerminal
          *
          * This method may be called from any thread. EDT callers refresh the
          * snapshot from live component and render-cache state before reading it;
-         * off-EDT callers copy one complete EDT publication without dispatching
-         * to the EDT, retrying if publication overlaps the read.
+         * off-EDT callers copy one complete EDT publication under the short monitor
+         * shared with publication, without dispatching to the EDT.
          *
          * @return current scrollback viewport state.
          */
