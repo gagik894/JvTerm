@@ -49,6 +49,9 @@ jobs:
         run: |
           xvfb-run ./gradlew -p ketraterm-intellij-plugin test "-Djava.awt.headless=true"
 
+      - name: Compile Benchmark Harnesses
+        run: ./gradlew :ketraterm-benchmarks:jmhJar
+
       - name: Upload Test Results
         if: failure()
         uses: actions/upload-artifact@v4

@@ -15,7 +15,6 @@
  */
 package io.github.ketraterm.ui.swing.search
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.core.TerminalBuffers
 import io.github.ketraterm.input.api.TerminalInputEncoder
 import io.github.ketraterm.input.event.TerminalFocusEvent
@@ -31,47 +30,10 @@ import io.github.ketraterm.transport.TerminalConnector
 import io.github.ketraterm.transport.TerminalConnectorListener
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
-import java.lang.management.ManagementFactory
 import javax.swing.SwingUtilities
 
 class TerminalSearchControllerTest {
-    @Test
-    fun `unchanged active search frames allocate no memory after warmup`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
-        val reader = SearchFrameReader(historyLines = List(1000) { "needle" }, liveLines = listOf("needle"))
-        val session = testSession(reader)
-        val host = RecordingSearchHost(session, columns = reader.columns, rows = reader.visibleRows)
-        val controller = TerminalSearchController(host)
-        try {
-            SwingUtilities.invokeAndWait {
-                host.renderCache.updateFrom(session)
-                controller.search("needle")
-
-                fun refreshFrames() {
-                    repeat(100_000) { controller.refreshForFrame() }
-                }
-                repeat(5) { refreshFrames() }
-                val reads = reader.readCount
-                val threadId = Thread.currentThread().threadId()
-                var minimum = Long.MAX_VALUE
-                repeat(5) {
-                    val before = allocationBean.getThreadAllocatedBytes(threadId)
-                    refreshFrames()
-                    minimum = minOf(minimum, allocationBean.getThreadAllocatedBytes(threadId) - before)
-                }
-                assertEquals(0L, minimum)
-                assertEquals(reads, reader.readCount)
-            }
-        } finally {
-            session.close()
-        }
-    }
-
     @Test
     fun `content generation rollover adds and removes matches including empty results`() {
         val reader = SearchFrameReader(liveLines = listOf("absent"))

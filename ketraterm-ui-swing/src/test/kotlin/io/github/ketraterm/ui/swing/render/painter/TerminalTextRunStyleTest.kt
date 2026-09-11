@@ -15,74 +15,51 @@
  */
 package io.github.ketraterm.ui.swing.render.painter
 
-import com.sun.management.ThreadMXBean
-import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.TestRenderFrame
 import io.github.ketraterm.ui.swing.render.renderCache
-import org.junit.jupiter.api.Assumptions.assumeTrue
-import org.junit.jupiter.api.Test
-import java.lang.management.ManagementFactory
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class TerminalTextRunStyleTest {
-    @Test
-    fun `warmed row configuration and run scanning allocate no memory`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
-
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `hover interval splits runs at its inclusive start and exclusive end`(activationHover: Boolean) {
         val cache = renderCache(TestRenderFrame.text("A".repeat(80)))
         cache.hyperlinkIds.fill(7)
         val style = TerminalTextRunStyle()
-        val threadId = Thread.currentThread().threadId()
-
-        // Warm class initialization and JIT compilation outside the measured region.
-        repeat(5) { scanRows(style, cache, 10_000) }
-        var minimumAllocated = Long.MAX_VALUE
-        repeat(5) {
-            val before = allocationBean.getThreadAllocatedBytes(threadId)
-            val matches = scanRows(style, cache, 10_000)
-            val allocated = allocationBean.getThreadAllocatedBytes(threadId) - before
-            minimumAllocated = minOf(minimumAllocated, allocated)
-            assertEquals(10_000 * 77, matches)
-        }
-        assertEquals(0L, minimumAllocated, "Style scanning must not allocate per row, run, or cell")
-    }
-
-    private fun scanRows(
-        style: TerminalTextRunStyle,
-        cache: TerminalRenderCache,
-        rowCount: Int,
-    ): Int {
-        val palette = cache.palette
-        var matches = 0
-        var row = 0
-        while (row < rowCount) {
-            style.configureRow(
-                row = 0,
-                textBlinkVisible = row and 1 == 0,
-                hyperlinkIds = cache.hyperlinkIds,
-                hoveredHyperlinkId = 7,
-                hoveredHyperlinkStartRow = 0,
-                hoveredHyperlinkStartColumn = 20,
-                hoveredHyperlinkEndRow = 0,
-                hoveredHyperlinkEndColumn = 60,
-                hyperlinkActivationHover = row and 1 == 0,
-                hyperlinkActivationForeground = 0xFF4DA3FF.toInt(),
-            )
-            style.begin(cache, palette, 0, 0)
-            var column = 1
-            while (column < cache.columns) {
-                if (style.matches(cache, palette, 0, column)) {
-                    matches++
-                } else {
-                    style.begin(cache, palette, 0, column)
-                }
-                column++
+        val activationForeground = 0xFF4DA3FF.toInt()
+        style.configureRow(
+            row = 0,
+            textBlinkVisible = true,
+            hyperlinkIds = cache.hyperlinkIds,
+            hoveredHyperlinkId = 7,
+            hoveredHyperlinkStartRow = 0,
+            hoveredHyperlinkStartColumn = 20,
+            hoveredHyperlinkEndRow = 0,
+            hoveredHyperlinkEndColumn = 60,
+            hyperlinkActivationHover = activationHover,
+            hyperlinkActivationForeground = activationForeground,
+        )
+        style.begin(cache, cache.palette, 0, 0)
+        val starts = mutableListOf(0)
+        for (column in 1 until cache.columns) {
+            if (!style.matches(cache, cache.palette, 0, column)) {
+                starts.add(column)
+                style.begin(cache, cache.palette, 0, column)
             }
-            row++
         }
-        return matches
+        assertEquals(listOf(0, 20, 60), starts)
+
+        style.begin(cache, cache.palette, 0, 20)
+        assertTrue(style.hovered)
+        assertEquals(if (activationHover) activationForeground else cache.palette.defaultForeground, style.foreground)
+        assertFalse(style.matches(cache, cache.palette, 0, 60))
+        assertTrue(style.hovered, "Comparing another cell must not replace the retained run style")
+        style.begin(cache, cache.palette, 0, 60)
+        assertFalse(style.hovered)
+        assertEquals(cache.palette.defaultForeground, style.foreground)
     }
 }

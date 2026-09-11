@@ -15,7 +15,6 @@
  */
 package io.github.ketraterm.ui.swing.viewport
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.TerminalViewportListener
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
@@ -23,10 +22,8 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import java.lang.management.ManagementFactory
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import javax.swing.SwingUtilities
@@ -328,39 +325,16 @@ class SwingViewportControllerTest {
         }
 
         @Test
-        fun `primitive snapshot publication allocates no memory after warmup`() {
-            val bean = ManagementFactory.getThreadMXBean()
-            assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-            val allocationBean = bean as ThreadMXBean
-            assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+        fun `primitive publication notifies once per frame with coherent viewport fields`() {
             SwingUtilities.invokeAndWait {
-                var callbackCount = 0
-                val listener =
-                    object : TerminalViewportListener {
-                        override fun viewportChanged(
-                            historySize: Int,
-                            scrollbackOffset: Double,
-                            renderOffset: Int,
-                            visibleRows: Int,
-                            requestedRows: Int,
-                        ) {
-                            callbackCount++
-                        }
-                    }
+                val listener = RecordingViewportListener()
                 val controller = SwingViewportController(listener) { _, _ -> }
                 controller.setFractionalViewport(firstPublishedState)
-                val threadId = Thread.currentThread().threadId()
-                var minimum = Long.MAX_VALUE
-                repeat(10) { batch ->
-                    val before = allocationBean.getThreadAllocatedBytes(threadId)
-                    repeat(10_000) {
-                        controller.publishFractionalViewport(firstPublishedState, notifyPrimitiveListener = true)
-                    }
-                    val allocated = allocationBean.getThreadAllocatedBytes(threadId) - before
-                    if (batch >= 5) minimum = minOf(minimum, allocated)
-                }
-                assertEquals(0L, minimum)
-                assertEquals(100_000, callbackCount)
+
+                repeat(3) { controller.publishFractionalViewport(firstPublishedState, notifyPrimitiveListener = true) }
+
+                assertEquals(3, listener.callCount)
+                assertEquals(TerminalViewportState(100, 12.5, 13, 24, 26), listener.lastState)
                 assertEquals(firstPublishedState, controller.viewportStateSnapshot())
             }
         }

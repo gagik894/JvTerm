@@ -15,65 +15,40 @@
  */
 package io.github.ketraterm.ui.swing.settings
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.SwingTerminal
 import io.github.ketraterm.ui.swing.render.cache.FontCache
 import kotlinx.collections.immutable.persistentListOf
 import kotlinx.collections.immutable.toImmutableList
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Canvas
 import java.awt.Font
 import java.awt.RenderingHints
-import java.lang.management.ManagementFactory
 import javax.swing.SwingUtilities
 import kotlin.test.*
 
 class SwingSettingsTest {
     @ParameterizedTest
     @ValueSource(ints = [0, 1, 3])
-    fun cachedFontConfigurationAndChromeReadsAllocateNoMemory(fallbackCount: Int) {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+    fun unchangedFontSettingsRetainUnsupportedGlyphResolution(fallbackCount: Int) {
         val font = Font(Font.MONOSPACED, Font.PLAIN, 14)
         val settings =
-            SwingSettings(font = font, fallbackFonts = List(fallbackCount) { font }.toImmutableList(), useSystemFallbackFonts = false)
+            SwingSettings(
+                font = font,
+                fallbackFonts = List(fallbackCount) { font }.toImmutableList(),
+                useSystemFallbackFonts = false,
+            )
         val cache = FontCache()
-        cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts)
-        cache.fontForCodePoint(0x10FFFF, Font.PLAIN)
-        repeat(5) { readFontAndChrome(settings, cache) }
-        val threadId = Thread.currentThread().threadId()
-        var minimum = Long.MAX_VALUE
-        repeat(5) {
-            val before = allocationBean.getThreadAllocatedBytes(threadId)
-            val checksum = readFontAndChrome(settings, cache)
-            val allocated = allocationBean.getThreadAllocatedBytes(threadId) - before
-            minimum = minOf(minimum, allocated)
-            assertEquals(3_600_000, checksum)
-        }
-        assertEquals(0L, minimum)
-    }
+        assertTrue(cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts))
+        val missingGlyphFont = cache.fontForCodePoint(0x10FFFF, Font.PLAIN)
 
-    private fun readFontAndChrome(
-        settings: SwingSettings,
-        cache: FontCache,
-    ): Int {
-        var checksum = 0
-        var iteration = 0
-        while (iteration < 100_000) {
-            if (cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts)) checksum--
-            checksum += cache.fontForCodePoint(0x10FFFF, Font.PLAIN).style
-            checksum += SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.PRIMARY)
-            checksum += SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.PRIMARY)
-            checksum += SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.ALTERNATE)
-            checksum += SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.ALTERNATE)
-            iteration++
-        }
-        return checksum
+        assertFalse(cache.update(settings.font, settings.fallbackFonts, settings.useSystemFallbackFonts))
+        assertSame(missingGlyphFont, cache.fontForCodePoint(0x10FFFF, Font.PLAIN))
+        assertEquals(26, SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.PRIMARY))
+        assertEquals(4, SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.PRIMARY))
+        assertEquals(4, SwingTerminalChrome.horizontalInset(settings, TerminalRenderBufferKind.ALTERNATE))
+        assertEquals(2, SwingTerminalChrome.verticalInset(settings, TerminalRenderBufferKind.ALTERNATE))
     }
 
     @Test

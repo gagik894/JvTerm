@@ -15,18 +15,15 @@
  */
 package io.github.ketraterm.ui.swing.viewport
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.TerminalColorPalette
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import org.junit.jupiter.api.Assertions.*
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import java.awt.*
 import java.awt.image.BufferedImage
-import java.lang.management.ManagementFactory
 
 class TerminalScrollbarOverlayTest {
     @Test
@@ -216,55 +213,6 @@ class TerminalScrollbarOverlayTest {
             overlay.handleReleased(100, settings, TerminalRenderBufferKind.PRIMARY, 13, state) { row, _ -> offset = row },
         )
         assertEquals(4, offset)
-    }
-
-    @Test
-    fun `warm overlay adds no allocation beyond equivalent Java2D rounded rectangle drawing`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
-        val overlay = TerminalScrollbarOverlay()
-        val settings = SwingSettings(padding = SwingPadding(0, 4, 8, 10))
-        val palette = TerminalColorPalette(defaultForeground = Color.RED.rgb)
-        val state = viewportState(scrollbackOffset = 4.0)
-        val graphics = BufferedImage(110, 108, BufferedImage.TYPE_INT_ARGB).createGraphics()
-        val bounds = Rectangle(102, 40, 6, 33)
-        val normalColor = Color(255, 0, 0, 96)
-        val hoverColor = Color(255, 0, 0, 160)
-
-        fun paintFrames(overlayEnabled: Boolean) {
-            repeat(10_000) { index ->
-                val hovered = index and 1 == 0
-                if (overlayEnabled) {
-                    overlay.handleMoved(if (hovered) 105 else 0, 50, settings, TerminalRenderBufferKind.PRIMARY, 110, 108)
-                    paintThumb(overlay, graphics, settings, palette, state)
-                } else {
-                    paintReferenceThumb(graphics, bounds, if (hovered) hoverColor else normalColor)
-                }
-            }
-        }
-
-        try {
-            repeat(5) {
-                paintFrames(overlayEnabled = true)
-                paintFrames(overlayEnabled = false)
-            }
-            val threadId = Thread.currentThread().threadId()
-            var minimumOverlay = Long.MAX_VALUE
-            var minimumReference = Long.MAX_VALUE
-            repeat(5) {
-                val beforeOverlay = allocationBean.getThreadAllocatedBytes(threadId)
-                paintFrames(overlayEnabled = true)
-                minimumOverlay = minOf(minimumOverlay, allocationBean.getThreadAllocatedBytes(threadId) - beforeOverlay)
-                val beforeReference = allocationBean.getThreadAllocatedBytes(threadId)
-                paintFrames(overlayEnabled = false)
-                minimumReference = minOf(minimumReference, allocationBean.getThreadAllocatedBytes(threadId) - beforeReference)
-            }
-            assertEquals(minimumReference, minimumOverlay, "warm overlay geometry and color resolution must not add heap allocation")
-        } finally {
-            graphics.dispose()
-        }
     }
 
     private fun paintThumb(

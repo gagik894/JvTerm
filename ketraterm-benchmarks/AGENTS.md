@@ -18,7 +18,7 @@ workload.
 Benchmark code should compile with:
 
 ```text
-./gradlew :ketraterm-benchmarks:compileKotlin
+./gradlew :ketraterm-benchmarks:jmhJar
 ```
 
 Run JMH when performance numbers are needed:
@@ -26,3 +26,9 @@ Run JMH when performance numbers are needed:
 ```text
 ./gradlew :ketraterm-benchmarks:jmh
 ```
+
+Keep allocation measurements in JMH with its GC profiler. Unit tests should
+assert rendering, cache reuse, invalidation, and lifecycle semantics without
+depending on JVM allocation counters or warmup timing. Benchmark internal Swing
+helpers through the benchmark compilation's friend path; do not widen their
+production visibility.

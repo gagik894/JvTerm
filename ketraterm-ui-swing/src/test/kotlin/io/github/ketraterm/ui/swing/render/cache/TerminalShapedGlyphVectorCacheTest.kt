@@ -15,7 +15,6 @@
  */
 package io.github.ketraterm.ui.swing.render.cache
 
-import com.sun.management.ThreadMXBean
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
@@ -30,7 +29,6 @@ import java.awt.font.GlyphVector
 import java.awt.geom.AffineTransform
 import java.awt.geom.Rectangle2D
 import java.awt.image.BufferedImage
-import java.lang.management.ManagementFactory
 import java.util.*
 
 class TerminalShapedGlyphVectorCacheTest {
@@ -235,32 +233,13 @@ class TerminalShapedGlyphVectorCacheTest {
     }
 
     @Test
-    fun `warmed contextual shaping cache hits allocate no storage`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        allocationBean.isThreadAllocatedMemoryEnabled = true
-        val thread = Thread.currentThread().threadId()
+    fun `contextual shaping lookup returns the retained positioned run`() {
         val cache = TerminalShapedGlyphVectorCache()
         val chars = "بَبب".toCharArray()
         val owners = intArrayOf(0, 0, 1, 2)
         val retained = cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true)
 
-        // Warm the same lookup loop measured below, including its returned value.
-        fun lookupBatch(): Int {
-            var hits = 0
-            repeat(10_000) {
-                if (cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true) === retained) hits++
-            }
-            return hits
-        }
-
-        repeat(2) { lookupBatch() }
-        val before = allocationBean.getThreadAllocatedBytes(thread)
-        val hits = lookupBatch()
-        val allocated = allocationBean.getThreadAllocatedBytes(thread) - before
-        assertEquals(10_000, hits)
-        assertEquals(0L, allocated)
+        assertSame(retained, cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true))
     }
 
     @Test
@@ -305,84 +284,6 @@ class TerminalShapedGlyphVectorCacheTest {
                 }
             }
         }
-    }
-
-    @Test
-    fun `warmed single batch selection allocates no more than one direct glyph submission`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        allocationBean.isThreadAllocatedMemoryEnabled = true
-        val thread = Thread.currentThread().threadId()
-        val text = "אבג".repeat(45)
-        for (antialiased in booleanArrayOf(false, true)) {
-            val recordingFont = BatchRecordingFont()
-            val recordingFonts = FontCache().apply { update(recordingFont, emptyList(), useSystemFallbackFonts = false) }
-            val run =
-                TerminalShapedGlyphVectorCache().run(
-                    text.toCharArray(),
-                    text.length,
-                    IntArray(text.length) { it },
-                    text.length,
-                    Font.PLAIN,
-                    CELL_WIDTH,
-                    recordingFonts,
-                    FontRenderContext(null, antialiased, false),
-                    rtl = true,
-                )
-            assertSame(recordingFont, run.glyphVector.font)
-            // This clip is well inside one retained batch. Use that exact vector
-            // so its glyph count, flags and context match the direct control.
-            // macOS can promote AA_OFF to AA_ON and copy the submitted vector;
-            // using the full run as the control would measure a larger JDK copy.
-            val start = 31 * CELL_WIDTH
-            val end = 32 * CELL_WIDTH
-            val batch =
-                recordingFont.batches.single {
-                    val bounds = it.visualBounds
-                    bounds.maxX > start && bounds.minX < end
-                }
-            assertTrue(batch.numGlyphs < run.glyphVector.numGlyphs)
-
-            val image = BufferedImage(text.length * CELL_WIDTH, 40, BufferedImage.TYPE_INT_ARGB)
-            val g = image.createGraphics()
-            try {
-                g.color = Color.WHITE
-                g.clipRect(start, 0, end - start, image.height)
-
-                fun drawBatch() {
-                    repeat(2_000) { run.draw(g, 0f, 26f, start.toFloat(), end.toFloat()) }
-                }
-
-                fun drawDirect() {
-                    repeat(2_000) { g.drawGlyphVector(batch, 0f, 26f) }
-                }
-
-                repeat(10) {
-                    drawBatch()
-                    drawDirect()
-                }
-                val batchBefore = allocationBean.getThreadAllocatedBytes(thread)
-                drawBatch()
-                val batchAllocated = allocationBean.getThreadAllocatedBytes(thread) - batchBefore
-                val directBefore = allocationBean.getThreadAllocatedBytes(thread)
-                drawDirect()
-                val directAllocated = allocationBean.getThreadAllocatedBytes(thread) - directBefore
-                assertEquals(directAllocated, batchAllocated, "antialiased=$antialiased")
-            } finally {
-                g.dispose()
-            }
-        }
-    }
-
-    /** Records batches during cache construction, before positions and transforms are assigned. */
-    private class BatchRecordingFont : Font(SERIF, PLAIN, 18) {
-        val batches = mutableListOf<GlyphVector>()
-
-        override fun createGlyphVector(
-            context: FontRenderContext,
-            glyphCodes: IntArray,
-        ): GlyphVector = super.createGlyphVector(context, glyphCodes).also { batches.add(it) }
     }
 
     private fun renderRun(

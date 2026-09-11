@@ -15,48 +15,30 @@
  */
 package io.github.ketraterm.ui.swing.render
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
 import org.junit.jupiter.params.provider.ValueSource
-import java.lang.management.ManagementFactory
 import java.text.Bidi
 import kotlin.test.*
 
 class TerminalBidiLayoutTest {
     @ParameterizedTest
     @ValueSource(booleans = [false, true])
-    fun `overscan row count transitions allocate no bidi storage after warmup`(rtl: Boolean) {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+    fun `overscan row count transitions preserve text direction`(rtl: Boolean) {
         val cells =
             Array(25) { Array(80) { TestCell(codeWord = if (rtl) 0x05D0 else 'A'.code, flags = TerminalRenderCellFlags.CODEPOINT) } }
-        val frames = arrayOf(TestRenderFrame(cells.take(24).toTypedArray()), TestRenderFrame(cells))
+        val shortFrame = TestRenderFrame(cells.take(24).toTypedArray())
+        val tallFrame = TestRenderFrame(cells)
         val cache = TerminalRenderCache(80, 24, rowCapacityReserve = 1)
         val geometry = TerminalBidiLayout()
-        val threadId = Thread.currentThread().threadId()
-        var minimum = Long.MAX_VALUE
-        repeat(10) { batch ->
-            var allocated = 0L
-            var iteration = 0
-            while (iteration < 1_000) {
-                // Frame copying is deliberately outside the bidi allocation measurement.
-                cache.accept(frames[iteration and 1])
-                val before = allocationBean.getThreadAllocatedBytes(threadId)
-                val row = geometry.row(cache, cache.rows - 1)
-                allocated += allocationBean.getThreadAllocatedBytes(threadId) - before
-                assertEquals(rtl, row != null)
-                iteration++
-            }
-            if (batch >= 5) minimum = minOf(minimum, allocated)
+
+        for (frame in listOf(shortFrame, tallFrame, shortFrame)) {
+            cache.accept(frame)
+            assertEquals(rtl, geometry.row(cache, cache.rows - 1) != null)
         }
-        assertEquals(0L, minimum)
     }
 
     @Test
@@ -156,42 +138,6 @@ class TerminalBidiLayoutTest {
 
         assertSame(identified, geometry.row(cache, 1))
         assertNull(geometry.row(cache, 2))
-    }
-
-    @Test
-    fun `cached bidi mapping and range projection allocate no memory`() {
-        val bean = ManagementFactory.getThreadMXBean()
-        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-        val allocationBean = bean as ThreadMXBean
-        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
-        val cache = renderCache(TestRenderFrame.text("AB \u05D0\u05D1\u05D2"))
-        val geometry = TerminalBidiLayout()
-        repeat(5) { queryRows(geometry, cache) }
-        val threadId = Thread.currentThread().threadId()
-        var minimum = Long.MAX_VALUE
-        repeat(5) {
-            val before = allocationBean.getThreadAllocatedBytes(threadId)
-            val checksum = queryRows(geometry, cache)
-            val allocated = allocationBean.getThreadAllocatedBytes(threadId) - before
-            minimum = minOf(minimum, allocated)
-            assertTrue(checksum > 0)
-        }
-        assertEquals(0L, minimum)
-    }
-
-    private fun queryRows(
-        geometry: TerminalBidiLayout,
-        cache: TerminalRenderCache,
-    ): Int {
-        var checksum = 0
-        var iteration = 0
-        while (iteration < 100_000) {
-            val row = requireNotNull(geometry.row(cache, 0))
-            checksum += row.logicalColumn(3)
-            forEachVisualCellSpan(row, 1, 4) { start, end -> checksum += end - start }
-            iteration++
-        }
-        return checksum
     }
 
     @ParameterizedTest

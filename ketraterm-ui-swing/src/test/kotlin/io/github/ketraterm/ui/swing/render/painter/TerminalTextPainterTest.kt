@@ -15,20 +15,16 @@
  */
 package io.github.ketraterm.ui.swing.render.painter
 
-import com.sun.management.ThreadMXBean
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import io.github.ketraterm.ui.swing.render.*
 import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
-import io.github.ketraterm.ui.swing.render.cache.TerminalAsciiDrawCharsCache
-import io.github.ketraterm.ui.swing.render.cache.TerminalAsciiGlyphVectorCache
 import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -41,7 +37,6 @@ import java.awt.geom.AffineTransform
 import java.awt.geom.Area
 import java.awt.geom.Ellipse2D
 import java.awt.image.BufferedImage
-import java.lang.management.ManagementFactory
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -327,67 +322,6 @@ class TerminalTextPainterTest {
 
     @Nested
     inner class AsciiTextRendering {
-        @ParameterizedTest
-        @ValueSource(booleans = [false, true])
-        fun `warmed ASCII painting with a contained caller clip adds no allocation to direct drawing`(antialiased: Boolean) {
-            val bean = ManagementFactory.getThreadMXBean()
-            assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-            val allocationBean = bean as ThreadMXBean
-            allocationBean.isThreadAllocatedMemoryEnabled = true
-            val thread = Thread.currentThread().threadId()
-            val fixture = fixture(settings = antialiasedSettings(antialiased))
-            val text = "AAAAAA"
-            val cache = renderCache(TestRenderFrame.text(text))
-            try {
-                fixture.g.clipRect(0, 0, text.length * fixture.metrics.cellWidth, fixture.metrics.cellHeight)
-                fixture.paintRow(cache)
-                val font = fixture.painter.font(Font.PLAIN)
-                val context = fixture.g.fontRenderContext
-                val chars = text.toCharArray()
-                val drawChars = TerminalAsciiDrawCharsCache().canDrawChars(font, Font.PLAIN, fixture.metrics.cellWidth, context)
-                val vector =
-                    TerminalAsciiGlyphVectorCache().glyphVector(
-                        chars,
-                        0,
-                        chars.size,
-                        font,
-                        Font.PLAIN,
-                        fixture.metrics.cellWidth,
-                        context,
-                    )
-
-                fun directDraw() {
-                    if (drawChars) {
-                        fixture.g.drawChars(chars, 0, chars.size, 0, fixture.metrics.baseline)
-                    } else {
-                        fixture.g.drawGlyphVector(vector, 0f, fixture.metrics.baseline.toFloat())
-                    }
-                }
-
-                fun paintBatch() {
-                    repeat(2_000) { fixture.paintRow(cache) }
-                }
-
-                fun directBatch() {
-                    repeat(2_000) { directDraw() }
-                }
-
-                repeat(10) {
-                    paintBatch()
-                    directBatch()
-                }
-                val beforePaint = allocationBean.getThreadAllocatedBytes(thread)
-                paintBatch()
-                val paintAllocated = allocationBean.getThreadAllocatedBytes(thread) - beforePaint
-                val beforeDirect = allocationBean.getThreadAllocatedBytes(thread)
-                directBatch()
-                val directAllocated = allocationBean.getThreadAllocatedBytes(thread) - beforeDirect
-                assertEquals(directAllocated, paintAllocated)
-            } finally {
-                fixture.g.dispose()
-            }
-        }
-
         @ParameterizedTest
         @CsvSource("false, false", "false, true", "true, false", "true, true")
         fun `ASCII painting preserves the callers clip`(
@@ -815,60 +749,6 @@ class TerminalTextPainterTest {
 
     @Nested
     inner class ComplexTextRendering {
-        @Test
-        fun `warmed styled shaping adds no allocations beyond equivalent Java2D drawing`() {
-            val bean = ManagementFactory.getThreadMXBean()
-            assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
-            val allocationBean = bean as ThreadMXBean
-            assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
-            val text = "\u05D0\u05D1\u05D2".repeat(8)
-            val colors = arrayOf(Color(TEST_RED, true), Color(TEST_WHITE, true))
-            val fixture = fixture(width = 500)
-            val cache =
-                renderCache(
-                    TestRenderFrame.text(
-                        text,
-                        attrs =
-                            LongArray(text.length) { column ->
-                                TerminalRenderAttrs.pack(
-                                    foregroundKind = TerminalRenderColorKind.RGB,
-                                    foregroundValue = colors[column % colors.size].rgb and 0x00FF_FFFF,
-                                )
-                            },
-                    ),
-                )
-            try {
-                fixture.paintRow(cache)
-                fixture.g.setClip(0, 0, fixture.image.width, fixture.image.height)
-                val context = fixture.g.fontRenderContext
-                val vector = fixture.settings.font.layoutGlyphVector(context, text.toCharArray(), 0, text.length, Font.LAYOUT_RIGHT_TO_LEFT)
-                for (glyph in 0..vector.numGlyphs) {
-                    val position = vector.getGlyphPosition(glyph)
-                    position.setLocation(glyph * fixture.metrics.cellWidth.toDouble(), position.y)
-                    vector.setGlyphPosition(glyph, position)
-                }
-                repeat(5) {
-                    paintStyledRows(fixture, cache, context, 2_000)
-                    drawStyledGlyphVector(fixture, vector, colors, text.length, 2_000)
-                }
-
-                val threadId = Thread.currentThread().threadId()
-                var rendererBytes = Long.MAX_VALUE
-                var drawingBytes = Long.MAX_VALUE
-                repeat(5) {
-                    val beforeRenderer = allocationBean.getThreadAllocatedBytes(threadId)
-                    paintStyledRows(fixture, cache, context, 1_000)
-                    rendererBytes = minOf(rendererBytes, allocationBean.getThreadAllocatedBytes(threadId) - beforeRenderer)
-                    val beforeDrawing = allocationBean.getThreadAllocatedBytes(threadId)
-                    drawStyledGlyphVector(fixture, vector, colors, text.length, 1_000)
-                    drawingBytes = minOf(drawingBytes, allocationBean.getThreadAllocatedBytes(threadId) - beforeDrawing)
-                }
-                assertEquals(drawingBytes, rendererBytes, "Warmed row shaping must not allocate lookup or ownership storage")
-            } finally {
-                fixture.g.dispose()
-            }
-        }
-
         @ParameterizedTest
         @ValueSource(strings = ["uniform", "foreground", "underline", "conceal"])
         fun `Arabic run retains contextual forms across cell presentation changes`(presentation: String) {
@@ -1998,38 +1878,6 @@ class TerminalTextPainterTest {
     }
 
     // --- Testing Utilities & Helpers ---
-
-    private fun paintStyledRows(
-        fixture: Fixture,
-        cache: TerminalRenderCache,
-        context: FontRenderContext,
-        count: Int,
-    ) {
-        repeat(count) {
-            fixture.painter.paintRow(fixture.g, cache, fixture.settings.palette, fixture.metrics, 0, context)
-        }
-    }
-
-    private fun drawStyledGlyphVector(
-        fixture: Fixture,
-        vector: GlyphVector,
-        colors: Array<Color>,
-        columns: Int,
-        count: Int,
-    ) {
-        repeat(count) {
-            for (column in 0 until columns) {
-                val oldClip = fixture.g.clip
-                try {
-                    fixture.g.clipRect(column * fixture.metrics.cellWidth, 0, fixture.metrics.cellWidth, fixture.metrics.cellHeight)
-                    fixture.g.color = colors[(columns - column - 1) % colors.size]
-                    fixture.g.drawGlyphVector(vector, 0f, fixture.metrics.baseline.toFloat())
-                } finally {
-                    fixture.g.clip = oldClip
-                }
-            }
-        }
-    }
 
     private class RecordingShapingFont : Font(SERIF, PLAIN, 18) {
         var shapedText: String? = null

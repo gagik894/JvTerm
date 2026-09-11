@@ -24,7 +24,7 @@ advances alone do not prevent italic or antialiased ink from crossing a style or
 visibility boundary. If the caller's clip bounds already lie inside the span,
 ASCII painting leaves the clip untouched. Otherwise it intersects and restores
 the exact clip, including nonrectangular shapes. Those Java2D clip operations can
-allocate; they are outside the contained-clip allocation assertion below.
+allocate; the contained-clip benchmark below measures the path that avoids them.
 
 Ordinary cells and block-cursor foreground share primitive, native-emoji, and
 fallback dispatch. A directional character elsewhere in a row therefore cannot
@@ -119,22 +119,42 @@ that coverage must not give it precedence over a capable primary text font.
 
 ## Allocation measurement boundaries
 
-These painters and caches belong to the EDT. Their scratch storage is reused and
-must not be accessed concurrently. The allocation regression tests use supported
-JDK `ThreadMXBean` allocation accounting after warming the measured operations.
-Their assertions cover the following scopes:
+These painters and caches belong to the EDT in a component. Their scratch storage
+must not be accessed concurrently. Unit tests verify cache reuse, invalidation,
+glyph geometry, pixels, and publication ordering. Allocation measurements belong
+in `ketraterm-benchmarks`, using JMH warmup, forks, and its GC profiler. They do not
+use exact-byte assertions in unit tests.
 
-| Probe | Allocation assertion and boundary |
+Helper benchmarks own private frozen frames, painters, and graphics on one JMH
+worker. Benchmarks that use EDT-bound controllers or a Swing component dispatch
+fixed batches to the EDT and include the amortized dispatch cost.
+
+| Benchmark | Measured operation and boundary |
 | --- | --- |
-| `TerminalTextRunStyleTest` and `TerminalShapedGlyphVectorCacheTest` | Zero bytes for warmed style scanning and shaped-run cache lookup; creation and positioning on cache misses are outside these measurements |
-| `TerminalPlatformEmojiPainterTest` | Zero bytes for warmed scalar/cluster lookups in `TerminalEmojiImageCache`, including retained images and negative results, and for negative painter results before fallback; Java2D image drawing is outside these measurements |
-| `TerminalBidiLayoutTest` | Zero bytes for warmed row mapping, range projection, and retained-capacity overscan transitions; frame copying is outside the overscan measurement |
-| ASCII painting with a contained caller clip | The same allocated bytes as equivalent direct character or positioned-vector drawing, with antialiasing requested both on and off; wider clips requiring intersection are outside this assertion |
-| Styled-row and clipped-glyph-batch probes | The same allocated bytes as equivalent direct Java2D glyph drawing, not an assertion that Java2D itself allocates zero bytes |
-| `TerminalScrollbarOverlayTest` | The same allocated bytes as equivalent direct Java2D rounded-rectangle drawing; overlay geometry and color lookup add no allocation in the warmed fixture |
-| `SwingViewportControllerTest` | Zero bytes for warmed primitive viewport publication and its recording callback; explicitly requested immutable snapshots are outside this measurement |
+| `TerminalTextRenderingBenchmark` | Warm style scanning and shaped-run lookup; contained-clip ASCII painting, styled Hebrew, and clipped glyph batches, with corresponding direct Java2D controls and text antialiasing on/off |
+| `TerminalFontConfigurationBenchmark` | Unchanged font configuration, retained unsupported-glyph lookup, and chrome reads with zero, one, or three fallback fonts |
+| `TerminalEmojiBenchmark` | Scalar/cluster cache hits for retained images and negative results; painter dispatch and direct image drawing are separate operations. Uses a recording rasterizer, excluding OS font loading and rasterization |
+| `TerminalBidiBenchmark` | Cached mapping and range projection; overscan transitions include frame acceptance, with frame acceptance alone as a control |
+| `TerminalRepaintBenchmark` | Search-highlight projection and damage planning; a separate operation plans two overscan frames and resets the planner |
+| `TerminalScrollbarBenchmark` | Overlay painting and direct rounded-rectangle drawing, with normal/hovered thumb colors |
+| `TerminalViewportPublicationBenchmark` | Primitive viewport publication and callback on the EDT; public snapshot construction is excluded |
+| `TerminalSearchRefreshBenchmark` | Unchanged active search refresh on the EDT, with zero, 1,000, or 10,000 retained history rows |
+| `SwingPaintBenchmark` | Complete component painting in EDT batches, including Java2D and dispatch costs; setup verifies visible content and teardown disposes the component |
 
-The single-batch allocation control submits the actual retained batch, matching
+Build the harness from the repository root, then pass the generated `*-jmh.jar`
+from `ketraterm-benchmarks/build/libs` to Java:
+
+```shell
+./gradlew :ketraterm-benchmarks:jmhJar
+java -jar <generated-jmh.jar> '.*TerminalTextRenderingBenchmark.contextualShapingCacheHit' -prof gc
+```
+
+Report `gc.alloc.rate.norm` together with the workload, JDK, platform, and fork/warmup
+settings. Direct drawing controls describe Java2D costs; they are not portable
+exact-allocation equality gates. CI compiles the harnesses; performance runs
+remain separate from unit tests.
+
+The single-batch drawing control submits the actual retained batch, matching
 its glyph count, font, positions, transforms, and font-render context. Comparing
 against the larger full run would include different Java2D work. Raster tests
 preserve antialiased coverage: cursor comparisons erase the previous cell before
@@ -157,6 +177,7 @@ clipping, transforms, and glyph drawing can also allocate outside the narrower
 helper measurements or within their direct-drawing baselines. Cold font loading,
 native rasterization, layout construction, and cache growth are separate from
 cache-hit behavior. Session frame publication and host listener implementations
-also have their own costs outside these rendering probes. These probes do not
-establish zero allocation for a complete Swing frame, nor do they measure frame
-latency or rendering throughput.
+also have their own costs outside the helper benchmarks. Helper measurements do
+not establish zero allocation for a complete Swing frame. The component benchmark
+measures its stated static paint workload; it does not establish live-window
+input latency during terminal output.

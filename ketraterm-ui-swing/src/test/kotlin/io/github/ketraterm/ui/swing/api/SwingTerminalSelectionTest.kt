@@ -36,6 +36,7 @@ import io.github.ketraterm.ui.swing.suggestion.SwingShellSuggestionRequest
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.StandardTestDispatcher
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -44,11 +45,27 @@ import org.junit.jupiter.params.provider.ValueSource
 import java.awt.event.InputEvent
 import java.awt.event.MouseEvent
 import java.awt.image.BufferedImage
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
 
 class SwingTerminalSelectionTest {
+    private val components = ArrayList<SwingTerminal>()
+    private val sessions = ArrayList<TerminalSession>()
+
+    @AfterEach
+    fun disposeFixtures() {
+        SwingUtilities.invokeAndWait { components.forEach(SwingTerminal::dispose) }
+        sessions.forEach(TerminalSession::close)
+    }
+
+    private fun createComponent(
+        settingsProvider: SwingSettingsProvider = SwingSettingsProvider { SwingSettings() },
+        hostServices: SwingHostServices = SwingHostServices(),
+    ): SwingTerminal = SwingTerminal(settingsProvider = settingsProvider, hostServices = hostServices).also(components::add)
+
     @ParameterizedTest
     @ValueSource(booleans = [false, true])
     fun `replacement stays empty and noninteractive until its first published frame`(unbindFirst: Boolean) {
@@ -91,7 +108,7 @@ class SwingTerminalSelectionTest {
                     )
                 val openedLinks = mutableListOf<String>()
                 val reused =
-                    SwingTerminal(
+                    createComponent(
                         settingsProvider = { settings },
                         hostServices =
                             SwingHostServices(
@@ -102,7 +119,7 @@ class SwingTerminalSelectionTest {
                                     },
                             ),
                     )
-                val fresh = SwingTerminal(settingsProvider = { settings })
+                val fresh = createComponent(settingsProvider = { settings })
                 try {
                     reused.size = reused.preferredGridSize(5, 1)
                     fresh.size = fresh.preferredGridSize(5, 1)
@@ -214,7 +231,7 @@ class SwingTerminalSelectionTest {
                 var opened: String? = null
                 val settings = SwingSettings(cursorBlinkMillis = 0, padding = SwingPadding(), shellIntegrationDecorationGutterWidth = 0)
                 val reused =
-                    SwingTerminal(
+                    createComponent(
                         settingsProvider = { settings },
                         hostServices =
                             SwingHostServices(
@@ -225,7 +242,7 @@ class SwingTerminalSelectionTest {
                                     },
                             ),
                     )
-                val fresh = SwingTerminal(settingsProvider = { settings })
+                val fresh = createComponent(settingsProvider = { settings })
                 try {
                     reused.setSize(120, 40)
                     fresh.setSize(120, 40)
@@ -273,7 +290,7 @@ class SwingTerminalSelectionTest {
             )
         val session = testSession(frame, hyperlinkResolver = TerminalHyperlinkResolver { "https://example.com/$it" })
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0), shellIntegrationDecorationGutterWidth = 0) },
                 hostServices =
                     SwingHostServices(
@@ -304,7 +321,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("\u05D0\u05D1\u05D2")
         val session = testSession(frame, inputEncoder = input)
         val settings = SwingSettings(padding = SwingPadding(0, 0, 0, 0), shellIntegrationDecorationGutterWidth = 0)
-        val component = SwingTerminal(settingsProvider = { settings })
+        val component = createComponent(settingsProvider = { settings })
         session.start(columns = 3, rows = 1)
         session.terminal.setMouseTrackingMode(io.github.ketraterm.protocol.MouseTrackingMode.NORMAL)
         try {
@@ -332,7 +349,7 @@ class SwingTerminalSelectionTest {
     fun `single click clears selection without selecting the clicked cell`() {
         val frame = TestRenderFrame.text("hello")
         val session = testSession(frame = frame)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
+        val component = createComponent(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.setSize(300, 80)
@@ -349,7 +366,7 @@ class SwingTerminalSelectionTest {
     fun `drag after single click creates selection`() {
         val frame = TestRenderFrame.text("hello")
         val session = testSession(frame = frame)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
+        val component = createComponent(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.setSize(300, 80)
@@ -368,7 +385,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("hello")
         val session = testSession(frame = frame)
         var settings = SwingSettings(padding = SwingPadding(0, 0, 0, 0))
-        val component = SwingTerminal(settingsProvider = { settings })
+        val component = createComponent(settingsProvider = { settings })
         try {
             SwingUtilities.invokeAndWait {
                 component.setSize(300, 80)
@@ -393,47 +410,37 @@ class SwingTerminalSelectionTest {
 
     @Test
     fun `drag above viewport autoscrolls into scrollback`() {
-        val renderReader = ScrollbackFrameReader()
+        val requestedOffset = CompletableFuture<Int>()
+        val renderReader = ScrollbackFrameReader { offset -> if (offset == 1) requestedOffset.complete(offset) }
         val session =
             testSession(
                 frame = ScrollbackFrame(scrollbackOffset = 0, rows = 1),
                 renderReader = renderReader,
             )
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
+        val component = createComponent(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.setSize(60, 20)
             component.bind(session)
-        }
-        SwingUtilities.invokeAndWait {
+            assertEquals(5, component.viewportState().historySize)
             component.mouseListeners.forEach { it.mousePressed(mousePressed(component, x = 8, y = 8, clickCount = 1)) }
             component.mouseMotionListeners.forEach { it.mouseDragged(mouseDragged(component, x = 8, y = -10)) }
-        }
-        awaitRequestedOffset(renderReader, expectedOffset = 1)
-        SwingUtilities.invokeAndWait {
+            // Release before the repeat timer can extend this one-row drag request.
             component.mouseListeners.forEach { it.mouseReleased(mouseReleased(component, x = 8, y = -10)) }
         }
-        assertEquals(1, renderReader.lastRequestedOffset)
-        session.close()
-    }
-
-    private fun awaitRequestedOffset(
-        renderReader: ScrollbackFrameReader,
-        expectedOffset: Int,
-    ) {
-        repeat(200) {
-            SwingUtilities.invokeAndWait {}
-            if (renderReader.lastRequestedOffset == expectedOffset) return
-            Thread.sleep(5)
+        assertEquals(1, requestedOffset.get(1, TimeUnit.SECONDS))
+        SwingUtilities.invokeAndWait {
+            assertEquals(1, renderReader.lastRequestedOffset)
+            assertEquals(1, component.viewportState().renderOffset)
         }
-        assertEquals(expectedOffset, renderReader.lastRequestedOffset)
+        session.close()
     }
 
     @Test
     fun `alt drag creates rectangular block selection`() {
         val frame = TestRenderFrame.text("hello world")
         val session = testSession(frame = frame)
-        val component = SwingTerminal(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
+        val component = createComponent(settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) })
 
         SwingUtilities.invokeAndWait {
             component.setSize(300, 80)
@@ -471,7 +478,7 @@ class SwingTerminalSelectionTest {
                 selectionBackground = 0xFFFF00FF.toInt(),
             )
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = { settings },
                 hostServices = SwingHostServices(clipboardHandler = clipboard),
             )
@@ -595,7 +602,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("hello world")
         val session = testSession(frame = frame)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = {
                     SwingSettings(padding = SwingPadding(0, 0, 0, 0))
                 },
@@ -634,7 +641,7 @@ class SwingTerminalSelectionTest {
             )
         val session = testSession(frame = frame)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = {
                     SwingSettings(padding = SwingPadding(0, 0, 0, 0))
                 },
@@ -664,7 +671,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame(arrayOf(Array(5) { TestCell() }))
         val session = testSession(frame = frame)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices = SwingHostServices(clipboardHandler = clipboard),
             )
@@ -689,7 +696,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("ready")
         val session = testSession(frame = frame, inputEncoder = input)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = {
                     SwingSettings(smartSuggestionsEnabled = true, padding = SwingPadding(0, 0, 0, 0))
                 },
@@ -726,7 +733,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("ready")
         val session = testSession(frame = frame, inputEncoder = input)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = {
                     SwingSettings(padding = SwingPadding(0, 0, 0, 0))
                 },
@@ -756,7 +763,7 @@ class SwingTerminalSelectionTest {
         val frame = TestRenderFrame.text("ready")
         val session = testSession(frame = frame, inputEncoder = input)
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = {
                     SwingSettings(padding = SwingPadding(0, 0, 0, 0))
                 },
@@ -810,7 +817,7 @@ class SwingTerminalSelectionTest {
                     },
             )
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
@@ -857,7 +864,7 @@ class SwingTerminalSelectionTest {
                 hyperlinkResolver = TerminalHyperlinkResolver { "https://example.com" },
             )
         val component =
-            SwingTerminal(
+            createComponent(
                 settingsProvider = { SwingSettings(padding = SwingPadding(0, 0, 0, 0)) },
                 hostServices =
                     SwingHostServices(
@@ -891,7 +898,7 @@ class SwingTerminalSelectionTest {
         inputEncoder: TerminalInputEncoder = NoOpInputEncoder,
         renderReader: TerminalRenderFrameReader = StaticFrameReader(frame),
         hyperlinkResolver: TerminalHyperlinkResolver = TerminalHyperlinkResolver.NONE,
-        workerDispatcher: CoroutineDispatcher = Dispatchers.Default,
+        workerDispatcher: CoroutineDispatcher = Dispatchers.Unconfined,
         publishInitialFrame: Boolean = true,
     ): TerminalSession {
         val terminal = TerminalBuffers.create(width = frame.columns, height = frame.rows, maxHistory = 5)
@@ -908,6 +915,7 @@ class SwingTerminalSelectionTest {
                 workerDispatcher = workerDispatcher,
             )
         if (publishInitialFrame) session.renderPublisher.updateAndPublish(renderReader)
+        sessions += session
         return session
     }
 
@@ -1040,7 +1048,9 @@ class SwingTerminalSelectionTest {
         }
     }
 
-    private class ScrollbackFrameReader : TerminalRenderFrameReader {
+    private class ScrollbackFrameReader(
+        private val onViewportRequested: (Int) -> Unit,
+    ) : TerminalRenderFrameReader {
         @Volatile
         var lastRequestedOffset: Int = -1
             private set
@@ -1055,6 +1065,7 @@ class SwingTerminalSelectionTest {
         ) {
             lastRequestedOffset = scrollbackOffset
             consumer.accept(ScrollbackFrame(scrollbackOffset = scrollbackOffset.coerceIn(0, 5), rows = 1))
+            onViewportRequested(scrollbackOffset)
         }
 
         override fun readRenderFrame(
@@ -1069,6 +1080,7 @@ class SwingTerminalSelectionTest {
                     rows = viewportRows.coerceAtLeast(1),
                 ),
             )
+            onViewportRequested(scrollbackOffset)
         }
     }
 
