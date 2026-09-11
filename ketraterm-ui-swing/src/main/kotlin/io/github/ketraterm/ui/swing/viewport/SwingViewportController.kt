@@ -22,7 +22,6 @@ import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingTerminalChrome
 import java.awt.Dimension
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import javax.swing.Timer
 
@@ -47,22 +46,49 @@ internal class SwingViewportController(
             initialDelay = 0
         }
     private val visibleGridSizeSnapshot = AtomicLong(packVisibleGridSize(1, 1))
-    private val viewportHistorySizeSnapshot = AtomicInteger(0)
-    private val viewportScrollbackOffsetSnapshot = AtomicLong(doubleToRawLongBits(0.0))
-    private val viewportRenderOffsetSnapshot = AtomicInteger(0)
-    private val viewportVisibleRowsSnapshot = AtomicInteger(1)
-    private val viewportRequestedRowsSnapshot = AtomicInteger(1)
-    private val viewportVisualOffsetPixelsSnapshot = AtomicLong(doubleToRawLongBits(0.0))
-    private val viewportVisualRangePixelsSnapshot = AtomicInteger(0)
-    private val viewportHeightPixelsSnapshot = AtomicInteger(0)
-    private val viewportContentHeightPixelsSnapshot = AtomicInteger(0)
-    private val viewportCellHeightPixelsSnapshot = AtomicInteger(1)
+
+    // The EDT is the sole writer. All payload fields are volatile so their reads
+    // participate in the same synchronization order as the version reads.
+    @Volatile private var viewportVersion = 0L
+
+    @Volatile private var publishedHistorySize = 0
+
+    @Volatile private var publishedScrollbackOffset = 0.0
+
+    @Volatile private var publishedRenderOffset = 0
+
+    @Volatile private var publishedVisibleRows = 1
+
+    @Volatile private var publishedRequestedRows = 1
+
+    @Volatile private var publishedVisualOffsetPixels = 0.0
+
+    @Volatile private var publishedVisualRangePixels = 0
+
+    @Volatile private var publishedViewportHeightPixels = 0
+
+    @Volatile private var publishedContentHeightPixels = 0
+
+    @Volatile private var publishedCellHeightPixels = 1
 
     val requestedOffset: Int
         get() = scrollModel.requestedOffset
 
     val preciseOffset: Double
         get() = scrollModel.preciseScrollbackOffset
+
+    /** Published scrollbar metrics for EDT painting; other threads use [viewportStateSnapshot]. */
+    val historySize: Int
+        get() = publishedHistorySize
+
+    val visualScrollOffsetPixels: Double
+        get() = publishedVisualOffsetPixels
+
+    val visualScrollRangePixels: Int
+        get() = publishedVisualRangePixels
+
+    val viewportHeightPixels: Int
+        get() = publishedViewportHeightPixels
 
     fun reset() {
         cancelScroll()
@@ -281,19 +307,46 @@ internal class SwingViewportController(
         return desiredOrigin.coerceIn(minimumOrigin, 0.0)
     }
 
-    fun viewportStateSnapshot(): TerminalViewportState =
-        TerminalViewportState(
-            historySize = viewportHistorySizeSnapshot.get(),
-            scrollbackOffset = longBitsToDouble(viewportScrollbackOffsetSnapshot.get()),
-            renderOffset = viewportRenderOffsetSnapshot.get(),
-            visibleRows = viewportVisibleRowsSnapshot.get(),
-            requestedRows = viewportRequestedRowsSnapshot.get(),
-            visualScrollOffsetPixels = longBitsToDouble(viewportVisualOffsetPixelsSnapshot.get()),
-            visualScrollRangePixels = viewportVisualRangePixelsSnapshot.get(),
-            viewportHeightPixels = viewportHeightPixelsSnapshot.get(),
-            contentHeightPixels = viewportContentHeightPixelsSnapshot.get(),
-            cellHeightPixels = viewportCellHeightPixelsSnapshot.get(),
-        )
+    /**
+     * Copies one completed publication without dispatching to or locking the EDT.
+     * A concurrent publication retries the primitive reads; only the accepted
+     * result allocates. The writer cannot call user code while its version is odd.
+     */
+    fun viewportStateSnapshot(): TerminalViewportState {
+        while (true) {
+            val version = viewportVersion
+            if (version and 1L != 0L) {
+                Thread.onSpinWait()
+                continue
+            }
+            val historySize = publishedHistorySize
+            val scrollbackOffset = publishedScrollbackOffset
+            val renderOffset = publishedRenderOffset
+            val visibleRows = publishedVisibleRows
+            val requestedRows = publishedRequestedRows
+            val visualScrollOffsetPixels = publishedVisualOffsetPixels
+            val visualScrollRangePixels = publishedVisualRangePixels
+            val viewportHeightPixels = publishedViewportHeightPixels
+            val contentHeightPixels = publishedContentHeightPixels
+            val cellHeightPixels = publishedCellHeightPixels
+            if (version != viewportVersion) {
+                Thread.onSpinWait()
+                continue
+            }
+            return TerminalViewportState(
+                historySize = historySize,
+                scrollbackOffset = scrollbackOffset,
+                renderOffset = renderOffset,
+                visibleRows = visibleRows,
+                requestedRows = requestedRows,
+                visualScrollOffsetPixels = visualScrollOffsetPixels,
+                visualScrollRangePixels = visualScrollRangePixels,
+                viewportHeightPixels = viewportHeightPixels,
+                contentHeightPixels = contentHeightPixels,
+                cellHeightPixels = cellHeightPixels,
+            )
+        }
+    }
 
     fun publishViewportState(
         historySize: Int,
@@ -309,17 +362,20 @@ internal class SwingViewportController(
         val renderOffset = scrollModel.requestedOffset
         val visualScrollOffsetPixels = scrollModel.visualScrollOffsetPixels
         val visualScrollRangePixels = scrollModel.visualScrollRangePixels
+        val cellHeightPixels = scrollModel.cellHeightPixels
 
-        viewportHistorySizeSnapshot.set(historySize)
-        viewportScrollbackOffsetSnapshot.set(doubleToRawLongBits(scrollbackOffset))
-        viewportRenderOffsetSnapshot.set(renderOffset)
-        viewportVisibleRowsSnapshot.set(visibleRows)
-        viewportRequestedRowsSnapshot.set(requestedRows)
-        viewportVisualOffsetPixelsSnapshot.set(doubleToRawLongBits(visualScrollOffsetPixels))
-        viewportVisualRangePixelsSnapshot.set(visualScrollRangePixels)
-        viewportHeightPixelsSnapshot.set(viewportHeightPixels)
-        viewportContentHeightPixelsSnapshot.set(contentHeightPixels)
-        viewportCellHeightPixelsSnapshot.set(scrollModel.cellHeightPixels)
+        viewportVersion++
+        publishedHistorySize = historySize
+        publishedScrollbackOffset = scrollbackOffset
+        publishedRenderOffset = renderOffset
+        publishedVisibleRows = visibleRows
+        publishedRequestedRows = requestedRows
+        publishedVisualOffsetPixels = visualScrollOffsetPixels
+        publishedVisualRangePixels = visualScrollRangePixels
+        publishedViewportHeightPixels = viewportHeightPixels
+        publishedContentHeightPixels = contentHeightPixels
+        publishedCellHeightPixels = cellHeightPixels
+        viewportVersion++
         if (!notifyListener) {
             if (notifyPrimitiveListener) {
                 listener.viewportChanged(
@@ -344,7 +400,7 @@ internal class SwingViewportController(
                 visualScrollRangePixels = visualScrollRangePixels,
                 viewportHeightPixels = viewportHeightPixels,
                 contentHeightPixels = contentHeightPixels,
-                cellHeightPixels = scrollModel.cellHeightPixels,
+                cellHeightPixels = cellHeightPixels,
             ),
         )
     }
@@ -377,10 +433,6 @@ internal class SwingViewportController(
         fun unpackVisibleColumns(packed: Long): Int = (packed ushr 32).toInt()
 
         fun unpackVisibleRows(packed: Long): Int = packed.toInt()
-
-        private fun doubleToRawLongBits(value: Double): Long = java.lang.Double.doubleToRawLongBits(value)
-
-        private fun longBitsToDouble(value: Long): Double = java.lang.Double.longBitsToDouble(value)
 
         private fun ceilDiv(
             value: Int,

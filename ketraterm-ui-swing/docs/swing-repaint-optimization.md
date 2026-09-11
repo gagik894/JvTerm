@@ -67,6 +67,24 @@ baseline. Frame handling
 owns repainting and viewport publication for that transition, so reconciliation
 does not emit a second scroll callback.
 
+The resize result uses the active buffer's coordinates. Primary history still
+reflows while the alternate buffer is active, but the alternate viewport has
+zero history and offset. Core returns that coherent pair; session captures it
+with the discard baseline before notifying the connector and publishing.
+
+Viewport snapshots copy a completed EDT publication. A version brackets the
+primitive stores, and a reader accepts its copy only if the version is unchanged
+and even. Every payload field is volatile, so those reads participate in the
+same synchronization order as the version checks. Calculations happen before
+publication starts; listener callbacks happen after it completes. This keeps
+animation publication allocation-free and lets off-EDT readers obtain a coherent
+immutable snapshot without dispatching to the EDT.
+
+Scrollbar painting reads the published primitive metrics on the EDT, avoiding
+an intermediate viewport snapshot. Its geometry storage and palette-derived
+colors are retained. Painting and pointer interaction share the thumb geometry
+calculation, including tracks shorter than the normal minimum thumb height.
+
 ---
 
 ## 2. Selection Drag Matrix & Text Extraction

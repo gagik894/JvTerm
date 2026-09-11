@@ -30,6 +30,10 @@ import kotlin.math.roundToInt
  * EDT-owned overlay scrollbar painted inside the terminal's reserved right inset.
  */
 internal class TerminalScrollbarOverlay {
+    private val thumb = Rectangle()
+    private var foregroundRgb = -1
+    private var normalThumbColor = Color(0, 0, 0, THUMB_ALPHA)
+    private var activeThumbColor = Color(0, 0, 0, HOVER_THUMB_ALPHA)
     private var dragThumbOffsetY: Int = 0
     var hovered: Boolean = false
         private set
@@ -43,20 +47,44 @@ internal class TerminalScrollbarOverlay {
         palette: TerminalColorPalette,
         componentWidth: Int,
         componentHeight: Int,
-        state: TerminalViewportState,
+        historySize: Int,
+        visualScrollOffsetPixels: Double,
+        visualScrollRangePixels: Int,
+        viewportHeightPixels: Int,
     ) {
-        if (!isThumbVisible(settings, activeBuffer, componentWidth, componentHeight, state)) return
-        val thumb = thumbBounds(settings, activeBuffer, componentWidth, componentHeight, state) ?: return
-        val graphics = g.create() as Graphics2D
+        if (!updateThumbBounds(
+                settings,
+                activeBuffer,
+                componentWidth,
+                componentHeight,
+                historySize,
+                visualScrollOffsetPixels,
+                visualScrollRangePixels,
+                viewportHeightPixels,
+                thumb,
+            )
+        ) {
+            return
+        }
+        val previousColor = g.color
+        val previousPaint = g.paint
+        val previousAntialiasing = g.getRenderingHint(RenderingHints.KEY_ANTIALIASING)
         try {
-            graphics.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-            graphics.color = thumbColor(palette)
-            if (hovered || dragging) {
-                graphics.color = hoverThumbColor(palette)
-            }
-            graphics.fillRoundRect(thumb.x, thumb.y, thumb.width, thumb.height, thumb.width, thumb.width)
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g.color = thumbColor(palette)
+            g.fillRoundRect(thumb.x, thumb.y, thumb.width, thumb.height, thumb.width, thumb.width)
         } finally {
-            graphics.dispose()
+            g.color = previousColor
+            g.paint = previousPaint
+            if (previousAntialiasing != null) {
+                g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, previousAntialiasing)
+            } else {
+                val hints = g.renderingHints
+                hints.remove(RenderingHints.KEY_ANTIALIASING)
+                // The getter returns RenderingHints, but the setter accepts Map; the Kotlin property is read-only.
+                @Suppress("UsePropertyAccessSyntax")
+                g.setRenderingHints(hints)
+            }
         }
     }
 
@@ -71,9 +99,7 @@ internal class TerminalScrollbarOverlay {
         scrollTo: (Int, Boolean) -> Unit,
     ): Boolean {
         if (!containsGutter(settings, activeBuffer, componentWidth, componentHeight, x, y)) return false
-        if (!isThumbVisible(settings, activeBuffer, componentWidth, componentHeight, state)) return true
-
-        val thumb = thumbBounds(settings, activeBuffer, componentWidth, componentHeight, state) ?: return true
+        if (!copyThumbBounds(settings, activeBuffer, componentWidth, componentHeight, state, thumb)) return true
         dragging = true
         dragThumbOffsetY =
             if (thumb.contains(x, y)) {
@@ -148,34 +174,63 @@ internal class TerminalScrollbarOverlay {
         return x in (componentWidth - rightInset) until componentWidth && y in top until bottom
     }
 
-    fun thumbBounds(
+    /** Copies paint and input thumb geometry into caller-owned storage, or returns false when hidden. */
+    fun copyThumbBounds(
         settings: SwingSettings,
         activeBuffer: TerminalRenderBufferKind,
         componentWidth: Int,
         componentHeight: Int,
         state: TerminalViewportState,
-    ): Rectangle? {
-        if (!isThumbVisible(settings, activeBuffer, componentWidth, componentHeight, state)) return null
+        destination: Rectangle,
+    ): Boolean =
+        updateThumbBounds(
+            settings,
+            activeBuffer,
+            componentWidth,
+            componentHeight,
+            state.historySize,
+            state.visualScrollOffsetPixels,
+            state.visualScrollRangePixels,
+            state.viewportHeightPixels,
+            destination,
+        )
+
+    private fun updateThumbBounds(
+        settings: SwingSettings,
+        activeBuffer: TerminalRenderBufferKind,
+        componentWidth: Int,
+        componentHeight: Int,
+        historySize: Int,
+        visualScrollOffsetPixels: Double,
+        visualScrollRangePixels: Int,
+        viewportHeightPixels: Int,
+        destination: Rectangle,
+    ): Boolean {
+        if (activeBuffer == TerminalRenderBufferKind.ALTERNATE ||
+            componentWidth <= 0 ||
+            historySize <= 0 ||
+            visualScrollRangePixels <= 0 ||
+            viewportHeightPixels <= 0
+        ) {
+            return false
+        }
         val rightInset = SwingTerminalChrome.right(settings, activeBuffer)
         val trackTop = SwingTerminalChrome.top(settings, activeBuffer)
         val trackHeight = componentHeight - trackTop - SwingTerminalChrome.bottom(settings, activeBuffer)
-        val thumbWidth = minOf(MAX_THUMB_WIDTH, maxOf(MIN_THUMB_WIDTH, rightInset - THUMB_HORIZONTAL_PADDING * 2))
-        val thumbHeight =
-            (
-                (trackHeight.toLong() * state.viewportHeightPixels.toLong()) /
-                    (state.visualScrollRangePixels.toLong() + state.viewportHeightPixels.toLong())
-            ).coerceIn(MIN_THUMB_HEIGHT.toLong(), trackHeight.toLong())
-                .toInt()
+        if (rightInset <= 0 || trackHeight <= 0) return false
+        val thumbWidth = minOf(rightInset, MAX_THUMB_WIDTH, maxOf(MIN_THUMB_WIDTH, rightInset - THUMB_HORIZONTAL_PADDING * 2))
+        val thumbHeight = thumbHeight(trackHeight, visualScrollRangePixels, viewportHeightPixels)
         val travel = trackHeight - thumbHeight
         val thumbTop =
             if (travel <= 0) {
                 trackTop
             } else {
-                val topOriginPixels = state.visualScrollRangePixels - state.visualScrollOffsetPixels.roundToInt()
-                trackTop + ((topOriginPixels.toLong() * travel.toLong()) / state.visualScrollRangePixels.toLong()).toInt()
+                val topOriginPixels = visualScrollRangePixels - visualScrollOffsetPixels.roundToInt().coerceIn(0, visualScrollRangePixels)
+                trackTop + ((topOriginPixels.toLong() * travel.toLong()) / visualScrollRangePixels.toLong()).toInt()
             }
         val x = componentWidth - rightInset + (rightInset - thumbWidth) / 2
-        return Rectangle(x, thumbTop, thumbWidth, thumbHeight)
+        destination.setBounds(x, thumbTop, thumbWidth, thumbHeight)
+        return true
     }
 
     private fun offsetAtThumbTop(
@@ -185,13 +240,18 @@ internal class TerminalScrollbarOverlay {
         componentHeight: Int,
         state: TerminalViewportState,
     ): Int {
-        if (state.historySize <= 0 || state.visualScrollRangePixels <= 0) return 0
+        if (activeBuffer == TerminalRenderBufferKind.ALTERNATE ||
+            state.historySize <= 0 ||
+            SwingTerminalChrome.right(settings, activeBuffer) <= 0
+        ) {
+            return 0
+        }
         val trackTop = SwingTerminalChrome.top(settings, activeBuffer)
         val trackHeight = componentHeight - trackTop - SwingTerminalChrome.bottom(settings, activeBuffer)
-        if (trackHeight <= 0) return 0
-        val thumbHeight = thumbBounds(settings, activeBuffer, 1, componentHeight, state)?.height ?: return 0
+        val thumbHeight = thumbHeight(trackHeight, state.visualScrollRangePixels, state.viewportHeightPixels)
+        if (thumbHeight == 0) return 0
         val travel = trackHeight - thumbHeight
-        if (travel <= 0) return 0
+        if (travel <= 0) return state.scrollbackOffset.roundToInt().coerceIn(0, state.historySize)
 
         val clampedTop = thumbTop.coerceIn(trackTop, trackTop + travel)
         val topOriginPixels =
@@ -200,31 +260,25 @@ internal class TerminalScrollbarOverlay {
         return (state.historySize - topRow).coerceIn(0, state.historySize)
     }
 
-    private fun isThumbVisible(
-        settings: SwingSettings,
-        activeBuffer: TerminalRenderBufferKind,
-        componentWidth: Int,
-        componentHeight: Int,
-        state: TerminalViewportState,
-    ): Boolean =
-        activeBuffer != TerminalRenderBufferKind.ALTERNATE &&
-            SwingTerminalChrome.right(settings, activeBuffer) > 0 &&
-            componentWidth > 0 &&
-            componentHeight > SwingTerminalChrome.verticalInset(settings, activeBuffer) &&
-            state.historySize > 0 &&
-            state.visualScrollRangePixels > 0 &&
-            state.viewportHeightPixels > 0
+    private fun thumbHeight(
+        trackHeight: Int,
+        visualScrollRangePixels: Int,
+        viewportHeightPixels: Int,
+    ): Int {
+        if (trackHeight <= 0 || visualScrollRangePixels <= 0 || viewportHeightPixels <= 0) return 0
+        val proportionalHeight =
+            (trackHeight.toLong() * viewportHeightPixels) / (visualScrollRangePixels.toLong() + viewportHeightPixels)
+        return proportionalHeight.coerceIn(minOf(MIN_THUMB_HEIGHT, trackHeight).toLong(), trackHeight.toLong()).toInt()
+    }
 
-    private fun thumbColor(palette: TerminalColorPalette): Color = blendedColor(palette, THUMB_ALPHA)
-
-    private fun hoverThumbColor(palette: TerminalColorPalette): Color = blendedColor(palette, HOVER_THUMB_ALPHA)
-
-    private fun blendedColor(
-        palette: TerminalColorPalette,
-        alpha: Int,
-    ): Color {
-        val foreground = Color(palette.defaultForeground, true)
-        return Color(foreground.red, foreground.green, foreground.blue, alpha)
+    private fun thumbColor(palette: TerminalColorPalette): Color {
+        val rgb = palette.defaultForeground and 0x00ff_ffff
+        if (foregroundRgb != rgb) {
+            foregroundRgb = rgb
+            normalThumbColor = Color(rgb or (THUMB_ALPHA shl 24), true)
+            activeThumbColor = Color(rgb or (HOVER_THUMB_ALPHA shl 24), true)
+        }
+        return if (hovered || dragging) activeThumbColor else normalThumbColor
     }
 
     private companion object {

@@ -18,6 +18,8 @@ package io.github.ketraterm.core.buffer
 import io.github.ketraterm.core.state.TerminalState
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
 
 class DefaultTerminalBufferResizeTest {
     private fun stateOf(buffer: DefaultTerminalBuffer): TerminalState {
@@ -28,6 +30,37 @@ class DefaultTerminalBufferResizeTest {
         val stateField = components.javaClass.getDeclaredField("state")
         stateField.isAccessible = true
         return stateField.get(components) as TerminalState
+    }
+
+    @ParameterizedTest
+    @CsvSource("8, 3", "8, 4", "10, 3")
+    fun `resize returns the active alternate viewport while retaining primary history`(
+        newWidth: Int,
+        newHeight: Int,
+    ) {
+        val buffer = DefaultTerminalBuffer(initialWidth = 8, initialHeight = 3, maxHistory = 16)
+        val sourceRows = (0..6).map { "row$it" }
+        for ((row, text) in sourceRows.withIndex()) {
+            if (row > 0) {
+                buffer.carriageReturn()
+                buffer.newLine()
+            }
+            for (character in text) buffer.writeCodepoint(character.code)
+        }
+        assertEquals(4, buffer.historySize)
+        buffer.enterAltBuffer()
+
+        val result = buffer.resize(newWidth, newHeight, oldScrollbackOffset = 2)
+
+        assertEquals(0 to 0, result)
+        assertEquals(newWidth, buffer.width)
+        assertEquals(newHeight, buffer.height)
+        assertEquals(0, buffer.historySize)
+        buffer.exitAltBuffer()
+        assertEquals(newWidth, buffer.width)
+        assertEquals(newHeight, buffer.height)
+        assertEquals(4, buffer.historySize)
+        assertEquals(sourceRows.joinToString("\n"), buffer.getAllAsString().trimEnd())
     }
 
     @Test
