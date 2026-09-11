@@ -2,7 +2,7 @@
 
 Release notes for library consumers and embedders. Product-specific changes are recorded in the [IntelliJ plugin changelog](ketraterm-intellij-plugin/CHANGELOG.md) and [standalone application changelog](ketraterm-app/CHANGELOG.md).
 
-## [Unreleased]
+## [0.2.2] - 2026-09-11
 
 - Raised the minimum build and runtime requirement from Java 21 to Java 25. Library consumers must provide Java 25 or newer.
 - Refactored session and render orchestration around coroutine-based lifecycle and bounded latest-frame publication, reducing redundant frame extraction during heavy output while keeping Swing/workspace rendering off core read paths.

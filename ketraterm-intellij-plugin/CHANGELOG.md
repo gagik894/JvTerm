@@ -1,6 +1,6 @@
 # KetraTerm IntelliJ Plugin Changelog
 
-## [Unreleased]
+## [0.2.2] - 2026-09-11
 
 - Fixed alignment of Hebrew, Arabic, and mixed-direction text with cell backgrounds, the cursor, selection and search highlights, and mouse targets.
 - Fixed Arabic letter forms changing under the block cursor and missing text in very long lines that require contextual shaping.
