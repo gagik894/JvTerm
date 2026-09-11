@@ -16,6 +16,7 @@
 package io.github.ketraterm.ui.swing.render.cache
 
 import io.github.ketraterm.ui.swing.api.TerminalFontResolver
+import io.github.ketraterm.ui.swing.render.TerminalEmojiPresentation
 import io.github.ketraterm.ui.swing.render.font.TerminalSystemFallbackFonts
 import io.github.ketraterm.ui.swing.render.font.TerminalSystemFontFamilies
 import java.awt.Font
@@ -155,7 +156,7 @@ internal class FontCache(
         if (cached != null) return cached
 
         val primary = font(normalizedStyle)
-        val isEmoji = isEmojiPresentationCodePoint(codePoint)
+        val isEmoji = TerminalEmojiPresentation.usesEmojiPresentation(codePoint)
 
         if (isEmoji && fontResolver != null) {
             val resolved = fontResolver.resolveFallbackFont(codePoint, normalizedStyle, primary.size2D)
@@ -232,7 +233,7 @@ internal class FontCache(
         if (cached != null) return cached
 
         val primary = font(normalizedStyle)
-        val isEmoji = containsEmojiPresentation(text)
+        val isEmoji = TerminalEmojiPresentation.usesEmojiPresentation(text)
 
         if (isEmoji && fontResolver != null) {
             val resolved = fontResolver.resolveFallbackFont(text, normalizedStyle, primary.size2D)
@@ -591,26 +592,6 @@ internal class FontCache(
         private const val LOAD_FACTOR = 0.75f
         private const val EMPTY = -1
 
-        private fun containsEmojiPresentation(text: String): Boolean {
-            var charIndex = 0
-            while (charIndex < text.length) {
-                val codePoint = text.codePointAt(charIndex)
-                if (codePoint == VARIATION_SELECTOR_16 ||
-                    codePoint == ZERO_WIDTH_JOINER ||
-                    isEmojiPresentationCodePoint(codePoint)
-                ) {
-                    return true
-                }
-                charIndex += Character.charCount(codePoint)
-            }
-            return false
-        }
-
-        private fun isEmojiPresentationCodePoint(codePoint: Int): Boolean =
-            codePoint in 0x1F000..0x1FAFF ||
-                codePoint in 0x2600..0x27BF ||
-                codePoint in 0x2B00..0x2BFF
-
         private fun isEmojiFontFamily(family: String): Boolean {
             val normalized = family.lowercase(Locale.ROOT)
             return "emoji" in normalized ||
@@ -625,8 +606,5 @@ internal class FontCache(
             }
             return capacity
         }
-
-        private const val VARIATION_SELECTOR_16 = 0xFE0F
-        private const val ZERO_WIDTH_JOINER = 0x200D
     }
 }

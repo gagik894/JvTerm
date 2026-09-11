@@ -19,9 +19,83 @@ import io.github.ketraterm.ui.swing.api.TerminalFontResolver
 import io.github.ketraterm.ui.swing.render.font.TerminalSystemFontFamilies
 import org.junit.jupiter.api.Assertions
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Font
 
 class FontCacheTest {
+    @ParameterizedTest
+    @ValueSource(strings = ["\u0628\u0628\u200D\u0628", "\u0628\uFE0F", "A\u200D", "\u2764", "\u2764\uFE0E", "\uD83D\uDE00\uFE0E"])
+    fun `text presentation keeps primary font when emoji fallback advertises native substitutes`(text: String) {
+        val primary = NativeCoverageFont("Text")
+        val cache = FontCache()
+        cache.update(primary, listOf(NativeCoverageFont("Test Emoji")), useSystemFallbackFonts = false)
+
+        Assertions.assertSame(primary, cache.fontForText(text, Font.PLAIN))
+        if (text.codePointCount(0, text.length) == 1) {
+            Assertions.assertSame(primary, cache.fontForCodePoint(text.codePointAt(0), Font.PLAIN))
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["\u0628\u0628\u200D\u0628", "\u0628\uFE0F", "\u2764\uFE0E"])
+    fun `text presentation does not request an emoji priority override from host resolver`(text: String) {
+        val primary = NativeCoverageFont("Text")
+        var resolutions = 0
+        val resolver =
+            object : TerminalFontResolver {
+                override fun resolveFallbackFont(
+                    codePoint: Int,
+                    style: Int,
+                    size2D: Float,
+                ): Font = error("Unexpected scalar lookup")
+
+                override fun resolveFallbackFont(
+                    text: String,
+                    style: Int,
+                    size2D: Float,
+                ): Font {
+                    resolutions++
+                    return NativeCoverageFont("Host Emoji", style, size2D)
+                }
+            }
+        val cache = FontCache(fontResolver = resolver)
+        cache.update(primary, emptyList(), useSystemFallbackFonts = false)
+
+        Assertions.assertSame(primary, cache.fontForText(text, Font.PLAIN))
+        Assertions.assertEquals(0, resolutions)
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["\uD83D\uDE00", "\u2764\uFE0F", "\uD83D\uDC69\u200D\uD83D\uDCBB", "1\uFE0F\u20E3"])
+    fun `emoji presentation still prefers the configured emoji font`(text: String) {
+        val cache = FontCache()
+        cache.update(NativeCoverageFont("Text"), listOf(NativeCoverageFont("Test Emoji")), useSystemFallbackFonts = false)
+
+        Assertions.assertEquals("Test Emoji", cache.fontForText(text, Font.PLAIN).family)
+        if (text.codePointCount(0, text.length) == 1) {
+            Assertions.assertEquals("Test Emoji", cache.fontForCodePoint(text.codePointAt(0), Font.PLAIN).family)
+        }
+    }
+
+    /** Models font coverage that includes native substitution, as with CoreText on macOS. */
+    private class NativeCoverageFont(
+        private val reportedFamily: String,
+        style: Int = PLAIN,
+        size: Float = 18f,
+    ) : Font(DIALOG, style, size.toInt()) {
+        override fun getFamily(): String = reportedFamily
+
+        override fun canDisplay(codePoint: Int): Boolean = true
+
+        override fun canDisplayUpTo(text: String): Int = -1
+
+        override fun deriveFont(
+            style: Int,
+            size: Float,
+        ): Font = NativeCoverageFont(reportedFamily, style, size)
+    }
+
     @Test
     fun replacingCallerFallbackDoesNotChangeConfiguredFontsBeforeUpdate() {
         val primary = TerminalCacheTestFonts.primary(14f)

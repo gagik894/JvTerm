@@ -110,6 +110,13 @@ before the ordinary pipeline. All resolved fonts inherit the configured size,
 and results are cached. Native color-emoji painting is a separate platform path;
 it does not depend on detecting JetBrains Runtime.
 
+Native dispatch and font preference share `TerminalEmojiPresentation` for
+scalars, primitive cluster slices, and UTF-16 text. Joiners and variation
+selectors do not make ordinary script text emoji; an emoji base is required.
+VS15 retains text presentation. This distinction also matters when a platform
+emoji font advertises ordinary text coverage through native font substitution:
+that coverage must not give it precedence over a capable primary text font.
+
 ## Allocation measurement boundaries
 
 These painters and caches belong to the EDT. Their scratch storage is reused and
@@ -133,6 +140,11 @@ against the larger full run would include different Java2D work. Raster tests
 preserve antialiased coverage: cursor comparisons erase the previous cell before
 repainting and compare exact alpha and color. Drawing again with `SrcOver` onto
 existing coverage is not an idempotent operation, even with the same glyphs.
+
+Arabic shaping comparisons retain the exact input, including joiners. A ZWJ can
+suppress Arabic ligatures, so deleting it is not a portable glyph or pixel
+reference. Cache tests compare against direct Java2D shaping of the same text;
+painter tests verify the complete contextual input and exact cursor restoration.
 
 Scrollbar painting receives primitive viewport metrics directly from the EDT-owned
 controller and reuses thumb geometry and colors. It does not call the public

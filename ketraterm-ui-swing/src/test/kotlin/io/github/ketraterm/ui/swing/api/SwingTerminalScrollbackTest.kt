@@ -32,6 +32,7 @@ import io.github.ketraterm.transport.TerminalConnectorListener
 import io.github.ketraterm.ui.swing.settings.SwingPadding
 import io.github.ketraterm.ui.swing.settings.SwingSettings
 import io.github.ketraterm.ui.swing.settings.SwingSettingsProvider
+import kotlinx.coroutines.test.StandardTestDispatcher
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.params.ParameterizedTest
@@ -227,6 +228,7 @@ class SwingTerminalScrollbackTest {
     fun `host scroll command requests absolute scrollback viewport`() {
         val terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5)
         val renderReader = ScrollbackFrameReader()
+        val dispatcher = StandardTestDispatcher()
         val session =
             TerminalSession(
                 terminal = terminal,
@@ -236,25 +238,35 @@ class SwingTerminalScrollbackTest {
                 connector = NoOpConnector,
                 parser = NoOpParser,
                 inputEncoder = NoOpInputEncoder,
+                workerDispatcher = dispatcher,
             )
         val component = scrollTestTerminal()
 
-        SwingUtilities.invokeAndWait {
-            component.setSize(30, 100)
-            component.bind(session)
-        }
-        SwingUtilities.invokeAndWait {
-            component.scrollToScrollbackOffset(4)
-        }
+        try {
+            SwingUtilities.invokeAndWait {
+                component.setSize(30, 100)
+                try {
+                    component.bind(session)
+                    assertNull(session.renderPublisher.current(), "The worker has not published the initial viewport yet")
+                    dispatcher.scheduler.runCurrent()
+                    assertEquals(5, component.viewportState().historySize, "Scrolling requires the published history bounds")
 
-        awaitRequestedOffset(renderReader, expectedOffset = 4)
-        drainEdt()
-        val state = component.viewportState()
-        assertTrue(renderReader.requestedOffsets.contains(4), "reader never received absolute scrollback offset 4")
-        assertEquals(5, state.historySize)
-        assertEquals(4.0, state.scrollbackOffset)
-        assertEquals(4, state.renderOffset)
-        session.close()
+                    component.scrollToScrollbackOffset(4)
+                    dispatcher.scheduler.runCurrent()
+
+                    val state = component.viewportState()
+                    assertTrue(renderReader.requestedOffsets.contains(4), "reader never received absolute scrollback offset 4")
+                    assertEquals(5, state.historySize)
+                    assertEquals(4.0, state.scrollbackOffset)
+                    assertEquals(4, state.renderOffset)
+                } finally {
+                    component.dispose()
+                }
+            }
+        } finally {
+            session.close()
+            dispatcher.scheduler.runCurrent()
+        }
     }
 
     @Test
@@ -750,17 +762,6 @@ class SwingTerminalScrollbackTest {
             Thread.onSpinWait()
         }
         assertTrue(expectedRows in reader.requestedRows, "render request did not cover $expectedRows rows")
-    }
-
-    private fun awaitRequestedOffset(
-        reader: ScrollbackFrameReader,
-        expectedOffset: Int,
-    ) {
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
-        while (expectedOffset !in reader.requestedOffsets && System.nanoTime() < deadline) {
-            Thread.onSpinWait()
-        }
-        assertTrue(expectedOffset in reader.requestedOffsets, "render request did not use offset $expectedOffset")
     }
 
     private fun awaitPublishedRows(

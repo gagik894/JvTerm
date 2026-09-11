@@ -57,7 +57,6 @@ internal class TerminalTextPainter(
             fontCache = fontCache,
             runStyle = runStyle,
             cellPrimitives = cellPrimitives,
-            platformEmojiPainter = platformEmojiPainter,
         )
 
     /**
@@ -279,7 +278,9 @@ internal class TerminalTextPainter(
         clip.setBounds(0, 0, -1, -1)
         g.getClipBounds(clip)
         val needsClip =
-            clip.width < 0 || clip.x < x || clip.y < y ||
+            clip.width < 0 ||
+                clip.x < x ||
+                clip.y < y ||
                 clip.x.toLong() + clip.width > x.toLong() + width ||
                 clip.y.toLong() + clip.height > y.toLong() + metrics.cellHeight
         // A caller's narrower clip already enforces the boundary, including

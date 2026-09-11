@@ -17,6 +17,7 @@ package io.github.ketraterm.ui.swing.render.primitives
 
 import com.sun.management.ThreadMXBean
 import io.github.ketraterm.ui.swing.render.TEST_RED
+import io.github.ketraterm.ui.swing.render.TerminalEmojiPresentation
 import io.github.ketraterm.ui.swing.render.cache.TerminalEmojiImageCache
 import io.github.ketraterm.ui.swing.render.containsColor
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
@@ -34,6 +35,8 @@ class TerminalPlatformEmojiPainterTest {
     @ParameterizedTest
     @ValueSource(ints = [0x41, 0xE9, 0x5D0, 0x6F22, 0x2764, 0x1D11E])
     fun `ordinary code point does not initialize native emoji rasterizer`(codePoint: Int) {
+        assertFalse(TerminalEmojiPresentation.usesEmojiPresentation(codePoint))
+        assertFalse(TerminalEmojiPresentation.usesEmojiPresentation(String(Character.toChars(codePoint))))
         var initializations = 0
         val painter =
             TerminalPlatformEmojiPainter {
@@ -58,6 +61,7 @@ class TerminalPlatformEmojiPainterTest {
             "", "e\u0301", "\u05D0\u05D1", "\u6F22", "\u2764\uFE0E", "\uD83D\uDE00\uFE0E",
             "\u0628\u200D", "\u0915\u094D\u200D", "\u0628\uFE0F", "\u0915\uFE0F",
             "\u200D", "\uFE0F", "A\u200D", "A\uFE0F", "A\u20E3", "#\uFE0E\u20E3",
+            "\uFE0E\uD83D\uDE00", "\uD83D\uDE00\uFE0E\uD83D\uDE00", "\uD83D", "\uDE00",
         ],
     )
     fun `ordinary or text presentation cluster does not initialize native emoji rasterizer`(text: String) {
@@ -69,6 +73,8 @@ class TerminalPlatformEmojiPainterTest {
             }
         // Emoji outside the requested slice must not affect classification.
         val codepoints = intArrayOf(0x1F600) + text.codePoints().toArray() + intArrayOf(0x1F600)
+        assertFalse(TerminalEmojiPresentation.usesEmojiPresentation(text))
+        assertFalse(TerminalEmojiPresentation.usesEmojiPresentation(codepoints, 1, codepoints.size - 2))
         val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
         val g = image.createGraphics()
         try {
@@ -109,6 +115,8 @@ class TerminalPlatformEmojiPainterTest {
 
     @Test
     fun `default emoji code point is rasterized through platform hook`() {
+        assertTrue(TerminalEmojiPresentation.usesEmojiPresentation(0x1F600))
+        assertTrue(TerminalEmojiPresentation.usesEmojiPresentation("\uD83D\uDE00"))
         val rasterizer = FakeEmojiRasterizer()
         val painter = TerminalPlatformEmojiPainter(rasterizer)
         val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
@@ -128,6 +136,7 @@ class TerminalPlatformEmojiPainterTest {
         strings = [
             "\u2764\uFE0F", "\u00A9\uFE0F", "\u00AE\uFE0F", "1\uFE0F\u20E3", "#\u20E3",
             "\uD83D\uDC69\u200D\uD83D\uDCBB", "\uD83C\uDFF3\uFE0F\u200D\uD83C\uDF08",
+            "\uD83D\uDE00", "\uD83D\uDE00\uFE0F",
         ],
     )
     fun `emoji sequences retain native dispatch and classification stays lazy`(text: String) {
@@ -140,11 +149,13 @@ class TerminalPlatformEmojiPainterTest {
             }
         val image = BufferedImage(20, 20, BufferedImage.TYPE_INT_ARGB)
         val g = image.createGraphics()
-        val codepoints = text.codePoints().toArray()
+        // Text selectors outside the slice must not suppress its presentation.
+        val codepoints = intArrayOf(0xFE0E) + text.codePoints().toArray() + intArrayOf(0xFE0E)
         try {
-            assertTrue(painter.usesEmojiPresentation(codepoints, 0, codepoints.size))
+            assertTrue(TerminalEmojiPresentation.usesEmojiPresentation(text))
+            assertTrue(TerminalEmojiPresentation.usesEmojiPresentation(codepoints, 1, codepoints.size - 2))
             assertEquals(0, initializations)
-            assertTrue(painter.paintCluster(g, codepoints, 0, codepoints.size, 0, 0, 1, METRICS))
+            assertTrue(painter.paintCluster(g, codepoints, 1, codepoints.size - 2, 0, 0, 1, METRICS))
             assertEquals(1, initializations)
         } finally {
             g.dispose()

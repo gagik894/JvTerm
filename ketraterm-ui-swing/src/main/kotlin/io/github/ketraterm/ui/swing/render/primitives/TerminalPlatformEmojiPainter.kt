@@ -15,6 +15,7 @@
  */
 package io.github.ketraterm.ui.swing.render.primitives
 
+import io.github.ketraterm.ui.swing.render.TerminalEmojiPresentation
 import io.github.ketraterm.ui.swing.render.cache.TerminalEmojiImageCache
 import io.github.ketraterm.ui.swing.render.platform.TerminalPlatformEmojiRasterizer
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
@@ -44,7 +45,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!usesEmojiPresentation(codePoint)) return false
+        if (!TerminalEmojiPresentation.usesEmojiPresentation(codePoint)) return false
         val pixelSize = pixelSize(metrics, columnSpan)
         val image = cache.codePointImage(codePoint, pixelSize) ?: return false
         return paintImage(g, image, pixelSize, column, row, columnSpan, metrics)
@@ -60,7 +61,7 @@ internal class TerminalPlatformEmojiPainter(
         columnSpan: Int,
         metrics: SwingMetrics,
     ): Boolean {
-        if (!usesEmojiPresentation(codepoints, offset, length)) return false
+        if (!TerminalEmojiPresentation.usesEmojiPresentation(codepoints, offset, length)) return false
         val pixelSize = pixelSize(metrics, columnSpan)
         val image = cache.clusterImage(codepoints, offset, length, pixelSize) ?: return false
         return paintImage(g, image, pixelSize, column, row, columnSpan, metrics)
@@ -95,76 +96,5 @@ internal class TerminalPlatformEmojiPainter(
             }
         }
         return true
-    }
-
-    /**
-     * Classifies native-emoji candidates without initializing the platform rasterizer.
-     * Joiners and presentation selectors require an emoji base; ordinary scripts use them too.
-     */
-    fun usesEmojiPresentation(
-        codepoints: IntArray,
-        offset: Int,
-        length: Int,
-    ): Boolean {
-        var defaultPresentation = false
-        var explicitPresentation = false
-        var emojiBase = false
-        var index = 0
-        while (index < length) {
-            when (val codePoint = codepoints[offset + index]) {
-                VARIATION_SELECTOR_15 -> return false
-                VARIATION_SELECTOR_16, ZERO_WIDTH_JOINER, COMBINING_ENCLOSING_KEYCAP -> explicitPresentation = true
-                else -> {
-                    defaultPresentation = defaultPresentation || usesEmojiPresentation(codePoint)
-                    emojiBase = emojiBase || Character.isEmoji(codePoint)
-                }
-            }
-            index++
-        }
-        return defaultPresentation || explicitPresentation && emojiBase
-    }
-
-    /** Scalar counterpart of the cluster presentation policy, shared with text-run dispatch. */
-    fun usesEmojiPresentation(codePoint: Int): Boolean =
-        codePoint in 0x1F000..0x1FAFF ||
-            codePoint in 0x231A..0x231B ||
-            codePoint in 0x23E9..0x23EC ||
-            codePoint == 0x23F0 ||
-            codePoint == 0x23F3 ||
-            codePoint in 0x25FD..0x25FE ||
-            codePoint in 0x2614..0x2615 ||
-            codePoint in 0x2648..0x2653 ||
-            codePoint == 0x267F ||
-            codePoint == 0x2693 ||
-            codePoint == 0x26A1 ||
-            codePoint in 0x26AA..0x26AB ||
-            codePoint in 0x26BD..0x26BE ||
-            codePoint in 0x26C4..0x26C5 ||
-            codePoint == 0x26CE ||
-            codePoint == 0x26D4 ||
-            codePoint == 0x26EA ||
-            codePoint in 0x26F2..0x26F3 ||
-            codePoint == 0x26F5 ||
-            codePoint == 0x26FA ||
-            codePoint == 0x26FD ||
-            codePoint == 0x2705 ||
-            codePoint in 0x270A..0x270B ||
-            codePoint == 0x2728 ||
-            codePoint == 0x274C ||
-            codePoint == 0x274E ||
-            codePoint in 0x2753..0x2755 ||
-            codePoint == 0x2757 ||
-            codePoint in 0x2795..0x2797 ||
-            codePoint == 0x27B0 ||
-            codePoint == 0x27BF ||
-            codePoint in 0x2B1B..0x2B1C ||
-            codePoint == 0x2B50 ||
-            codePoint == 0x2B55
-
-    private companion object {
-        private const val VARIATION_SELECTOR_15 = 0xFE0E
-        private const val VARIATION_SELECTOR_16 = 0xFE0F
-        private const val ZERO_WIDTH_JOINER = 0x200D
-        private const val COMBINING_ENCLOSING_KEYCAP = 0x20E3
     }
 }

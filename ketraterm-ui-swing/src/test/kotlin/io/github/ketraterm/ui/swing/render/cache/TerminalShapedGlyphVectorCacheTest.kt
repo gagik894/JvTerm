@@ -20,6 +20,8 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.ValueSource
 import java.awt.Color
 import java.awt.Font
 import java.awt.RenderingHints
@@ -49,17 +51,35 @@ class TerminalShapedGlyphVectorCacheTest {
         assertEquals(3 * CELL_WIDTH.toDouble(), vector.getGlyphPosition(vector.numGlyphs).x, 0.0)
     }
 
-    @Test
-    fun `Arabic glyph selection retains neighboring shaping context`() {
-        val text = "ببب"
+    @ParameterizedTest
+    @ValueSource(strings = ["ببب", "بب\u200Dب", "بب\u200Cب"])
+    fun `Arabic glyph selection retains neighboring shaping context`(text: String) {
+        val owners = if (text.length == 3) intArrayOf(0, 1, 2) else intArrayOf(0, 1, 1, 2)
         val natural = naturalVector(text, rtl = true)
-        val positioned = TerminalShapedGlyphVectorCache().shape(text, intArrayOf(0, 1, 2), columns = 3, rtl = true)
+        val positioned = TerminalShapedGlyphVectorCache().shape(text, owners, columns = 3, rtl = true)
 
         assertArrayEquals(natural.getGlyphCodes(0, natural.numGlyphs, null), positioned.getGlyphCodes(0, positioned.numGlyphs, null))
         assertArrayEquals(
             natural.getGlyphCharIndices(0, natural.numGlyphs, null),
             positioned.getGlyphCharIndices(0, positioned.numGlyphs, null),
         )
+        for (glyph in 0 until natural.numGlyphs) {
+            val owner = owners[natural.getGlyphCharIndex(glyph)]
+            val firstGlyph = (0..glyph).first { owners[natural.getGlyphCharIndex(it)] == owner }
+            val naturalPosition = natural.getGlyphPosition(glyph)
+            val positionedPosition = positioned.getGlyphPosition(glyph)
+            val transform = positioned.getGlyphTransform(glyph)
+            val scaleX = transform?.scaleX ?: 1.0
+
+            assertEquals(positioned.getGlyphTransform(firstGlyph), transform, "Glyphs sharing cell $owner must share compression")
+            assertEquals(naturalPosition.y, positionedPosition.y, 0.00001, "Glyph $glyph must retain its shaped vertical offset")
+            assertEquals(
+                (naturalPosition.x - natural.getGlyphPosition(firstGlyph).x) * scaleX,
+                positionedPosition.x - positioned.getGlyphPosition(firstGlyph).x,
+                0.00001,
+                "Glyphs sharing cell $owner must retain their relative shaped positions",
+            )
+        }
     }
 
     @Test
@@ -224,11 +244,22 @@ class TerminalShapedGlyphVectorCacheTest {
         val cache = TerminalShapedGlyphVectorCache()
         val chars = "بَبب".toCharArray()
         val owners = intArrayOf(0, 0, 1, 2)
-        repeat(20_000) { cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true) }
+        val retained = cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true)
 
+        // Warm the same lookup loop measured below, including its returned value.
+        fun lookupBatch(): Int {
+            var hits = 0
+            repeat(10_000) {
+                if (cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true) === retained) hits++
+            }
+            return hits
+        }
+
+        repeat(2) { lookupBatch() }
         val before = allocationBean.getThreadAllocatedBytes(thread)
-        repeat(10_000) { cache.run(chars, chars.size, owners, 3, Font.PLAIN, CELL_WIDTH, fonts, context, rtl = true) }
+        val hits = lookupBatch()
         val allocated = allocationBean.getThreadAllocatedBytes(thread) - before
+        assertEquals(10_000, hits)
         assertEquals(0L, allocated)
     }
 

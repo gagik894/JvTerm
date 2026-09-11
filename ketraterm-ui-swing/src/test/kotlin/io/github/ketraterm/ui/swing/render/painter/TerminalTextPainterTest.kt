@@ -935,9 +935,9 @@ class TerminalTextPainterTest {
                         return BufferedImage(pixelSize, pixelSize, BufferedImage.TYPE_INT_ARGB)
                     }
                 }
-            val settings = antialiasedSettings(antialiased).copy(font = Font(Font.SERIF, Font.PLAIN, 18))
+            val font = RecordingShapingFont()
+            val settings = antialiasedSettings(antialiased).copy(font = font, useSystemFallbackFonts = false)
             val actual = fixture(settings = settings, platformEmojiPainter = TerminalPlatformEmojiPainter(rasterizer))
-            val expected = fixture(settings = settings)
             val cache =
                 renderCache(
                     TestRenderFrame(
@@ -952,18 +952,25 @@ class TerminalTextPainterTest {
                 )
             try {
                 actual.paintRow(cache)
-                // These Beh characters already join. A redundant joiner must
-                // preserve that context; presentation-form code points can
-                // resolve to different physical fonts on different platforms.
-                expected.paintRow(renderCache(TestRenderFrame.text("\u0628\u0628\u0628")))
                 assertEquals(0, rasterizations, "A joiner in Arabic text must not request native emoji rasterization")
+                assertEquals(1, font.shapingCalls, "The cluster and its neighbors must share one shaping context")
+                assertEquals("\u0628\u0628\u200D\u0628", font.shapedText)
+                assertEquals(Font.LAYOUT_RIGHT_TO_LEFT, font.shapingFlags)
+                for (column in 0 until cache.columns) {
+                    assertTrue(
+                        actual.image.containsPaintedPixelInRange(
+                            column * actual.metrics.cellWidth,
+                            (column + 1) * actual.metrics.cellWidth,
+                            0,
+                            actual.metrics.cellHeight,
+                        ),
+                        "The contextual glyph in visual cell $column must be visible",
+                    )
+                }
+                // Keep the joiner in the oracle: Arabic ZWJ can suppress a
+                // ligature, so removing it need not preserve the same pixels.
                 val contextualPixels =
-                    expected.image.getRGB(0, 0, expected.image.width, expected.image.height, null, 0, expected.image.width)
-                assertContentEquals(
-                    contextualPixels,
-                    actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width),
-                    "The joiner cluster must preserve contextual forms in its neighboring cells",
-                )
+                    actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width)
 
                 actual.clearCell(visualColumn = 1)
                 actual.painter.paintCellForeground(
@@ -977,6 +984,7 @@ class TerminalTextPainterTest {
                     fontRenderContext = actual.g.fontRenderContext,
                 )
                 assertEquals(0, rasterizations, "Cursor repaint must retain text dispatch for the joiner cluster")
+                assertEquals(1, font.shapingCalls, "Cursor repaint must reuse the contextual layout")
                 assertContentEquals(
                     contextualPixels,
                     actual.image.getRGB(0, 0, actual.image.width, actual.image.height, null, 0, actual.image.width),
@@ -984,7 +992,6 @@ class TerminalTextPainterTest {
                 )
             } finally {
                 actual.g.dispose()
-                expected.g.dispose()
             }
         }
 
@@ -2021,6 +2028,28 @@ class TerminalTextPainterTest {
                     fixture.g.clip = oldClip
                 }
             }
+        }
+    }
+
+    private class RecordingShapingFont : Font(SERIF, PLAIN, 18) {
+        var shapedText: String? = null
+            private set
+        var shapingCalls = 0
+            private set
+        var shapingFlags = 0
+            private set
+
+        override fun layoutGlyphVector(
+            context: FontRenderContext,
+            text: CharArray,
+            start: Int,
+            limit: Int,
+            flags: Int,
+        ): GlyphVector {
+            shapedText = String(text, start, limit - start)
+            shapingCalls++
+            shapingFlags = flags
+            return super.layoutGlyphVector(context, text, start, limit, flags)
         }
     }
 

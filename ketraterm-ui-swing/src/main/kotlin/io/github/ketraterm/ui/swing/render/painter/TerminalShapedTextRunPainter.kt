@@ -23,7 +23,6 @@ import io.github.ketraterm.ui.swing.render.cache.AwtColorCache
 import io.github.ketraterm.ui.swing.render.cache.FontCache
 import io.github.ketraterm.ui.swing.render.cache.TerminalShapedGlyphVectorCache
 import io.github.ketraterm.ui.swing.render.primitives.TerminalCellPrimitivePainter
-import io.github.ketraterm.ui.swing.render.primitives.TerminalPlatformEmojiPainter
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import java.awt.Graphics2D
 import java.awt.font.FontRenderContext
@@ -46,7 +45,6 @@ internal class TerminalShapedTextRunPainter(
     private val fontCache: FontCache,
     private val runStyle: TerminalTextRunStyle,
     private val cellPrimitives: TerminalCellPrimitivePainter,
-    private val platformEmojiPainter: TerminalPlatformEmojiPainter,
 ) {
     private val glyphVectors = TerminalShapedGlyphVectorCache()
     private var chars = CharArray(INITIAL_TEXT_RUN_CAPACITY)
@@ -69,7 +67,7 @@ internal class TerminalShapedTextRunPainter(
             if (ref == 0L) return false
             val offset = cache.clusterOffset(ref)
             val length = cache.clusterLength(ref)
-            if (length > MAX_RUN_CODEPOINTS || platformEmojiPainter.usesEmojiPresentation(cache.clusterCodepoints, offset, length)) {
+            if (length > MAX_RUN_CODEPOINTS || TerminalEmojiPresentation.usesEmojiPresentation(cache.clusterCodepoints, offset, length)) {
                 return false
             }
             if (rtl) return true
@@ -81,7 +79,7 @@ internal class TerminalShapedTextRunPainter(
             return false
         }
         val codePoint = cache.codeWords[index]
-        return !(cellPrimitives.canPaint(codePoint) || platformEmojiPainter.usesEmojiPresentation(codePoint)) &&
+        return !(cellPrimitives.canPaint(codePoint) || TerminalEmojiPresentation.usesEmojiPresentation(codePoint)) &&
             (rtl || isComplexShapingCodePoint(codePoint))
     }
 

@@ -486,34 +486,36 @@ class SwingTerminalShellSuggestionTest {
                     kind = "SUBCOMMAND",
                 )
 
-        SwingUtilities.invokeAndWait {
-            component.size = component.preferredGridSize(20, 4)
-            component.requestShellSuggestions("git s", 5, 5, 0)
-        }
-        assertTrue(emissions.trySend(initial).isSuccess)
-        view.awaitUpdate()
+        try {
+            SwingUtilities.invokeAndWait {
+                component.size = component.preferredGridSize(20, 4)
+                component.requestShellSuggestions("git s", 5, 5, 0)
+            }
+            assertTrue(emissions.trySend(initial).isSuccess)
+            assertEquals(RecordedSuggestionUpdate(initial, selectedIndex = -1, onEdt = true), view.awaitUpdate())
 
-        SwingUtilities.invokeAndWait {
-            // First DOWN highlights index 0; second DOWN navigates to index 1
-            component.keyListeners.forEach { listener -> listener.keyPressed(keyPressed(component, KeyEvent.VK_DOWN)) }
-            component.keyListeners.forEach { listener -> listener.keyReleased(keyReleased(component, KeyEvent.VK_DOWN)) }
-            component.keyListeners.forEach { listener -> listener.keyPressed(keyPressed(component, KeyEvent.VK_DOWN)) }
-            component.keyListeners.forEach { listener -> listener.keyReleased(keyReleased(component, KeyEvent.VK_DOWN)) }
-            assertEquals(initial[1], component.currentShellSuggestionState().selectedSuggestion)
-        }
-        view.awaitUpdate()
+            for (selectedIndex in 0..1) {
+                SwingUtilities.invokeAndWait {
+                    component.keyListeners.forEach { listener -> listener.keyPressed(keyPressed(component, KeyEvent.VK_DOWN)) }
+                    component.keyListeners.forEach { listener -> listener.keyReleased(keyReleased(component, KeyEvent.VK_DOWN)) }
+                    assertEquals(initial[selectedIndex], component.currentShellSuggestionState().selectedSuggestion)
+                }
+                assertEquals(RecordedSuggestionUpdate(initial, selectedIndex, onEdt = true), view.awaitUpdate())
+            }
 
-        val reranked = listOf(initial[2], initial[0], initial[1])
-        assertTrue(emissions.trySend(reranked).isSuccess)
-        view.awaitUpdate()
+            val reranked = listOf(initial[2], initial[0], initial[1])
+            assertTrue(emissions.trySend(reranked).isSuccess)
+            assertEquals(RecordedSuggestionUpdate(reranked, selectedIndex = 2, onEdt = true), view.awaitUpdate())
 
-        SwingUtilities.invokeAndWait {
-            val state = component.currentShellSuggestionState()
-            assertEquals(2, state.selectedIndex)
-            assertEquals(initial[1], state.selectedSuggestion)
-            component.dispose()
+            SwingUtilities.invokeAndWait {
+                val state = component.currentShellSuggestionState()
+                assertEquals(2, state.selectedIndex)
+                assertEquals(initial[1], state.selectedSuggestion)
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { component.dispose() }
+            emissions.close()
         }
-        emissions.close()
     }
 
     @Test
