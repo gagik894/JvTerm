@@ -15,31 +15,27 @@
  */
 package io.github.ketraterm.ui.swing.viewport
 
-import kotlin.math.floor
+import kotlin.math.ceil
+import kotlin.math.roundToInt
 
 /**
  * EDT-confined smooth scrollback viewport model.
  *
- * The model owns the precise in-flight animation position. Input accumulation
- * and integer destination policy belong to [SmoothRowScroller]. The
+ * The model owns the precise position, animation timeline and history bounds as
+ * one state transition. The controller supplies input and clock ticks. The
  * line-addressed render reader receives a whole-row anchor plus one overscan
  * row; fractional motion is a renderer translation only. Renderer decorations
  * do not contribute scrollable height.
  */
 internal class SwingScrollModel {
+    private val animation = SmoothRowScrollAnimation()
     private var cellHeight: Int = 1
-    private var historySize: Int = 0
     private var discardedCount: Long = 0L
     private var preciseOffset: Double = 0.0
-    private var committedOffset: Int = 0
-    private var renderOffset: Int = 0
-    private var fraction: Double = 0.0
 
-    /**
-     * Current committed scrollback offset in whole terminal rows.
-     */
-    val offset: Int
-        get() = committedOffset
+    /** Number of retained rows available above the live viewport. */
+    var historySize: Int = 0
+        private set
 
     /**
      * Precise visual scrollback offset in terminal rows.
@@ -54,7 +50,15 @@ internal class SwingScrollModel {
      * Scrollback offset that should be requested from the render reader.
      */
     val requestedOffset: Int
-        get() = renderOffset
+        get() = ceil(preciseOffset).toInt()
+
+    /** Whether clock ticks are still moving toward a whole-row destination. */
+    val isAnimating: Boolean
+        get() = animation.isActive
+
+    /** Active destination, or the nearest row to the current idle position. */
+    val targetRow: Int
+        get() = if (animation.isActive) animation.targetRow else preciseOffset.roundToInt()
 
     /**
      * Current visual pixel offset from the live bottom.
@@ -74,25 +78,26 @@ internal class SwingScrollModel {
 
     /** Whether the current viewport needs one row of smooth-scroll overscan. */
     val needsOverscan: Boolean
-        get() = fraction > 0.0 && renderOffset > committedOffset
+        get() = requestedOffset.toDouble() != preciseOffset
 
     /**
      * Clears scrollback state back to the live viewport.
      */
     fun reset() {
+        animation.cancel()
         cellHeight = 1
         historySize = 0
         discardedCount = 0L
         preciseOffset = 0.0
-        committedOffset = 0
-        renderOffset = 0
-        fraction = 0.0
     }
 
     /**
      * Clamps the current offset after history size changes.
      *
-     * @return true when the requested render offset changed.
+     * Active timelines follow the same content translation as their visual
+     * position. Shrinking or resetting history ends the old timeline.
+     *
+     * @return true when the requested render offset or overscan requirement changed.
      */
     fun clamp(
         historySize: Int,
@@ -101,39 +106,41 @@ internal class SwingScrollModel {
     ): Boolean {
         require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
         require(discardedCount >= 0L) { "discardedCount must be >= 0, was $discardedCount" }
-        val deltaBottom = (historySize + discardedCount) - (this.historySize + this.discardedCount)
+        val oldRequestedOffset = requestedOffset
+        val oldNeedsOverscan = needsOverscan
+        val historyShrank = historySize < this.historySize || discardedCount < this.discardedCount
+        // A larger shift already exceeds every addressable history row. Bound the
+        // discarded delta before addition so long-lived counters cannot overflow.
+        val maximumHistoryDelta = Int.MAX_VALUE.toLong() + 1L
+        val deltaBottom =
+            (historySize.toLong() - this.historySize) +
+                (discardedCount - this.discardedCount).coerceIn(-maximumHistoryDelta, maximumHistoryDelta)
         this.historySize = historySize
         this.discardedCount = discardedCount
 
-        if (deltaBottom > 0) {
-            if (scrollOnOutput || preciseOffset == 0.0) {
+        when {
+            deltaBottom > 0L && scrollOnOutput -> {
+                animation.cancel()
                 preciseOffset = 0.0
-            } else {
-                preciseOffset += deltaBottom
             }
+            historyShrank -> {
+                if (animation.isActive) preciseOffset = preciseOffset.roundToInt().toDouble()
+                animation.cancel()
+                preciseOffset = preciseOffset.coerceIn(0.0, historySize.toDouble())
+            }
+            deltaBottom > 0L && (preciseOffset > 0.0 || animation.isActive) -> {
+                preciseOffset = (preciseOffset + deltaBottom).coerceIn(0.0, historySize.toDouble())
+                animation.rebase(preciseOffset, deltaBottom, historySize)
+            }
+            else -> preciseOffset = preciseOffset.coerceIn(0.0, historySize.toDouble())
         }
-        return clampPreciseOffset()
+        return oldRequestedOffset != requestedOffset || oldNeedsOverscan != needsOverscan
     }
 
-    /**
-     * Updates pixel metrics used to derive row-based render requests.
-     *
-     * @return true when the requested render offset changed.
-     */
-    fun updateVisualMetrics(
-        historySize: Int,
-        discardedCount: Long,
-        cellHeight: Int,
-        visualOverflowPixels: Int,
-    ): Boolean {
-        require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
-        require(discardedCount >= 0L) { "discardedCount must be >= 0, was $discardedCount" }
+    /** Updates pixel metrics without changing history or the animation timeline. */
+    fun updateCellHeight(cellHeight: Int) {
         require(cellHeight > 0) { "cellHeight must be > 0, was $cellHeight" }
-        require(visualOverflowPixels == 0) { "visualOverflowPixels must be 0 for fixed-row geometry, was $visualOverflowPixels" }
-        this.historySize = historySize
-        this.discardedCount = discardedCount
         this.cellHeight = cellHeight
-        return clampPreciseOffset()
     }
 
     /**
@@ -148,17 +155,59 @@ internal class SwingScrollModel {
         require(offsetLines.isFinite()) { "offsetLines must be finite, was $offsetLines" }
         require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
 
+        animation.cancel()
         this.historySize = historySize
-        return scrollToPreciseOffset(offsetLines.coerceIn(0.0, historySize.toDouble()))
+        return applyOffset(offsetLines)
     }
 
-    /** Returns the fractional vertical content translation for rendering. */
-    fun contentYOffset(cellHeight: Int): Double {
-        require(cellHeight > 0) {
-            "cellHeight must be > 0, was $cellHeight"
-        }
-        if (!needsOverscan) return 0.0
-        return -(1.0 - fraction) * cellHeight
+    /** Installs the session's resize anchor and history baseline from the same mutation. */
+    fun anchorAfterResize(
+        offset: Int,
+        historySize: Int,
+        discardedCount: Long,
+    ) {
+        require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
+        require(discardedCount >= 0L) { "discardedCount must be >= 0, was $discardedCount" }
+        animation.cancel()
+        this.historySize = historySize
+        this.discardedCount = discardedCount
+        applyOffset(offset.toDouble())
+    }
+
+    /** Advances to [nowNanos], then accumulates input from the previous destination. */
+    fun animateBy(
+        deltaRows: Int,
+        nowNanos: Long,
+    ): Boolean {
+        val moved = advance(nowNanos)
+        return animation.retargetBy(preciseOffset, deltaRows, historySize, nowNanos) || moved
+    }
+
+    /** Advances to [nowNanos], then targets a bounded row without restarting an unchanged target. */
+    fun animateTo(
+        targetRow: Int,
+        nowNanos: Long,
+    ): Boolean {
+        val moved = advance(nowNanos)
+        return animation.retargetTo(preciseOffset, targetRow, historySize, nowNanos) || moved
+    }
+
+    /** Applies a clock tick and returns whether the precise visual position changed. */
+    fun advance(nowNanos: Long): Boolean {
+        return animation.isActive && applyOffset(animation.positionAt(nowNanos))
+    }
+
+    /** Settles an active animation on its destination and reports visual movement. */
+    fun finish(): Boolean {
+        if (!animation.isActive) return false
+        val destination = animation.targetRow
+        animation.cancel()
+        return applyOffset(destination.toDouble())
+    }
+
+    /** Stops the timeline while preserving the current precise position. */
+    fun cancelAnimation() {
+        animation.cancel()
     }
 
     /** Returns the render-cache row count needed for the current viewport. */
@@ -167,41 +216,10 @@ internal class SwingScrollModel {
         return if (needsOverscan) renderRows + 1 else renderRows
     }
 
-    private fun committed(
-        offset: Double,
-        historySize: Int,
-    ): Int = floor(offset).toInt().coerceIn(0, historySize)
-
-    private fun renderOffset(
-        offset: Double,
-        historySize: Int,
-    ): Int {
-        val committed = committed(offset, historySize)
-        if (fractionalPart(offset) == 0.0) return committed
-        return (committed + 1).coerceIn(0, historySize)
-    }
-
-    private fun clampPreciseOffset(): Boolean {
-        val oldRenderOffset = renderOffset
-        preciseOffset = preciseOffset.coerceIn(0.0, historySize.toDouble())
-        recomputeDerivedOffsets()
-        return oldRenderOffset != renderOffset
-    }
-
-    private fun scrollToPreciseOffset(offset: Double): Boolean {
+    private fun applyOffset(offset: Double): Boolean {
         val nextOffset = offset.coerceIn(0.0, historySize.toDouble())
         if (nextOffset == preciseOffset) return false
         preciseOffset = nextOffset
-        recomputeDerivedOffsets()
         return true
     }
-
-    private fun recomputeDerivedOffsets() {
-        preciseOffset = preciseOffset.coerceIn(0.0, historySize.toDouble())
-        committedOffset = committed(preciseOffset, historySize)
-        renderOffset = renderOffset(preciseOffset, historySize)
-        fraction = fractionalPart(preciseOffset)
-    }
-
-    private fun fractionalPart(offset: Double): Double = offset - floor(offset)
 }

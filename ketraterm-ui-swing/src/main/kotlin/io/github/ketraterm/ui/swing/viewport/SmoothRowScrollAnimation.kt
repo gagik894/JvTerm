@@ -27,6 +27,7 @@ internal class SmoothRowScrollAnimation {
 
     private var startOffset = 0.0
     private var startNanos = 0L
+    private var sampledElapsedNanos = 0L
 
     /** Retargets from [currentOffset] by a signed whole-row delta. */
     fun retargetBy(
@@ -55,20 +56,58 @@ internal class SmoothRowScrollAnimation {
         require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
 
         val nextRow = targetRow.coerceIn(0, historySize)
+        if (nextRow.toDouble() == currentOffset) {
+            this.targetRow = nextRow
+            cancel()
+            return false
+        }
         if (isActive && nextRow == this.targetRow) return true
-        if (nextRow.toDouble() == currentOffset) return false
 
         startOffset = currentOffset
         this.targetRow = nextRow
         startNanos = nowNanos
+        sampledElapsedNanos = 0L
         isActive = true
         return true
+    }
+
+    /**
+     * Translates an active timeline after output advances the live bottom.
+     *
+     * [currentOffset] is the already translated, bounded visual position. If the
+     * destination was discarded, adjust the remaining curve to its surviving
+     * boundary without moving that position or extending the completion deadline.
+     */
+    fun rebase(
+        currentOffset: Double,
+        deltaRows: Long,
+        historySize: Int,
+    ) {
+        require(currentOffset.isFinite()) { "currentOffset must be finite, was $currentOffset" }
+        require(deltaRows >= 0L) { "deltaRows must be >= 0, was $deltaRows" }
+        require(historySize >= 0) { "historySize must be >= 0, was $historySize" }
+        if (!isActive) return
+
+        val shiftedTarget = targetRow.toLong() + minOf(deltaRows, historySize.toLong())
+        targetRow = shiftedTarget.coerceAtMost(historySize.toLong()).toInt()
+        if (currentOffset == targetRow.toDouble()) {
+            cancel()
+            return
+        }
+
+        if (shiftedTarget <= historySize) {
+            startOffset += deltaRows
+        } else {
+            val remaining = 1.0 - sampledElapsedNanos.toDouble() / DURATION_NANOS
+            startOffset = targetRow + (currentOffset - targetRow) / (remaining * remaining * remaining)
+        }
     }
 
     /** Returns the eased visual offset, ending exactly on [targetRow]. */
     fun positionAt(nowNanos: Long): Double {
         if (!isActive) return targetRow.toDouble()
         val elapsed = (nowNanos - startNanos).coerceAtLeast(0L)
+        sampledElapsedNanos = elapsed
         if (elapsed >= DURATION_NANOS) {
             isActive = false
             return targetRow.toDouble()
@@ -76,8 +115,7 @@ internal class SmoothRowScrollAnimation {
 
         val progress = elapsed.toDouble() / DURATION_NANOS
         val remaining = 1.0 - progress
-        val easedProgress = 1.0 - remaining * remaining * remaining
-        return startOffset + (targetRow - startOffset) * easedProgress
+        return targetRow + (startOffset - targetRow) * remaining * remaining * remaining
     }
 
     /** Cancels interpolation without changing the visual offset. */

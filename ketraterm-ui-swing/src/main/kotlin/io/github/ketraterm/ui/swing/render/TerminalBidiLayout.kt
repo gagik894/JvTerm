@@ -22,15 +22,20 @@ import java.text.Bidi
 /**
  * Shared logical/visual cell mapping for painting, overlays, repainting and pointer input.
  *
- * Rows are cached by cache identity, dimensions, buffer, line identity and generation. LTR
+ * Rows are cached by cache identity, column count, buffer, line identity and generation. LTR
  * rows use the identity mapping without allocating a row object. Bidi analysis runs only
  * for changed directional text; repainting and querying an unchanged row allocate nothing.
+ * Row storage follows retained cache capacity, so overscan height changes preserve both
+ * storage and unchanged permutations. Column scratch grows independently of row capacity.
+ * Rows without stable line identities invalidate when structure or viewport mapping changes.
  * Grapheme clusters and wide-cell pairs remain atomic when applying UBA level reordering.
  */
 internal class TerminalBidiLayout {
     private var source: TerminalRenderCache? = null
     private var columns = 0
     private var buffer = -1
+    private var structureGeneration = Long.MIN_VALUE
+    private var viewportTop = 0L
     private var layouts = arrayOfNulls<Row>(0)
     private var generations = LongArray(0)
     private var lineIds = LongArray(0)
@@ -49,13 +54,33 @@ internal class TerminalBidiLayout {
         row: Int,
     ): Row? {
         if (row !in 0 until cache.rows) return null
-        if (source !== cache || columns != cache.columns || layouts.size != cache.rows || buffer != cache.activeBuffer.ordinal) {
+        if (layouts.size < cache.lineIds.size) {
+            val previousCapacity = layouts.size
+            layouts = layouts.copyOf(cache.lineIds.size)
+            generations = generations.copyOf(cache.lineIds.size)
+            generations.fill(Long.MIN_VALUE, previousCapacity)
+            lineIds = lineIds.copyOf(cache.lineIds.size)
+        }
+        val nextViewportTop = cache.discardedCount + cache.historySize - cache.scrollbackOffset
+        if (source !== cache || columns != cache.columns || buffer != cache.activeBuffer.ordinal) {
             source = cache
             columns = cache.columns
             buffer = cache.activeBuffer.ordinal
-            layouts = arrayOfNulls(cache.rows)
-            generations = LongArray(cache.rows) { Long.MIN_VALUE }
-            lineIds = LongArray(cache.rows)
+            layouts.fill(null)
+            generations.fill(Long.MIN_VALUE)
+        } else if (structureGeneration != cache.structureGeneration || viewportTop != nextViewportTop) {
+            var index = 0
+            while (index < layouts.size) {
+                if (lineIds[index] == 0L) {
+                    layouts[index] = null
+                    generations[index] = Long.MIN_VALUE
+                }
+                index++
+            }
+        }
+        structureGeneration = cache.structureGeneration
+        viewportTop = nextViewportTop
+        if (unitOrder.size < columns) {
             unitColumns = IntArray(columns + 1)
             unitCharOffsets = IntArray(columns)
             unitOrder = IntArray(columns)

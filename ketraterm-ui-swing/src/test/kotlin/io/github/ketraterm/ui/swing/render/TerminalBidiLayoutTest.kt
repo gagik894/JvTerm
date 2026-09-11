@@ -16,6 +16,7 @@
 package io.github.ketraterm.ui.swing.render
 
 import com.sun.management.ThreadMXBean
+import io.github.ketraterm.render.api.TerminalRenderBufferKind
 import io.github.ketraterm.render.api.TerminalRenderCellFlags
 import io.github.ketraterm.render.cache.TerminalRenderCache
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -27,6 +28,136 @@ import java.text.Bidi
 import kotlin.test.*
 
 class TerminalBidiLayoutTest {
+    @ParameterizedTest
+    @ValueSource(booleans = [false, true])
+    fun `overscan row count transitions allocate no bidi storage after warmup`(rtl: Boolean) {
+        val bean = ManagementFactory.getThreadMXBean()
+        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
+        val allocationBean = bean as ThreadMXBean
+        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+        val cells =
+            Array(25) { Array(80) { TestCell(codeWord = if (rtl) 0x05D0 else 'A'.code, flags = TerminalRenderCellFlags.CODEPOINT) } }
+        val frames = arrayOf(TestRenderFrame(cells.take(24).toTypedArray()), TestRenderFrame(cells))
+        val cache = TerminalRenderCache(80, 24, rowCapacityReserve = 1)
+        val geometry = TerminalBidiLayout()
+        val threadId = Thread.currentThread().threadId()
+        var minimum = Long.MAX_VALUE
+        repeat(10) { batch ->
+            var allocated = 0L
+            var iteration = 0
+            while (iteration < 1_000) {
+                // Frame copying is deliberately outside the bidi allocation measurement.
+                cache.accept(frames[iteration and 1])
+                val before = allocationBean.getThreadAllocatedBytes(threadId)
+                val row = geometry.row(cache, cache.rows - 1)
+                allocated += allocationBean.getThreadAllocatedBytes(threadId) - before
+                assertEquals(rtl, row != null)
+                iteration++
+            }
+            if (batch >= 5) minimum = minOf(minimum, allocated)
+        }
+        assertEquals(0L, minimum)
+    }
+
+    @Test
+    fun `row capacity growth and overscan retain unchanged permutations`() {
+        val cells = Array(3) { Array(3) { TestCell(codeWord = 0x05D0 + it, flags = TerminalRenderCellFlags.CODEPOINT) } }
+        val small = TestRenderFrame(arrayOf(cells[0]))
+        val large = TestRenderFrame(cells)
+        val cache = TerminalRenderCache(3, 1, rowCapacityReserve = 1)
+        val geometry = TerminalBidiLayout()
+        cache.accept(small)
+        val first = assertNotNull(geometry.row(cache, 0))
+        cache.accept(large)
+        assertSame(first, geometry.row(cache, 0))
+        val last = assertNotNull(geometry.row(cache, 2))
+        cache.accept(small)
+        assertNull(geometry.row(cache, 2))
+        cache.accept(large)
+        assertSame(first, geometry.row(cache, 0))
+        assertSame(last, geometry.row(cache, 2))
+    }
+
+    @Test
+    fun `inactive row invalidates when content changes before it reappears`() {
+        val cells = Array(2) { Array(3) { TestCell(codeWord = 0x05D0 + it, flags = TerminalRenderCellFlags.CODEPOINT) } }
+        val large = TestRenderFrame(cells)
+        val cache = TerminalRenderCache(3, 1, rowCapacityReserve = 1)
+        val geometry = TerminalBidiLayout()
+        cache.accept(large)
+        assertNotNull(geometry.row(cache, 1))
+        cache.accept(TestRenderFrame(arrayOf(cells[0])))
+        val changedCells = arrayOf(cells[0], Array(3) { TestCell(codeWord = 'A'.code + it, flags = TerminalRenderCellFlags.CODEPOINT) })
+        val changed =
+            object : TestRenderFrame(changedCells) {
+                override fun lineGeneration(row: Int): Long = if (row == 1) 2 else 1
+            }
+        cache.accept(changed)
+        assertNull(geometry.row(cache, 1))
+    }
+
+    @Test
+    fun `buffer switches invalidate retained inactive rows even when metadata matches`() {
+        val primaryCells = Array(2) { Array(3) { TestCell(codeWord = 0x05D0 + it, flags = TerminalRenderCellFlags.CODEPOINT) } }
+        val alternateCells = Array(2) { Array(3) { TestCell(codeWord = 'A'.code + it, flags = TerminalRenderCellFlags.CODEPOINT) } }
+        val primary = TestRenderFrame(primaryCells)
+        val alternateSmall =
+            object : TestRenderFrame(arrayOf(alternateCells[0])) {
+                override val activeBuffer = TerminalRenderBufferKind.ALTERNATE
+            }
+        val alternateLarge =
+            object : TestRenderFrame(alternateCells) {
+                override val activeBuffer = TerminalRenderBufferKind.ALTERNATE
+            }
+        val cache = TerminalRenderCache(3, 2)
+        val geometry = TerminalBidiLayout()
+        cache.accept(primary)
+        assertNotNull(geometry.row(cache, 1))
+        cache.accept(alternateSmall)
+        assertNull(geometry.row(cache, 0))
+        cache.accept(alternateLarge)
+        assertNull(geometry.row(cache, 1))
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = ["structure", "history", "scrollback", "discarded"])
+    fun `mapping changes invalidate unavailable line identities including inactive rows`(change: String) {
+        val rtl = Array(3) { TestCell(codeWord = 0x05D0 + it, flags = TerminalRenderCellFlags.CODEPOINT) }
+        val ltr = Array(3) { TestCell(codeWord = 'A'.code + it, flags = TerminalRenderCellFlags.CODEPOINT) }
+
+        fun frame(
+            cells: Array<Array<TestCell>>,
+            afterChange: Boolean,
+        ): TestRenderFrame =
+            object : TestRenderFrame(cells) {
+                override val structureGeneration = if (afterChange && change == "structure") 2L else 1L
+                override val historySize = if (afterChange && change == "history") 2 else 1
+                override val scrollbackOffset = if (afterChange && change == "scrollback") 0 else 1
+                override val discardedCount = if (afterChange && change == "discarded") 1L else 0L
+
+                override fun lineId(row: Int): Long = if (row == 1) 10L else 0L
+            }
+        val cache = TerminalRenderCache(3, 3)
+        val geometry = TerminalBidiLayout()
+        cache.accept(frame(arrayOf(rtl, rtl, rtl), afterChange = false))
+        assertNotNull(geometry.row(cache, 0))
+        val identified = assertNotNull(geometry.row(cache, 1))
+        assertNotNull(geometry.row(cache, 2))
+
+        cache.accept(frame(arrayOf(ltr, rtl), afterChange = true))
+
+        assertEquals(0L, cache.lineIds[0])
+        assertEquals(1L, cache.lineGenerations[0])
+        assertSame(identified, geometry.row(cache, 1))
+        assertNull(geometry.row(cache, 0))
+        assertNull(geometry.row(cache, 2))
+
+        cache.accept(frame(arrayOf(ltr, rtl, ltr), afterChange = true))
+
+        assertSame(identified, geometry.row(cache, 1))
+        assertNull(geometry.row(cache, 2))
+    }
+
     @Test
     fun `cached bidi mapping and range projection allocate no memory`() {
         val bean = ManagementFactory.getThreadMXBean()

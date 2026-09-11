@@ -349,12 +349,76 @@ class TerminalSessionTest {
         val connector = MockConnector()
         val session = createStartedSession(connector, columns = 10, rows = 3)
 
-        session.resize(columns = 20, rows = 5)
+        val resized = session.resize(columns = 20, rows = 5)
 
+        assertEquals(0 to 0, resized)
         assertEquals(20, session.terminal.width)
         assertEquals(5, session.terminal.height)
         assertEquals(listOf(10 to 3, 20 to 5), connector.resizeCalls)
         session.close()
+    }
+
+    @Test
+    fun `viewport resize captures the new discarded baseline after bounded history reflow`() {
+        val connector = MockConnector()
+        val terminal = TerminalBuffers.create(width = 8, height = 3, maxHistory = 4)
+        val session = TerminalSession.create(terminal, connector)
+        session.start(columns = 8, rows = 3)
+        try {
+            connector.feedFromHost((0..6).joinToString("\r\n") { "row${it.toString().repeat(5)}" }.ascii())
+            session.readRenderFrame { frame ->
+                assertEquals(4, frame.historySize)
+                assertEquals(0L, frame.discardedCount)
+            }
+
+            val resized = session.resizeViewport(columns = 4, rows = 3, oldScrollbackOffset = 3)
+
+            assertTrue(resized.scrollbackOffset > 0, "Reflow must exercise a retained scrollback anchor")
+            assertEquals(4, resized.historySize)
+            assertTrue(resized.discardedCount > 0L, "Narrowing must discard reflowed rows at the history limit")
+            session.readRenderFrame(resized.scrollbackOffset) { frame ->
+                assertEquals(4, frame.columns)
+                assertEquals(resized.scrollbackOffset, frame.scrollbackOffset)
+                assertEquals(resized.historySize, frame.historySize)
+                assertEquals(resized.discardedCount, frame.discardedCount)
+            }
+            assertEquals(listOf(8 to 3, 4 to 3), connector.resizeCalls)
+        } finally {
+            session.close()
+        }
+    }
+
+    @Test
+    fun `viewport resize baseline excludes output produced by connector notification`() {
+        val backingConnector = MockConnector()
+        val connector =
+            object : TerminalConnector by backingConnector {
+                override fun resize(
+                    columns: Int,
+                    rows: Int,
+                ) {
+                    backingConnector.resize(columns, rows)
+                    if (columns == 4) backingConnector.feedFromHost("\r\nlate".ascii())
+                }
+            }
+        val terminal = TerminalBuffers.create(width = 8, height = 3, maxHistory = 4)
+        val session = TerminalSession.create(terminal, connector)
+        session.start(columns = 8, rows = 3)
+        try {
+            backingConnector.feedFromHost((0..6).joinToString("\r\n") { "row${it.toString().repeat(5)}" }.ascii())
+
+            val resized = session.resizeViewport(columns = 4, rows = 3, oldScrollbackOffset = 3)
+
+            assertTrue(resized.discardedCount > 0L)
+            session.readRenderFrame { frame ->
+                assertEquals(resized.historySize, frame.historySize)
+                assertEquals(resized.discardedCount + 1L, frame.discardedCount)
+            }
+            assertEquals("late", session.terminal.getLineAsString(2))
+            assertEquals(listOf(8 to 3, 4 to 3), backingConnector.resizeCalls)
+        } finally {
+            session.close()
+        }
     }
 
     @Test

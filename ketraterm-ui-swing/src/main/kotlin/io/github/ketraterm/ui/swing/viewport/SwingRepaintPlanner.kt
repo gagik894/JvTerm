@@ -51,7 +51,7 @@ internal class SwingRepaintPlanner {
     private val lastSearchHighlights = TerminalSearchViewportHighlights()
 
     /**
-     * Clears remembered frame and overlay state when the component unbinds or resets.
+     * Invalidates remembered frame and overlay state while retaining reusable row storage.
      */
     fun reset() {
         lastCursorKnown = false
@@ -66,8 +66,6 @@ internal class SwingRepaintPlanner {
         lastStructureGeneration = UNINITIALIZED_GENERATION
         lastScrollbackOffset = UNINITIALIZED_OFFSET
         lastActiveBufferOrdinal = UNINITIALIZED_ACTIVE_BUFFER
-        lastLineGenerations = LongArray(0)
-        lastLineWrapped = BooleanArray(0)
         lastSearchHighlights.reset(0)
     }
 
@@ -408,8 +406,6 @@ internal class SwingRepaintPlanner {
         cache.shapeChangedOnLastUpdate ||
             lastColumns != cache.columns ||
             lastRows != cache.rows ||
-            lastLineGenerations.size != cache.rows ||
-            lastLineWrapped.size != cache.rows ||
             lastStructureGeneration != cache.structureGeneration ||
             lastScrollbackOffset != cache.scrollbackOffset ||
             lastActiveBufferOrdinal != cache.activeBuffer.ordinal
@@ -437,9 +433,10 @@ internal class SwingRepaintPlanner {
         cache: TerminalRenderCache,
         searchHighlights: TerminalSearchViewportHighlights?,
     ) {
-        if (lastLineGenerations.size != cache.rows) {
-            lastLineGenerations = LongArray(cache.rows)
-            lastLineWrapped = BooleanArray(cache.rows)
+        if (lastLineGenerations.size < cache.rows) {
+            // Match the cache's reserved capacity so transient overscan remains allocation-free.
+            lastLineGenerations = LongArray(cache.lineGenerations.size)
+            lastLineWrapped = BooleanArray(cache.lineGenerations.size)
         }
 
         var row = 0

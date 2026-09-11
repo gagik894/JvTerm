@@ -71,4 +71,42 @@ class SmoothRowScrollAnimationTest {
         assertEquals(2.25, animation.positionAt(0L))
         assertEquals(8.0, animation.positionAt(100_000_000L))
     }
+
+    @Test
+    fun `retargeting to current position cancels the old destination`() {
+        val animation = SmoothRowScrollAnimation()
+        animation.retargetTo(currentOffset = 2.0, targetRow = 8, historySize = 10, nowNanos = 0L)
+
+        assertFalse(animation.retargetTo(currentOffset = 2.0, targetRow = 2, historySize = 10, nowNanos = 0L))
+
+        assertFalse(animation.isActive)
+        assertEquals(2, animation.targetRow)
+        assertEquals(2.0, animation.positionAt(100_000_000L))
+    }
+
+    @Test
+    fun `retargeting unchanged destination does not restart the deadline`() {
+        val animation = SmoothRowScrollAnimation()
+        animation.retargetTo(currentOffset = 0.0, targetRow = 8, historySize = 10, nowNanos = 0L)
+        val current = animation.positionAt(50_000_000L)
+
+        assertTrue(animation.retargetTo(currentOffset = current, targetRow = 8, historySize = 10, nowNanos = 50_000_000L))
+
+        assertEquals(current, animation.positionAt(50_000_000L))
+        assertEquals(8.0, animation.positionAt(100_000_000L))
+        assertFalse(animation.isActive)
+    }
+
+    @Test
+    fun `capped destination rebase remains stable near its completion deadline`() {
+        val animation = SmoothRowScrollAnimation()
+        animation.retargetTo(currentOffset = 2.0, targetRow = 10, historySize = 10, nowNanos = 0L)
+        animation.positionAt(99_999_999L)
+
+        animation.rebase(currentOffset = 9.5, deltaRows = 1L, historySize = 10)
+
+        assertEquals(9.5, animation.positionAt(99_999_999L), 1.0e-12)
+        assertEquals(10.0, animation.positionAt(100_000_000L))
+        assertFalse(animation.isActive)
+    }
 }

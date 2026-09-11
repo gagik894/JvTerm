@@ -53,9 +53,11 @@ internal class SwingRenderFrameController(
         val blinkVisibilityChanged = host.resetCursorBlinkForFrame()
         host.refreshRenderCacheFromSession(boundSession)
         if (!host.renderCache.hasFrame) return
+        val viewportChanged = host.clampViewport(host.renderCache.historySize, host.renderCache.discardedCount)
+        val gridChanged = host.syncTerminalGridToActiveChrome()
         val followUpRenderRequired =
-            host.syncTerminalGridToActiveChrome() ||
-                host.clampViewport(host.renderCache.historySize, host.renderCache.discardedCount) ||
+            gridChanged ||
+                viewportChanged ||
                 host.renderCache.scrollbackOffset != host.requestedViewportOffset()
         val shellIntegrationDecorationsChanged = host.refreshShellIntegrationDecorations(boundSession)
         if (followUpRenderRequired) host.requestRender(boundSession)

@@ -241,6 +241,7 @@ class SwingRenderFrameControllerTest {
                     listOf(
                         "resetCursorBlinkForFrame",
                         "refreshRenderCacheFromSession",
+                        "clampViewport",
                         "syncTerminalGridToActiveChrome",
                         "refreshShellIntegrationDecorations",
                         "refreshSearchForFrame",
@@ -282,6 +283,11 @@ class SwingRenderFrameControllerTest {
 
                 assertEquals(1, host.refreshCount)
                 assertEquals(1, host.renderRequestCount)
+                assertEquals(1, host.clampViewportCallCount)
+                assertTrue(
+                    host.semanticCalls.indexOf("clampViewport") < host.semanticCalls.indexOf("syncTerminalGridToActiveChrome"),
+                    "published history must be reconciled before a resize installs its new viewport anchor",
+                )
             } finally {
                 session.close()
             }
@@ -320,6 +326,7 @@ class SwingRenderFrameControllerTest {
         var regionRepaintCount = 0
         var refreshCount = 0
         var renderRequestCount = 0
+        var clampViewportCallCount = 0
         val semanticCalls = ArrayList<String>()
         val publishHistorySizes = ArrayList<Int>()
 
@@ -349,7 +356,11 @@ class SwingRenderFrameControllerTest {
         override fun clampViewport(
             historySize: Int,
             discardedCount: Long,
-        ): Boolean = clampViewportResult
+        ): Boolean {
+            clampViewportCallCount++
+            semanticCalls += "clampViewport"
+            return clampViewportResult
+        }
 
         override fun requestedViewportOffset(): Int = 0
 

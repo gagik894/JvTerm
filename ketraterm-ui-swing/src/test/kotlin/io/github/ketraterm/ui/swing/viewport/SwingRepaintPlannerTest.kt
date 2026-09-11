@@ -187,6 +187,83 @@ class SwingRepaintPlannerTest {
     }
 
     @Test
+    fun `overscan transitions and reset retain warmed repaint storage`() {
+        val bean = ManagementFactory.getThreadMXBean()
+        assumeTrue(bean is ThreadMXBean && bean.isThreadAllocatedMemorySupported)
+        val allocationBean = bean as ThreadMXBean
+        assumeTrue(allocationBean.isThreadAllocatedMemoryEnabled)
+        val shortCache = TerminalRenderCache(80, 24).apply { updateFrom(MutableFrame(80, 24).reader) }
+        val tallCache = TerminalRenderCache(80, 25).apply { updateFrom(MutableFrame(80, 25).reader) }
+        val planner = SwingRepaintPlanner()
+
+        fun requestFrames() {
+            repeat(10_000) {
+                planner.requestFrameRepaint(shortCache, METRICS, 800, 480, PADDING, NoOpRepaintSink)
+                planner.requestFrameRepaint(tallCache, METRICS, 800, 480, PADDING, NoOpRepaintSink)
+                planner.reset()
+            }
+        }
+        repeat(5) { requestFrames() }
+        val threadId = Thread.currentThread().threadId()
+        var minimum = Long.MAX_VALUE
+        repeat(5) {
+            val before = allocationBean.getThreadAllocatedBytes(threadId)
+            requestFrames()
+            minimum = minOf(minimum, allocationBean.getThreadAllocatedBytes(threadId) - before)
+        }
+        assertEquals(0L, minimum)
+    }
+
+    @Test
+    fun `shrinking below retained capacity still repaints only changed rows after transition`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink)
+
+        frame.rows = 3
+        cache.updateFrom(frame.reader)
+        val transitionSink = RecordingRepaintSink()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, transitionSink)
+        assertEquals(1, transitionSink.fullRepaints)
+        assertEquals(emptyList(), transitionSink.regions)
+
+        cache.updateFrom(frame.reader)
+        val sink = RecordingRepaintSink(failOnFullRepaint = true)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink)
+        assertEquals(emptyList(), sink.regions)
+
+        frame.setRow(2, "last")
+        cache.updateFrom(frame.reader)
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink)
+        assertEquals(listOf(Region(0, 2 * CELL_HEIGHT, WIDTH, CELL_HEIGHT)), sink.regions)
+    }
+
+    @Test
+    fun `reset requires full repaint despite identical retained frame metadata`() {
+        val frame = MutableFrame(columns = 4, rows = 4)
+        val cache = TerminalRenderCache(4, 4)
+        cache.updateFrom(frame.reader)
+        val highlights = TerminalSearchViewportHighlights()
+        highlights.reset(4)
+        highlights.add(1, 0, 2, active = true)
+        highlights.finish()
+        val planner = SwingRepaintPlanner()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, NoOpRepaintSink, searchHighlights = highlights)
+
+        planner.reset()
+        val sink = RecordingRepaintSink()
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink)
+        assertEquals(1, sink.fullRepaints)
+        assertEquals(emptyList(), sink.regions)
+
+        planner.requestFrameRepaint(cache, METRICS, WIDTH, HEIGHT, PADDING, sink)
+        assertEquals(1, sink.fullRepaints)
+        assertEquals(emptyList(), sink.regions)
+    }
+
+    @Test
     fun `rtl cursor movement repaints old and new visual cells`() {
         val frame = MutableFrame(columns = 3, rows = 1)
         frame.setRow(0, "\u05D0\u05D1\u05D2")
@@ -690,12 +767,15 @@ class SwingRepaintPlannerTest {
     private class RecordingRepaintSink(
         private val failOnFullRepaint: Boolean = false,
     ) : TerminalRepaintSink {
+        var fullRepaints = 0
+            private set
         val regions = mutableListOf<Region>()
 
         override fun requestFullRepaint() {
             if (failOnFullRepaint) {
                 error("update must not request full repaint")
             }
+            fullRepaints++
         }
 
         override fun requestRegionRepaint(
@@ -721,7 +801,7 @@ class SwingRepaintPlannerTest {
 
     private class MutableFrame(
         override val columns: Int,
-        override val rows: Int,
+        override var rows: Int,
         private val lineIds: LongArray = LongArray(rows) { row -> row + 1L },
     ) : TerminalRenderFrame {
         private val textRows =

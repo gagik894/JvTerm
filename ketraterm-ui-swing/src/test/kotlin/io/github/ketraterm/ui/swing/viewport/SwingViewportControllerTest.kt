@@ -16,6 +16,7 @@
 package io.github.ketraterm.ui.swing.viewport
 
 import io.github.ketraterm.render.api.TerminalRenderBufferKind
+import io.github.ketraterm.ui.swing.api.TerminalViewportListener
 import io.github.ketraterm.ui.swing.api.TerminalViewportState
 import io.github.ketraterm.ui.swing.settings.SwingMetrics
 import io.github.ketraterm.ui.swing.settings.SwingPadding
@@ -41,7 +42,7 @@ class SwingViewportControllerTest {
     inner class GridSizing {
         @Test
         fun `visible grid size uses full horizontal and vertical padding`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             val size =
                 controller.visibleGridSizeOnEdt(
@@ -58,7 +59,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `alternate screen visible grid uses explicit alternate chrome instead of primary gutters`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
             val settings =
                 SwingSettings(
                     padding = SwingPadding(0, 4, 8, 12),
@@ -89,7 +90,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `visible render rows cover partial pixel rows without changing grid rows`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             assertEquals(
                 6,
@@ -111,7 +112,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `partial viewport plus fractional animation requests two rows beyond the grid`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
             val componentHeight = settings.padding.top + settings.padding.bottom + metrics.cellHeight * 11 - 1
 
             assertEquals(10, controller.visibleGridRows(settings, metrics, componentHeight))
@@ -125,7 +126,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `visible grid size clamps tiny components to one cell`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             val size =
                 controller.visibleGridSizeOnEdt(
@@ -145,9 +146,10 @@ class SwingViewportControllerTest {
         @Test
         fun `publishViewportState stores snapshot and notifies listener`() {
             val listener = RecordingViewportListener()
-            val controller = SwingViewportController(listener)
+            val controller = SwingViewportController(listener) { _, _ -> }
 
-            controller.updateVisualMetrics(historySize = 100, discardedCount = 0L, cellHeight = 20, visualOverflowPixels = 0)
+            controller.clamp(historySize = 100, discardedCount = 0L, scrollOnOutput = false)
+            controller.updateCellHeight(20)
             assertTrue(controller.scrollTo(offsetLines = 12.5, historySize = 100))
             controller.publishViewportState(
                 historySize = 100,
@@ -179,9 +181,10 @@ class SwingViewportControllerTest {
         @Test
         fun `publishViewportState can update snapshot without listener callback`() {
             val listener = RecordingViewportListener()
-            val controller = SwingViewportController(listener)
+            val controller = SwingViewportController(listener) { _, _ -> }
 
-            controller.updateVisualMetrics(historySize = 10, discardedCount = 0L, cellHeight = 20, visualOverflowPixels = 0)
+            controller.clamp(historySize = 10, discardedCount = 0L, scrollOnOutput = false)
+            controller.updateCellHeight(20)
             controller.scrollTo(offsetLines = 3.0, historySize = 10)
             controller.publishViewportState(
                 historySize = 10,
@@ -213,8 +216,9 @@ class SwingViewportControllerTest {
         @Test
         fun `publishViewportState can notify primitive listener without full snapshot`() {
             val listener = RecordingViewportListener()
-            val controller = SwingViewportController(listener)
-            controller.updateVisualMetrics(historySize = 10, discardedCount = 0L, cellHeight = 20, visualOverflowPixels = 0)
+            val controller = SwingViewportController(listener) { _, _ -> }
+            controller.clamp(historySize = 10, discardedCount = 0L, scrollOnOutput = false)
+            controller.updateCellHeight(20)
             controller.scrollTo(offsetLines = 2.5, historySize = 10)
 
             controller.publishViewportState(
@@ -237,13 +241,14 @@ class SwingViewportControllerTest {
     inner class ScrollState {
         @Test
         fun `resize anchoring preserves whole-row scroll offset`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             controller.scrollTo(offsetLines = 8.0, historySize = 100)
-            val requestedOffset = controller.resizeRequestedOffset()
+            val requestedOffset = controller.requestedOffset
             controller.anchorAfterResize(
                 newOffset = requestedOffset + 10,
                 newHistorySize = 100,
+                newDiscardedCount = 0L,
             )
 
             assertEquals(18, controller.requestedOffset)
@@ -252,7 +257,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `contentOriginY applies fractional smooth scroll translation`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             controller.scrollTo(offsetLines = 2.25, historySize = 10)
 
@@ -260,14 +265,17 @@ class SwingViewportControllerTest {
                 -15.0,
                 controller.contentOriginY(
                     cacheScrollbackOffset = 3,
+                    cacheRows = 25,
                     cellHeight = 20,
+                    viewportHeightPixels = 480,
+                    visibleGridRows = 24,
                 ),
             )
         }
 
         @Test
         fun `contentOriginY keeps exact row offsets unshifted`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             controller.scrollTo(offsetLines = 1.0, historySize = 10)
 
@@ -275,23 +283,100 @@ class SwingViewportControllerTest {
                 0.0,
                 controller.contentOriginY(
                     cacheScrollbackOffset = 1,
+                    cacheRows = 24,
                     cellHeight = 20,
+                    viewportHeightPixels = 480,
+                    visibleGridRows = 24,
                 ),
             )
         }
 
         @Test
-        fun `visual metrics reject decorator overflow for fixed grid geometry`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+        fun `scrolling toward live retains translated rows until replacement cache arrives`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 2.25, historySize = 10)
+            assertEquals(-15.0, controller.originForCache(offset = 3))
+
+            controller.scrollTo(offsetLines = 2.0, historySize = 10)
+            assertEquals(-20.0, controller.originForCache(offset = 3))
+
+            controller.scrollTo(offsetLines = 1.75, historySize = 10)
+            assertEquals(
+                -20.0,
+                controller.originForCache(offset = 3),
+                "the cache's bottom edge stays covered while its replacement is pending",
+            )
+            assertEquals(-5.0, controller.originForCache(offset = 2))
+        }
+
+        @Test
+        fun `scrolling into history pins cached leading edge until replacement arrives`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 1.75, historySize = 10)
+            assertEquals(-5.0, controller.originForCache(offset = 2))
+
+            controller.scrollTo(offsetLines = 2.0, historySize = 10)
+            assertEquals(0.0, controller.originForCache(offset = 2))
+
+            controller.scrollTo(offsetLines = 2.25, historySize = 10)
+            assertEquals(
+                0.0,
+                controller.originForCache(offset = 2),
+                "pending history rows must not expose space above the cached leading edge",
+            )
+            assertEquals(-15.0, controller.originForCache(offset = 3))
+        }
+
+        @Test
+        fun `matching anchor waits for the extra cache row before translating`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 2.5, historySize = 10)
+
+            assertEquals(0.0, controller.originForCache(offset = 3, rows = 24))
+            assertEquals(-10.0, controller.originForCache(offset = 3, rows = 25))
+        }
+
+        @Test
+        fun `fractional viewport height limits translation to installed coverage`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 2.25, historySize = 10)
+
+            assertEquals(-5.0, controller.originForCache(offset = 3, rows = 25, viewportHeight = 495))
+            assertEquals(-15.0, controller.originForCache(offset = 3, rows = 26, viewportHeight = 495))
+        }
+
+        @Test
+        fun `fractional viewport bottom slack near live output does not accelerate translation`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 0.1, historySize = 10)
+
+            assertEquals(-18.0, controller.originForCache(offset = 1, rows = 25, viewportHeight = 495), 1.0e-12)
+
+            controller.scrollTo(offsetLines = 0.0, historySize = 10)
+            assertEquals(-20.0, controller.originForCache(offset = 1, rows = 25, viewportHeight = 495))
+            assertEquals(0.0, controller.originForCache(offset = 0, rows = 24, viewportHeight = 495))
+        }
+
+        @Test
+        fun `cache without rows is not translated`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
+            controller.scrollTo(offsetLines = 2.25, historySize = 10)
+
+            assertEquals(0.0, controller.originForCache(offset = 3, rows = 0))
+        }
+
+        @Test
+        fun `cell height must be positive`() {
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             assertThrows(IllegalArgumentException::class.java) {
-                controller.updateVisualMetrics(historySize = 0, discardedCount = 0L, cellHeight = 20, visualOverflowPixels = 12)
+                controller.updateCellHeight(0)
             }
         }
 
         @Test
         fun `clamp reports whether requested offset changed`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             controller.scrollTo(offsetLines = 10.0, historySize = 10)
 
@@ -302,11 +387,12 @@ class SwingViewportControllerTest {
 
         @Test
         fun `reset returns viewport to live output`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             controller.scrollTo(offsetLines = 4.5, historySize = 10)
             controller.reset()
-            controller.updateVisualMetrics(historySize = 10, discardedCount = 0L, cellHeight = 20, visualOverflowPixels = 0)
+            controller.clamp(historySize = 10, discardedCount = 0L, scrollOnOutput = false)
+            controller.updateCellHeight(20)
             controller.publishViewportState(
                 historySize = 10,
                 visibleRows = 4,
@@ -335,7 +421,7 @@ class SwingViewportControllerTest {
 
         @Test
         fun `scrollTo rejects NaN offsets`() {
-            val controller = SwingViewportController { _, _, _, _, _ -> }
+            val controller = SwingViewportController(TerminalViewportListener.NONE) { _, _ -> }
 
             assertThrows(IllegalArgumentException::class.java) {
                 controller.scrollTo(offsetLines = Double.NaN, historySize = 10)
@@ -343,7 +429,7 @@ class SwingViewportControllerTest {
         }
     }
 
-    private class RecordingViewportListener : io.github.ketraterm.ui.swing.api.TerminalViewportListener {
+    private class RecordingViewportListener : TerminalViewportListener {
         var callCount = 0
         var lastState: TerminalViewportState? = null
 
@@ -375,4 +461,17 @@ class SwingViewportControllerTest {
         )
         return viewportStateSnapshot().scrollbackOffset
     }
+
+    private fun SwingViewportController.originForCache(
+        offset: Int,
+        rows: Int = 25,
+        viewportHeight: Int = 480,
+    ): Double =
+        contentOriginY(
+            cacheScrollbackOffset = offset,
+            cacheRows = rows,
+            cellHeight = 20,
+            viewportHeightPixels = viewportHeight,
+            visibleGridRows = 24,
+        )
 }
