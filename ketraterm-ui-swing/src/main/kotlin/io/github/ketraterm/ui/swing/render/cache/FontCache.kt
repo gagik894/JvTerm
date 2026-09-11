@@ -214,12 +214,13 @@ internal class FontCache(
     }
 
     /**
-     * Returns the first cached style font that can display all UTF-16 units in
-     * [text], falling back to [font] when no configured fallback covers it.
+     * Resolves a styled font for [text] through the primary and fallback pipeline.
+     * Returns the primary [font] when fallback resolution fails, even if some glyphs
+     * remain unsupported.
      *
-     * Grapheme-cluster lookups are bounded per style. The render cache already
-     * owns cluster strings for visible cells; this renderer cache must not keep
-     * every historical cluster alive for a months-long terminal session.
+     * Painting reads primitive cluster slices; shaping caches create strings only
+     * on layout-cache misses. Fallback resolutions retain their text keys in a
+     * bounded LRU per style, including unsupported text mapped to the primary font.
      */
     fun fontForText(
         text: String,

@@ -22,12 +22,12 @@ fun interface TerminalRenderClusterSink {
     /**
      * Called during `copyLine()` for a [TerminalRenderCellFlags.CLUSTER] cell.
      *
-     * [column] is the visual column of the cluster-leading cell. [text] is the
-     * full Unicode grapheme cluster. The text is only guaranteed to be valid for
-     * the duration of the surrounding render frame callback unless an
+     * [column] is the logical column of the cluster-leading cell in the copied
+     * row. [text] is the full Unicode grapheme cluster. The text is only guaranteed
+     * to be valid for the duration of the surrounding render frame callback unless an
      * implementation documents a longer lifetime.
      *
-     * @param column zero-based visual column of the cluster-leading cell.
+     * @param column zero-based logical column of the cluster-leading cell in the copied row.
      * @param text full Unicode grapheme cluster text.
      */
     fun onCluster(
@@ -40,7 +40,7 @@ fun interface TerminalRenderClusterSink {
  * Receives grapheme cluster code points while a row is copied.
  *
  * This is the allocation-conscious cluster handoff for render caches. The
- * supplied [codepoints] range is valid only for the duration of the callback;
+ * supplied code-point range is valid only for the duration of the callback;
  * receivers that retain it must copy the primitive range into their own
  * storage before returning.
  */
@@ -48,9 +48,9 @@ fun interface TerminalRenderClusterDataSink {
     /**
      * Called during `copyLine()` for a [TerminalRenderCellFlags.CLUSTER] cell.
      *
-     * @param column zero-based visual column of the cluster-leading cell.
+     * @param column zero-based logical column of the cluster-leading cell in the copied row.
      * @param codepoints source code point buffer.
-     * @param offset first code point in [codepoints].
+     * @param offset zero-based buffer index of the cluster's first code point in [codepoints].
      * @param length number of code points in the cluster.
      */
     fun onCluster(

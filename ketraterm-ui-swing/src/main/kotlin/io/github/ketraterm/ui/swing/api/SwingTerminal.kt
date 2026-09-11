@@ -62,6 +62,10 @@ import kotlin.math.floor
  * produced the bytes. Hosts own session creation, process lifecycle, and
  * connector choice outside this component.
  *
+ * Component state belongs to the Swing Event Dispatch Thread (EDT). Access it
+ * on the EDT unless a method explicitly documents another threading contract.
+ * Snapshot access and dispatch to the EDT are specified by each public method.
+ *
  * @param settingsProvider provider for immutable settings snapshots.
  * @param hostServices host-provided non-render services.
  */
@@ -1244,6 +1248,10 @@ class SwingTerminal
         /**
          * Returns the current search result snapshot.
          *
+         * Must be called on the EDT: this reads live search-controller state
+         * synchronously. The returned immutable value may be retained or passed
+         * to another thread.
+         *
          * @return current terminal search state.
          */
         fun currentSearchState(): TerminalSearchState = searchController.state()
@@ -1849,6 +1857,17 @@ class SwingTerminal
             shellSuggestionController?.hide()
         }
 
+        /**
+         * Returns the component size in pixels for a primary-screen grid.
+         *
+         * Must be called on the EDT because it reads the current settings and
+         * font metrics. The calculation includes primary-screen chrome even
+         * when the alternate screen is active.
+         *
+         * @param columns requested number of terminal columns.
+         * @param rows requested number of terminal rows.
+         * @return a new caller-owned dimension containing pixel width and height.
+         */
         fun preferredGridSize(
             columns: Int,
             rows: Int,

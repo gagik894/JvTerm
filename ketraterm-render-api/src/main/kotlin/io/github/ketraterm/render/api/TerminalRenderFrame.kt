@@ -139,13 +139,13 @@ interface TerminalRenderFrame {
     fun lineWrapped(row: Int): Boolean
 
     /**
-     * Copies one visible row into caller-owned primitive arrays.
+     * Copies one visible row into caller-owned primitive arrays in logical terminal-column order.
      *
      * All destination arrays must have enough space for [columns] entries from
      * their respective offsets. [extraAttrWords] and [hyperlinkIds] are optional
      * because not every renderer needs those channels.
      *
-     * [clusterDataSink] is the preferred zero-allocation path for cells marked
+     * [clusterDataSink] is the preferred primitive handoff for cells marked
      * [TerminalRenderCellFlags.CLUSTER]. [clusterSink] is retained for callers
      * that need text directly; implementations may avoid constructing cluster
      * strings when only [clusterDataSink] is supplied.

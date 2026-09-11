@@ -38,6 +38,14 @@ null results share the same access-order LRU, so repeated unsupported text uses
 Java2D fallback without retrying native work until eviction. Replacing the
 painter replaces the rasterizer and its cache together.
 
+Initialization remains synchronous. The first qualifying emoji painted through
+`TerminalPlatformEmojiPainter` creates its lazy rasterizer on the calling thread;
+in `SwingTerminal.paintComponent`, that is the EDT. On Windows,
+`WindowsColorEmojiRasterizer.create` loads Segoe UI Emoji with `Font.createFont`
+and reads and parses the font's COLR/CPAL tables. Classification prevents ordinary
+Unicode and text-presentation clusters from triggering that work, but it does not
+move the first emoji's font I/O or a cache miss's rasterization off the EDT.
+
 ## Contextual shaping and terminal geometry
 
 Shaping spans are constrained by direction, font style, Unicode script, and cell
@@ -89,12 +97,39 @@ lookups use reusable primitive buffers and a reusable lookup key.
 ## Font resolution
 
 For ordinary text, `FontCache` tries the primary font, an optional host resolver,
-configured fallbacks, and then enabled system fallbacks. Emoji presentation has
-an earlier host/configured emoji-font preference. All resolved fonts inherit the
-configured size, and results are cached. Native color-emoji painting is a separate
-platform path; it does not depend on detecting JetBrains Runtime.
+configured fallbacks, and then enabled system fallbacks. Emoji presentation first
+tries the host resolver, configured emoji fonts, and enabled system emoji fonts
+before the ordinary pipeline. All resolved fonts inherit the configured size,
+and results are cached. Native color-emoji painting is a separate platform path;
+it does not depend on detecting JetBrains Runtime.
+
+## Allocation measurement boundaries
 
 These painters and caches belong to the EDT. Their scratch storage is reused and
-must not be accessed concurrently. Cache-hit allocation measurements describe the
-measured helper or paint path; they do not establish a zero-allocation contract
-for the entire Swing component and Java2D pipeline.
+must not be accessed concurrently. The allocation regression tests use supported
+JDK `ThreadMXBean` allocation accounting after warming the measured operations.
+Their assertions cover the following scopes:
+
+| Probe | Allocation assertion and boundary |
+| --- | --- |
+| `TerminalTextRunStyleTest` and `TerminalShapedGlyphVectorCacheTest` | Zero bytes for warmed style scanning and shaped-run cache lookup; creation and positioning on cache misses are outside these measurements |
+| `TerminalPlatformEmojiPainterTest` | Zero bytes for warmed scalar/cluster paint calls with a recording rasterizer returning a preallocated image or null; successful hits include image drawing, while negative hits stop before Java2D text fallback |
+| `TerminalBidiLayoutTest` | Zero bytes for warmed row mapping, range projection, and retained-capacity overscan transitions; frame copying is outside the overscan measurement |
+| Styled-row and clipped-glyph-batch probes | The same allocated bytes as equivalent direct Java2D glyph drawing, not an assertion that Java2D itself allocates zero bytes |
+| `TerminalScrollbarOverlayTest` | The same allocated bytes as equivalent direct Java2D rounded-rectangle drawing; overlay geometry and color lookup add no allocation in the warmed fixture |
+| `SwingViewportControllerTest` | Zero bytes for warmed primitive viewport publication and its recording callback; explicitly requested immutable snapshots are outside this measurement |
+
+Scrollbar painting receives primitive viewport metrics directly from the EDT-owned
+controller and reuses thumb geometry and colors. It does not call the public
+viewport snapshot API during painting. Those snapshot objects remain part of the
+host-facing query API and event handling.
+
+The complete component paint still creates a `Graphics2D` copy and constructs a
+`CellSelection` projection when the selection intersects the viewport. Java2D
+clipping, transforms, and glyph drawing can also allocate outside the narrower
+helper measurements or within their direct-drawing baselines. Cold font loading,
+native rasterization, layout construction, and cache growth are separate from
+cache-hit behavior. Session frame publication and host listener implementations
+also have their own costs outside these rendering probes. These probes do not
+establish zero allocation for a complete Swing frame, nor do they measure frame
+latency or rendering throughput.
