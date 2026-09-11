@@ -51,7 +51,7 @@ internal class FontCache(
     private var useSystemFallbackFonts: Boolean = false
     private val styleFonts = arrayOfNulls<Font>(STYLE_COUNT)
     private var fallbackStyleFonts: Array<Array<Font?>> = emptyArray()
-    private val systemFontCache = SystemFontLru(DEFAULT_SYSTEM_FONT_CACHE_CAPACITY)
+    private val systemFontCache = StringFontLru(DEFAULT_SYSTEM_FONT_CACHE_CAPACITY)
     private val resolvedCodePointFonts =
         Array(STYLE_COUNT) {
             IntFontLru(codePointFallbackCapacityPerStyle)
@@ -425,12 +425,6 @@ internal class FontCache(
     }
 
     private class StringFontLru(
-        private val capacity: Int,
-    ) : LinkedHashMap<String, Font>(capacity, LOAD_FACTOR, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Font>?): Boolean = size > capacity
-    }
-
-    private class SystemFontLru(
         private val capacity: Int,
     ) : LinkedHashMap<String, Font>(capacity, LOAD_FACTOR, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Font>?): Boolean = size > capacity
