@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-import org.gradle.api.artifacts.component.ProjectComponentIdentifier
-import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import me.champeau.jmh.JmhBytecodeGeneratorTask
 
 plugins {
     kotlin("jvm")
@@ -24,6 +23,15 @@ plugins {
 
 repositories {
     mavenCentral()
+}
+
+val swingBenchmarkClasses =
+    configurations.create("swingBenchmarkClasses") {
+        isCanBeConsumed = false
+        isTransitive = false
+    }
+configurations.named("jmhImplementation") {
+    extendsFrom(swingBenchmarkClasses)
 }
 
 dependencies {
@@ -44,18 +52,12 @@ dependencies {
 
     implementation("org.openjdk.jmh:jmh-core:1.37")
     annotationProcessor("org.openjdk.jmh:jmh-generator-annprocess:1.37")
+    swingBenchmarkClasses(project(path = ":ketraterm-ui-swing", configuration = "benchmarkElements"))
 }
 
-// Benchmark internal helpers without widening the Swing production API.
-tasks.named<KotlinCompile>("compileJmhKotlin") {
-    friendPaths.from(
-        configurations.named("jmhCompileClasspath").map { classpath ->
-            classpath.incoming
-                .artifactView {
-                    componentFilter { it is ProjectComponentIdentifier && it.projectPath == ":ketraterm-ui-swing" }
-                }.files
-        },
-    )
+// Generate one harness and benchmark list for both modules in the existing runnable JAR.
+tasks.named<JmhBytecodeGeneratorTask>("jmhRunBytecodeGenerator") {
+    classesDirsToProcess.from(swingBenchmarkClasses)
 }
 
 jmh {

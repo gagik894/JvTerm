@@ -255,13 +255,15 @@ class SwingTerminal
                 },
             )
 
-        private val hyperlinkDiscoveryController =
+        private val hyperlinkDiscoveryController: TerminalHyperlinkDiscoveryController =
             TerminalHyperlinkDiscoveryController(
                 host =
                     object : TerminalHyperlinkDiscoveryHost {
                         override val renderCache: TerminalRenderCache get() = this@SwingTerminal.renderCache
                         override val hyperlinkDetector: SwingHyperlinkDetector
                             get() = this@SwingTerminal.hostServices.hyperlinkDetector
+
+                        override fun hyperlinksChanged() = hyperlinkController.refreshHyperlinkHover()
 
                         override fun repaintHyperlinkSpan(
                             startRow: Int,
@@ -272,7 +274,7 @@ class SwingTerminal
                     },
                 scope = componentScope,
             )
-        private val hyperlinkController =
+        private val hyperlinkController: TerminalHyperlinkController =
             TerminalHyperlinkController(
                 object : TerminalHyperlinkHost {
                     override val renderCache: TerminalRenderCache get() = this@SwingTerminal.renderCache
@@ -1979,6 +1981,7 @@ class SwingTerminal
                         visibleGridRows = visibleGridRows(),
                     ),
                 )
+            hyperlinkController.refreshHyperlinkHover()
             return layoutChanged or originChanged
         }
 

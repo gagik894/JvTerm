@@ -2,6 +2,12 @@
 
 Release notes for library consumers and embedders. Product-specific changes are recorded in the [IntelliJ plugin changelog](ketraterm-intellij-plugin/CHANGELOG.md) and [standalone application changelog](ketraterm-app/CHANGELOG.md).
 
+## [Unreleased]
+
+- Fixed hyperlink hover across soft-wrapped rows and output updates. OSC 8 links use a dotted resting underline; detected links underline on hover, preserving terminal-authored underline styles.
+- Replaced the 125 ms hyperlink discovery debounce with a single background worker that coalesces pending frames and reuses logical-line snapshots and detection results, reducing frame-update allocations.
+- Added detector context and per-link validation ranges to the hyperlink discovery API: unchanged URLs remain active during progress updates, edited destinations invalidate immediately, and IntelliJ console filters retain full viewport context.
+
 ## [0.2.2] - 2026-09-11
 
 - Raised the minimum build and runtime requirement from Java 21 to Java 25. Library consumers must provide Java 25 or newer.

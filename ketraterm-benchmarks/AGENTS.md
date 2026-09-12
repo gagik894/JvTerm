@@ -1,7 +1,8 @@
 # Terminal Benchmarks Agent Guide
 
-`ketraterm-benchmarks` owns JMH benchmarks for performance-sensitive terminal
-paths.
+`ketraterm-benchmarks` owns the JMH runner and benchmarks of public terminal APIs.
+Benchmarks of internal Swing helpers live in `ketraterm-ui-swing/src/jmh` and
+are compiled there; this module generates and packages their JMH harness too.
 
 ## Boundary
 
@@ -29,6 +30,6 @@ Run JMH when performance numbers are needed:
 
 Keep allocation measurements in JMH with its GC profiler. Unit tests should
 assert rendering, cache reuse, invalidation, and lifecycle semantics without
-depending on JVM allocation counters or warmup timing. Benchmark internal Swing
-helpers through the benchmark compilation's friend path; do not widen their
-production visibility.
+depending on JVM allocation counters or warmup timing. Keep internal Swing
+benchmarks in the Swing module's associated `jmh` compilation so Gradle and IDE
+visibility agree; do not widen production visibility for measurement.

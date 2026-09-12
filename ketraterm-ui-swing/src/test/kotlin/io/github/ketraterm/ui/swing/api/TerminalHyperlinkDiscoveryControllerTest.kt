@@ -17,21 +17,336 @@ package io.github.ketraterm.ui.swing.api
 
 import io.github.ketraterm.render.api.*
 import io.github.ketraterm.render.cache.TerminalRenderCache
+import io.github.ketraterm.ui.swing.render.painter.TerminalTextRunStyle
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.params.ParameterizedTest
+import org.junit.jupiter.params.provider.CsvSource
+import java.awt.Cursor
+import java.awt.event.MouseEvent
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.JButton
 import javax.swing.SwingUtilities
 import kotlin.coroutines.CoroutineContext
 
 class TerminalHyperlinkDiscoveryControllerTest {
+    @ParameterizedTest
+    @CsvSource("true, 0", "true, 1", "true, 2", "false, 0", "false, 1", "false, 2")
+    fun `editing a wrapped url removes its entire old action before detection finishes`(
+        stableLineIds: Boolean,
+        changedRow: Int,
+    ) {
+        val originalRows = arrayOf("https://example.com/abcd", "abcdefghijklmnopqrstuvwx", "old", "https://other.example")
+        val changedRows = originalRows.copyOf().apply { this[changedRow] = this[changedRow].dropLast(1) + "z" }
+        val originalUrl = originalRows.take(3).joinToString("")
+        val changedUrl = changedRows.take(3).joinToString("")
+        val cache = TerminalRenderCache(24, 4)
+
+        fun frame(generation: Long) =
+            StaticTextFrame(
+                frameGeneration = generation,
+                structureGeneration = 1L,
+                rowTexts = if (generation == 1L) originalRows else changedRows,
+                lineIds = if (stableLineIds) longArrayOf(1L, 2L, 3L, 4L) else LongArray(4),
+                lineGenerations = LongArray(4) { if (generation > 1L && it == changedRow) 2L else 1L },
+                wrappedRows = booleanArrayOf(true, true, false, false),
+            )
+        cache.accept(frame(1L))
+        val opened = ArrayList<String>()
+        val firstDetection = CountDownLatch(1)
+        val nextDetection = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { request, sink ->
+                    for (line in 0 until request.lineCount) {
+                        val url = request.lineText(line).trimEnd('\n')
+                        sink.addHyperlink(line, 0, url.length, SwingHyperlinkAction { opened.add(url) })
+                    }
+                },
+            )
+        host.onHyperlinksChanged = { firstDetection.countDown() }
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        try {
+            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            awaitRepaintAndDrainEdt(firstDetection)
+            SwingUtilities.invokeAndWait {
+                assertTrue(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(0, 0, cache), cache))
+                assertEquals(listOf(originalUrl), opened)
+                opened.clear()
+                host.onHyperlinksChanged = { nextDetection.countDown() }
+                for (generation in 2L..3L) {
+                    cache.accept(frame(generation))
+                    controller.scheduleForFrame()
+                    for (row in 0..2) {
+                        for (column in changedRows[row].indices) {
+                            assertEquals(0, controller.hyperlinkIdAt(row, column, cache), "stale URL at $row:$column")
+                        }
+                        assertFalse(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(row, 0, cache), cache))
+                    }
+                    assertTrue(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(3, 0, cache), cache))
+                }
+                assertEquals(listOf(originalRows[3], originalRows[3]), opened, "Unrelated links remain usable")
+                opened.clear()
+            }
+            awaitRepaintAndDrainEdt(nextDetection)
+            SwingUtilities.invokeAndWait {
+                val id = controller.hyperlinkIdAt(0, 0, cache)
+                assertTrue(id < 0)
+                for (row in 0..2) {
+                    assertEquals(id, controller.hyperlinkIdAt(row, 0, cache))
+                    assertTrue(controller.openDiscoveredHyperlink(id, cache))
+                }
+                assertEquals(List(3) { changedUrl }, opened)
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource("true, false", "false, false", "true, true", "false, true")
+    fun `changed logical line context invalidates links even outside the edited row`(
+        stableLineIds: Boolean,
+        splitLine: Boolean,
+    ) {
+        val prefix = "context".padEnd(24)
+        val url = "https://example.com"
+        val cache = TerminalRenderCache(24, 2)
+        val lineIds = if (stableLineIds) longArrayOf(1L, 2L) else LongArray(2)
+        cache.accept(
+            StaticTextFrame(
+                frameGeneration = 1L,
+                structureGeneration = 1L,
+                rowTexts = arrayOf(prefix, url),
+                lineIds = lineIds,
+                wrappedRows = booleanArrayOf(true, false),
+            ),
+        )
+        var opened = false
+        val published = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { _, sink ->
+                    sink.addHyperlink(
+                        0,
+                        prefix.length,
+                        prefix.length + url.length,
+                        SwingHyperlinkAction {
+                            opened = true
+                            true
+                        },
+                    )
+                },
+            )
+        host.onHyperlinksChanged = { published.countDown() }
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        try {
+            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            awaitRepaintAndDrainEdt(published)
+            SwingUtilities.invokeAndWait {
+                assertTrue(controller.hyperlinkIdAt(1, 0, cache) < 0)
+                cache.accept(
+                    StaticTextFrame(
+                        frameGeneration = 2L,
+                        structureGeneration = 1L,
+                        rowTexts = arrayOf(if (splitLine) prefix else "changed".padEnd(24), url),
+                        lineIds = lineIds,
+                        lineGenerations = longArrayOf(2L, 1L),
+                        wrappedRows = booleanArrayOf(!splitLine, false),
+                    ),
+                )
+                controller.scheduleForFrame()
+                assertEquals(0, controller.hyperlinkIdAt(1, 0, cache))
+                assertFalse(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(1, 0, cache), cache))
+                assertFalse(opened)
+                controller.dispose()
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource("true, false", "false, false", "true, true", "false, true")
+    fun `frame carry keeps wrapped hover and activation intact without merging distinct links`(
+        stableLineIds: Boolean,
+        scroll: Boolean,
+    ) {
+        val cache = TerminalRenderCache(24, 4)
+        val rows = arrayOf("go https://example.com/ab", "cdefghijklmnopqrstuvwxyz", "012345 end")
+
+        fun frame(generation: Long): StaticTextFrame {
+            val shifted = scroll && generation > 1L
+            return StaticTextFrame(
+                frameGeneration = generation,
+                structureGeneration = if (shifted) 2L else 1L,
+                rowTexts = if (shifted) rows + "after" else arrayOf("before") + rows,
+                lineIds =
+                    when {
+                        !stableLineIds -> LongArray(4)
+                        shifted -> longArrayOf(2, 3, 4, 5)
+                        else -> longArrayOf(1, 2, 3, 4)
+                    },
+                wrappedRows =
+                    if (shifted) booleanArrayOf(true, true, false, false) else booleanArrayOf(false, true, true, false),
+            )
+        }
+        cache.accept(frame(1L))
+        val detectorCalls = AtomicInteger()
+        var opened = 0
+        val sharedAction =
+            SwingHyperlinkAction {
+                opened++
+                true
+            }
+        val repaintObserved = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { _, sink ->
+                    detectorCalls.incrementAndGet()
+                    sink.addHyperlink(1, 3, 54, sharedAction)
+                    sink.addHyperlink(1, 55, 58, sharedAction)
+                },
+                repaintObserved,
+            )
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        val repaints = ArrayList<CellSelection>()
+        val hoverHost =
+            object : TerminalHyperlinkHost {
+                override val renderCache = cache
+                override var cursor: Cursor = Cursor.getDefaultCursor()
+
+                override fun cellAt(
+                    x: Int,
+                    y: Int,
+                ): Long = (x.toLong() shl 32) or y.toLong()
+
+                override fun hyperlinkIdAt(
+                    row: Int,
+                    column: Int,
+                ): Int = controller.hyperlinkIdAt(row, column, cache)
+
+                override fun isHyperlinkResolvable(hyperlinkId: Int): Boolean =
+                    controller.isDiscoveredHyperlinkResolvable(hyperlinkId, cache)
+
+                override fun openHyperlink(hyperlinkId: Int): Boolean = controller.openDiscoveredHyperlink(hyperlinkId, cache)
+
+                override fun repaintHyperlinkSpan(
+                    startRow: Int,
+                    startColumn: Int,
+                    endRow: Int,
+                    endColumn: Int,
+                ) {
+                    repaints += CellSelection(startColumn, startRow, endColumn, endRow)
+                }
+            }
+        val hover = TerminalHyperlinkController(hoverHost)
+        host.onHyperlinksChanged = hover::refreshHyperlinkHover
+        val source = JButton()
+        val style = TerminalTextRunStyle()
+        val activationForeground = 0xFF4DA3FF.toInt()
+        try {
+            SwingUtilities.invokeAndWait {
+                hover.handleMouseMoved(MouseEvent(source, MouseEvent.MOUSE_MOVED, 0L, MouseEvent.CTRL_DOWN_MASK, 4, 1, 0, false))
+                assertEquals(0, hover.hoveredHyperlinkId)
+                controller.scheduleForFrame()
+            }
+            awaitRepaintAndDrainEdt(repaintObserved)
+            SwingUtilities.invokeAndWait {
+                assertTrue(hover.hoveredHyperlinkId < 0, "Async detection must activate hover without another mouse event")
+                assertTrue(hover.hyperlinkActivationHover)
+                repeat(3) { iteration ->
+                    cache.accept(frame(iteration + 2L))
+                    controller.scheduleForFrame()
+                    val ids = controller.hyperlinkIdsFor(cache)
+                    val firstRow = if (scroll) 0 else 1
+                    val offset = cache.rowOffset(firstRow)
+                    val linkId = ids[offset + 3]
+                    assertTrue(linkId < 0)
+                    for (index in 3 until 54) {
+                        assertEquals(linkId, ids[offset + index], "cell $index after carry $iteration")
+                    }
+                    assertEquals(0, ids[offset + 2])
+                    assertEquals(0, ids[offset + 54])
+                    val otherId = ids[offset + 55]
+                    assertTrue(otherId < 0)
+                    assertNotEquals(linkId, otherId, "Distinct matches may share one action")
+                    assertTrue(controller.openDiscoveredHyperlink(otherId, cache))
+                    assertEquals(1, detectorCalls.get())
+
+                    hover.clearHyperlinkHover()
+                    repaints.clear()
+                    val expectedSpan = CellSelection(3, firstRow, 6, firstRow + 2)
+                    for (row in firstRow..firstRow + 2) {
+                        hover.handleMouseMoved(MouseEvent(source, MouseEvent.MOUSE_MOVED, 0L, 0, 4, row, 0, false))
+                        assertEquals(linkId, hover.hoveredHyperlinkId)
+                        assertEquals(firstRow, hover.hoveredHyperlinkStartRow)
+                        assertEquals(3, hover.hoveredHyperlinkStartColumn)
+                        assertEquals(firstRow + 2, hover.hoveredHyperlinkEndRow)
+                        assertEquals(6, hover.hoveredHyperlinkEndColumn)
+                        val click =
+                            MouseEvent(
+                                source,
+                                MouseEvent.MOUSE_PRESSED,
+                                0L,
+                                MouseEvent.CTRL_DOWN_MASK,
+                                4,
+                                row,
+                                1,
+                                false,
+                                MouseEvent.BUTTON1,
+                            )
+                        assertTrue(hover.handleMousePressed(click))
+                        assertTrue(click.isConsumed)
+                    }
+                    assertEquals(
+                        listOf(expectedSpan),
+                        repaints,
+                        "Moving between segments must not repaint separate row spans",
+                    )
+                    hover.updateHyperlinkActivationHover(true)
+                    assertEquals(listOf(expectedSpan, expectedSpan), repaints)
+                    for (row in firstRow..firstRow + 2) {
+                        style.configureRow(
+                            row,
+                            true,
+                            ids,
+                            hover.hoveredHyperlinkId,
+                            hover.hoveredHyperlinkStartRow,
+                            hover.hoveredHyperlinkStartColumn,
+                            hover.hoveredHyperlinkEndRow,
+                            hover.hoveredHyperlinkEndColumn,
+                            hover.hyperlinkActivationHover,
+                            activationForeground,
+                        )
+                        for (column in 0 until cache.columns) {
+                            val index = cache.rowOffset(row) + column
+                            style.begin(cache, cache.palette, cache.rowOffset(row), column)
+                            assertEquals(ids[index] == linkId, style.hovered)
+                            val expectedForeground =
+                                if (ids[index] == linkId) activationForeground else cache.palette.defaultForeground
+                            assertEquals(expectedForeground, style.foreground)
+                        }
+                    }
+                }
+                assertEquals(12, opened, "Every carried segment and the separate match must retain its action")
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
     @Test
-    fun `scheduled analysis publishes discovered url overlay after debounce`() {
+    fun `scheduled analysis publishes discovered url overlay`() {
         val cache = TerminalRenderCache(24, 1)
         writeText(cache, row = 0, text = "https://example.com")
         val opened = AtomicBoolean(false)
@@ -142,20 +457,23 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        val detectorCalls = AtomicInteger()
+        val urlScans = AtomicInteger()
         val repaintObserved = CountDownLatch(1)
         val host =
             TestDiscoveryHost(
                 renderCache = cache,
                 hyperlinkDetector =
-                    SwingHyperlinkDetector { _, sink ->
-                        detectorCalls.incrementAndGet()
-                        sink.addHyperlink(
-                            lineIndex = 0,
-                            startOffset = 0,
-                            endOffset = "https://example.com".length,
-                            action = SwingHyperlinkAction.NONE,
-                        )
+                    SwingHyperlinkDetector { request, sink ->
+                        for (lineIndex in 0 until request.lineCount) {
+                            if (request.lineText(lineIndex) != "https://example.com\n") continue
+                            urlScans.incrementAndGet()
+                            sink.addHyperlink(
+                                lineIndex = lineIndex,
+                                startOffset = 0,
+                                endOffset = "https://example.com".length,
+                                action = SwingHyperlinkAction.NONE,
+                            )
+                        }
                     },
                 repaintObserved = repaintObserved,
             )
@@ -174,7 +492,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        var carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        var carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
         assertEquals(-1, carry.ids[cache.rowOffset(1)])
         assertEquals(1, carry.detectorCalls)
 
@@ -186,7 +504,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
 
         assertEquals(0, carry.ids[cache.rowOffset(1)])
         assertEquals(-1, carry.ids[cache.rowOffset(2)])
@@ -256,20 +574,23 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        val detectorCalls = AtomicInteger()
+        val urlScans = AtomicInteger()
         val repaintObserved = CountDownLatch(1)
         val host =
             TestDiscoveryHost(
                 renderCache = cache,
                 hyperlinkDetector =
-                    SwingHyperlinkDetector { _, sink ->
-                        detectorCalls.incrementAndGet()
-                        sink.addHyperlink(
-                            lineIndex = 0,
-                            startOffset = 0,
-                            endOffset = "https://example.com".length,
-                            action = SwingHyperlinkAction.NONE,
-                        )
+                    SwingHyperlinkDetector { request, sink ->
+                        for (lineIndex in 0 until request.lineCount) {
+                            if (request.lineText(lineIndex) != "https://example.com\n") continue
+                            urlScans.incrementAndGet()
+                            sink.addHyperlink(
+                                lineIndex = lineIndex,
+                                startOffset = 0,
+                                endOffset = "https://example.com".length,
+                                action = SwingHyperlinkAction.NONE,
+                            )
+                        }
                     },
                 repaintObserved = repaintObserved,
             )
@@ -288,7 +609,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        var carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        var carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
         assertEquals(0, carry.ids[cache.rowOffset(0)])
 
         cache.accept(
@@ -299,14 +620,14 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
 
         assertEquals(0, carry.ids[cache.rowOffset(0)])
         assertEquals(1, carry.detectorCalls)
     }
 
     @Test
-    fun `scroll does not preserve discovered links when row generation changes`() {
+    fun `scroll preserves discovered links when generation changes but text stays identical`() {
         val cache = TerminalRenderCache(24, 2)
         cache.accept(
             StaticTextFrame(
@@ -351,7 +672,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
         )
         val carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
 
-        assertEquals(0, carry.ids[cache.rowOffset(1)])
+        assertEquals(-1, carry.ids[cache.rowOffset(1)])
         assertEquals(1, carry.detectorCalls)
     }
 
@@ -415,7 +736,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
         writeText(cache, row = 1, text = "://a ")
         cache.lineWrapped[0] = true
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals(1, snapshot.request.lineCount)
         assertEquals("https://a\n", snapshot.request.lineText(0))
@@ -423,11 +744,11 @@ class TerminalHyperlinkDiscoveryControllerTest {
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 9, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 9, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[cache.rowOffset(0)])
         assertEquals(-1, ids[cache.rowOffset(0) + 4])
         assertEquals(-1, ids[cache.rowOffset(1)])
@@ -441,14 +762,14 @@ class TerminalHyperlinkDiscoveryControllerTest {
         writeText(cache, row = 0, text = "abcd")
         cache.hyperlinkIds[cache.rowOffset(0) + 1] = 7
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 4, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 4, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(7, ids[1])
         assertEquals(-1, ids[2])
@@ -469,17 +790,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         cache.flags[2] = TerminalRenderCellFlags.WIDE_TRAILING
         writeCodePoint(cache, row = 0, column = 3, codePoint = 'B'.code)
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("A\u4E2DB\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(0, ids[0])
         assertEquals(-1, ids[1])
         assertEquals(-1, ids[2])
@@ -499,17 +820,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         cache.flags[1] = TerminalRenderCellFlags.WIDE_TRAILING
         writeCodePoint(cache, row = 0, column = 2, codePoint = '!'.code)
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("\uD83D\uDE00!\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(-1, ids[1])
         assertEquals(0, ids[2])
@@ -520,17 +841,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         val cache = TerminalRenderCache(3, 1)
         cache.accept(CombiningClusterFrame())
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("e\u0301!\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(0, ids[1])
         assertEquals(0, ids[2])
@@ -541,16 +862,47 @@ class TerminalHyperlinkDiscoveryControllerTest {
         val cache = TerminalRenderCache(2, 1)
         writeText(cache, row = 0, text = "a ")
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("a\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNull(overlay)
+    }
+
+    private data class TestDetectedHyperlink(
+        val line: Int,
+        val start: Int,
+        val end: Int,
+        val action: SwingHyperlinkAction,
+    )
+
+    private class TestSnapshot(
+        private val cache: TerminalRenderCache,
+    ) {
+        private val viewport = TerminalHyperlinkViewport().apply { update(cache) }
+        private val lines = viewport.pendingLines()
+        val request = detectionRequest(lines)
+
+        fun buildOverlay(links: List<TestDetectedHyperlink>): IntArray? {
+            val detected = List(lines.size) { ArrayList<TerminalDetectedHyperlink>() }
+            for (link in links) {
+                val end = minOf(link.end, lines[link.line].text.length - 1)
+                if (end >
+                    link.start
+                ) {
+                    detected[link.line].add(TerminalDetectedHyperlink(link.start, end, link.action, 0, lines[link.line].text.length))
+                }
+            }
+            viewport.accept(lines, detected)
+            viewport.writeOverlay(cache) { _, _, _, _ -> }
+            val ids = viewport.idsFor(cache)
+            return if (ids.any { it < 0 }) ids else null
+        }
     }
 
     private fun writeText(
@@ -621,6 +973,10 @@ class TerminalHyperlinkDiscoveryControllerTest {
         override val hyperlinkDetector: SwingHyperlinkDetector,
         private val repaintObserved: CountDownLatch = CountDownLatch(0),
     ) : TerminalHyperlinkDiscoveryHost {
+        var onHyperlinksChanged: () -> Unit = {}
+
+        override fun hyperlinksChanged() = onHyperlinksChanged()
+
         override fun repaintHyperlinkSpan(
             startRow: Int,
             startColumn: Int,

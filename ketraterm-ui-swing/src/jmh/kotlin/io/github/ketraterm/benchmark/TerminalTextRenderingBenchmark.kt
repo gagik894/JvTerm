@@ -59,6 +59,7 @@ open class TerminalTextRenderingBenchmark {
     private lateinit var asciiGraphics: Graphics2D
     private lateinit var styledGraphics: Graphics2D
     private lateinit var batchGraphics: Graphics2D
+    private lateinit var hyperlinkGraphics: Graphics2D
     private lateinit var asciiPainter: TerminalTextPainter
     private lateinit var styledPainter: TerminalTextPainter
     private lateinit var asciiCache: TerminalRenderCache
@@ -66,6 +67,7 @@ open class TerminalTextRenderingBenchmark {
     private lateinit var styleCache: TerminalRenderCache
     private val runStyle = TerminalTextRunStyle()
     private var hoverActive = false
+    private val hyperlinkDecorations = TerminalDecorationPainter(AwtColorCache())
     private val asciiChars = "AAAAAA".toCharArray()
     private lateinit var asciiVector: GlyphVector
     private var asciiUsesDrawChars = false
@@ -90,6 +92,7 @@ open class TerminalTextRenderingBenchmark {
         asciiGraphics = BufferedImage(500, 40, BufferedImage.TYPE_INT_ARGB).createGraphics()
         styledGraphics = BufferedImage(500, 40, BufferedImage.TYPE_INT_ARGB).createGraphics()
         batchGraphics = BufferedImage(135 * CELL_WIDTH, 40, BufferedImage.TYPE_INT_ARGB).createGraphics()
+        hyperlinkGraphics = BufferedImage(135 * CELL_WIDTH, 40, BufferedImage.TYPE_INT_ARGB).createGraphics()
         for (graphics in arrayOf(asciiGraphics, styledGraphics, batchGraphics)) {
             graphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, settings.textAntialiasing)
             graphics.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, settings.fractionalMetrics)
@@ -174,6 +177,7 @@ open class TerminalTextRenderingBenchmark {
         asciiGraphics.dispose()
         styledGraphics.dispose()
         batchGraphics.dispose()
+        hyperlinkGraphics.dispose()
     }
 
     @Benchmark
@@ -181,6 +185,28 @@ open class TerminalTextRenderingBenchmark {
         asciiGraphics.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, settings.textAntialiasing)
         asciiGraphics.setRenderingHint(RenderingHints.KEY_FRACTIONALMETRICS, settings.fractionalMetrics)
         asciiPainter.paintRow(asciiGraphics, asciiCache, settings.palette, metrics, 0, asciiGraphics.fontRenderContext)
+    }
+
+    @Benchmark
+    open fun paintDottedHyperlink() {
+        hyperlinkDecorations.paintHyperlink(hyperlinkGraphics, Color.WHITE.rgb, 3, 83, 0, metrics, false)
+    }
+
+    @Benchmark
+    open fun paintDottedHyperlinkChangingColor() {
+        hoverActive = !hoverActive
+        val color = if (hoverActive) Color.WHITE.rgb else Color.RED.rgb
+        hyperlinkDecorations.paintHyperlink(hyperlinkGraphics, color, 3, 83, 0, metrics, false)
+    }
+
+    @Benchmark
+    open fun paintHoveredHyperlink() {
+        hyperlinkDecorations.paintHyperlink(hyperlinkGraphics, Color.WHITE.rgb, 3, 83, 0, metrics, true)
+    }
+
+    @Benchmark
+    open fun paintDottedHyperlinkClipped() {
+        hyperlinkDecorations.paintHyperlink(batchGraphics, Color.WHITE.rgb, 3, 83, 0, metrics, false)
     }
 
     @Benchmark

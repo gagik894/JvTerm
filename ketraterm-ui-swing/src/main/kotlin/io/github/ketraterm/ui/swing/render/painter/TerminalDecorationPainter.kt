@@ -40,8 +40,12 @@ internal class TerminalDecorationPainter(
     ) {
         if (style.textHidden) return
         paint(g, palette, style.attr, style.extraAttr, style.foreground, startColumn, endColumn, row, metrics)
-        if (style.hyperlinkId != 0) {
-            paintHyperlink(g, style.foreground, startColumn, endColumn, row, metrics, style.hovered)
+        if (style.hyperlinkId > 0 || style.hovered) {
+            // A terminal-authored underline owns its decoration and color. The activation
+            // foreground still indicates hover without painting over that underline.
+            if (TerminalRenderAttrs.underlineStyle(style.attr) == TerminalRenderUnderline.NONE) {
+                paintHyperlink(g, style.foreground, startColumn, endColumn, row, metrics, style.hovered)
+            }
         }
     }
 
@@ -110,7 +114,17 @@ internal class TerminalDecorationPainter(
         val rowY = row * metrics.cellHeight
         val y = rowY + metrics.underlineY
         g.color = colorCache.color(color)
-        g.fillRect(x, y, width, if (hovered) HOVER_DECORATION_THICKNESS else DECORATION_THICKNESS)
+        if (hovered) {
+            g.fillRect(x, y, width, minOf(HOVER_DECORATION_THICKNESS, metrics.cellHeight - metrics.underlineY))
+        } else {
+            // Anchor the pattern to the row, so text/style run boundaries cannot restart it.
+            var dotX = x + (DOT_PERIOD - x % DOT_PERIOD) % DOT_PERIOD
+            val endX = x + width
+            while (dotX < endX) {
+                g.fillRect(dotX, y, DECORATION_THICKNESS, DECORATION_THICKNESS)
+                dotX += DOT_PERIOD
+            }
+        }
     }
 
     private fun underlineColor(
@@ -131,5 +145,6 @@ internal class TerminalDecorationPainter(
         private const val DECORATION_THICKNESS = 1
         private const val HOVER_DECORATION_THICKNESS = 2
         private const val DOUBLE_UNDERLINE_OFFSET = 2
+        private const val DOT_PERIOD = 3
     }
 }

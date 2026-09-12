@@ -72,9 +72,17 @@ internal class TerminalHyperlinkController(
         private set
     var hyperlinkActivationHover: Boolean = false
         private set
+    private var pointerKnown = false
+    private var pointerX = 0
+    private var pointerY = 0
+    private var controlDown = false
 
     fun handleMouseMoved(event: MouseEvent) {
-        updateHyperlinkHover(event, activationHover = event.isControlDown)
+        pointerKnown = true
+        pointerX = event.x
+        pointerY = event.y
+        controlDown = event.isControlDown
+        refreshHyperlinkHover()
     }
 
     fun handleMouseExited() {
@@ -90,9 +98,14 @@ internal class TerminalHyperlinkController(
         return true
     }
 
-    fun hyperlinkIdAt(event: MouseEvent): Int = resolvableHyperlinkIdAt(event)
+    fun hyperlinkIdAt(event: MouseEvent): Int {
+        val cache = host.renderCache
+        if (cache.columns <= 0 || cache.rows <= 0) return NO_HYPERLINK_ID
+        return resolvableHyperlinkIdAt(host.cellAt(event.x, event.y))
+    }
 
     fun updateHyperlinkActivationHover(active: Boolean) {
+        controlDown = active
         if (hoveredHyperlinkId == NO_HYPERLINK_ID || hyperlinkActivationHover == active) return
         hyperlinkActivationHover = active
         repaintHyperlinkSpan(
@@ -105,28 +118,24 @@ internal class TerminalHyperlinkController(
     }
 
     fun clearHyperlinkHover() {
-        updateHyperlinkHover(NO_HYPERLINK_ID, activationHover = false)
+        pointerKnown = false
+        controlDown = false
+        clearHoveredSpan()
+        applyHyperlinkHover(NO_HYPERLINK_ID, activationHover = false)
     }
 
-    private fun updateHyperlinkHover(
-        event: MouseEvent,
-        activationHover: Boolean,
-    ) {
-        val hyperlinkId = resolvableHyperlinkIdAt(event)
+    /** Re-hit-tests the last pointer position after frame, geometry, or detected-link changes. */
+    fun refreshHyperlinkHover() {
+        if (!pointerKnown) return
+        val cache = host.renderCache
+        val cell = if (cache.columns > 0 && cache.rows > 0) host.cellAt(pointerX, pointerY) else -1L
+        val hyperlinkId = resolvableHyperlinkIdAt(cell)
         if (hyperlinkId != NO_HYPERLINK_ID) {
-            resolveHoveredSpan(event, hyperlinkId)
+            resolveHoveredSpan(cell, hyperlinkId)
         } else {
             clearHoveredSpan()
         }
-        applyHyperlinkHover(hyperlinkId, activationHover)
-    }
-
-    private fun updateHyperlinkHover(
-        hyperlinkId: Int,
-        activationHover: Boolean,
-    ) {
-        clearHoveredSpan()
-        applyHyperlinkHover(hyperlinkId, activationHover)
+        applyHyperlinkHover(hyperlinkId, activationHover = controlDown)
     }
 
     private fun applyHyperlinkHover(
@@ -171,8 +180,12 @@ internal class TerminalHyperlinkController(
         host.repaintHyperlinkSpan(startRow, startColumn, endRow, endColumn)
     }
 
-    private fun resolvableHyperlinkIdAt(event: MouseEvent): Int {
-        val hyperlinkId = hyperlinkIdAt(event, host.renderCache)
+    private fun resolvableHyperlinkIdAt(cell: Long): Int {
+        val cache = host.renderCache
+        val column = unpackCellColumn(cell)
+        val row = unpackCellRow(cell)
+        if (row !in 0 until cache.rows || column !in 0 until cache.columns) return NO_HYPERLINK_ID
+        val hyperlinkId = hyperlinkIdAt(row, column)
         if (hyperlinkId == NO_HYPERLINK_ID) return NO_HYPERLINK_ID
         return if (host.isHyperlinkResolvable(hyperlinkId)) hyperlinkId else NO_HYPERLINK_ID
     }
@@ -183,44 +196,43 @@ internal class TerminalHyperlinkController(
     private var pendingHoverEndColumn: Int = 0
 
     private fun resolveHoveredSpan(
-        event: MouseEvent,
+        cell: Long,
         hyperlinkId: Int,
     ) {
         val cache = host.renderCache
-        val cell = host.cellAt(event.x, event.y)
         var startColumn = unpackCellColumn(cell)
         var startRow = unpackCellRow(cell)
         var endColumn = startColumn + 1
         var endRow = startRow
 
-        while (startColumn > 0 && hyperlinkIdAt(cache, startRow, startColumn - 1) == hyperlinkId) {
+        while (startColumn > 0 && hyperlinkIdAt(startRow, startColumn - 1) == hyperlinkId) {
             startColumn--
         }
         while (
             startColumn == 0 &&
             startRow > 0 &&
             cache.lineWrapped[startRow - 1] &&
-            hyperlinkIdAt(cache, startRow - 1, cache.columns - 1) == hyperlinkId
+            hyperlinkIdAt(startRow - 1, cache.columns - 1) == hyperlinkId
         ) {
             startRow--
             startColumn = cache.columns - 1
-            while (startColumn > 0 && hyperlinkIdAt(cache, startRow, startColumn - 1) == hyperlinkId) {
+            while (startColumn > 0 && hyperlinkIdAt(startRow, startColumn - 1) == hyperlinkId) {
                 startColumn--
             }
         }
 
-        while (endColumn < cache.columns && hyperlinkIdAt(cache, endRow, endColumn) == hyperlinkId) {
+        while (endColumn < cache.columns && hyperlinkIdAt(endRow, endColumn) == hyperlinkId) {
             endColumn++
         }
         while (
             endColumn == cache.columns &&
             endRow + 1 < cache.rows &&
             cache.lineWrapped[endRow] &&
-            hyperlinkIdAt(cache, endRow + 1, 0) == hyperlinkId
+            hyperlinkIdAt(endRow + 1, 0) == hyperlinkId
         ) {
             endRow++
             endColumn = 1
-            while (endColumn < cache.columns && hyperlinkIdAt(cache, endRow, endColumn) == hyperlinkId) {
+            while (endColumn < cache.columns && hyperlinkIdAt(endRow, endColumn) == hyperlinkId) {
                 endColumn++
             }
         }
@@ -239,18 +251,6 @@ internal class TerminalHyperlinkController(
     }
 
     private fun hyperlinkIdAt(
-        event: MouseEvent,
-        cache: TerminalRenderCache,
-    ): Int {
-        if (cache.columns <= 0 || cache.rows <= 0) return NO_HYPERLINK_ID
-        val cell = host.cellAt(event.x, event.y)
-        val column = unpackCellColumn(cell)
-        val row = unpackCellRow(cell)
-        return hyperlinkIdAt(cache, row, column)
-    }
-
-    private fun hyperlinkIdAt(
-        cache: TerminalRenderCache,
         row: Int,
         column: Int,
     ): Int = host.hyperlinkIdAt(row, column)

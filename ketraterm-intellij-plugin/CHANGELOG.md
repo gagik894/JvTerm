@@ -1,5 +1,10 @@
 # KetraTerm IntelliJ Plugin Changelog
 
+## [Unreleased]
+
+- Improved link underlines and highlighting across wrapped lines.
+- Fixed delayed or flickering links while scrolling and during build output.
+
 ## [0.2.2] - 2026-09-11
 
 - Fixed alignment of Hebrew, Arabic, and mixed-direction text with cell backgrounds, the cursor, selection and search highlights, and mouse targets.

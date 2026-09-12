@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+
 plugins {
     id("java-library")
     kotlin("jvm")
@@ -21,6 +23,12 @@ plugins {
 
 repositories {
     mavenCentral()
+}
+
+// Keep benchmarks of internal helpers in the same Kotlin target for Gradle and IDE visibility.
+val jmh = sourceSets.create("jmh")
+kotlin.target.compilations.named(jmh.name) {
+    associateWith(kotlin.target.compilations.getByName("main"))
 }
 
 dependencies {
@@ -36,6 +44,14 @@ dependencies {
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:6.1.1")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:$kotlinxCoroutinesVersion")
+
+    add(jmh.implementationConfigurationName, "org.openjdk.jmh:jmh-core:1.37")
+}
+
+// The central JMH runner generates the harness and packages these Kotlin benchmark classes.
+configurations.consumable("benchmarkElements") {
+    extendsFrom(configurations[jmh.runtimeClasspathConfigurationName])
+    outgoing.artifact(tasks.named<KotlinCompile>("compileJmhKotlin").flatMap { it.destinationDirectory })
 }
 
 tasks.test {
