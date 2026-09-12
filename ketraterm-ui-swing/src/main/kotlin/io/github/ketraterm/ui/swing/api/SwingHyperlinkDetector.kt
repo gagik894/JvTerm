@@ -23,8 +23,15 @@ package io.github.ketraterm.ui.swing.api
  * allocate and may call host/IDE link-discovery APIs, but must not touch Swing
  * component state directly. Reported offsets are UTF-16 offsets within the
  * supplied line text.
+ *
+ * [context] declares whether detection depends on individual logical lines or
+ * the complete visible viewport. Detectors must not depend on earlier requests.
  */
 fun interface SwingHyperlinkDetector {
+    /** Text context required by detection and its actions, fixed for this detector's lifetime. */
+    val context: SwingHyperlinkDetectionContext
+        get() = SwingHyperlinkDetectionContext.LOGICAL_LINE
+
     /**
      * Detects hyperlinks in [request] and reports them to [sink].
      *
@@ -34,6 +41,8 @@ fun interface SwingHyperlinkDetector {
      *
      * @param request immutable visible-viewport text snapshot.
      * @param sink receiver for detected ranges and activation actions.
+     * @throws java.util.concurrent.CancellationException when detection is
+     * cancelled; an interrupted attempt must not be cached as having no links.
      */
     fun detect(
         request: SwingHyperlinkDetectionRequest,
@@ -49,13 +58,30 @@ fun interface SwingHyperlinkDetector {
     }
 }
 
+/** Text dependency used to schedule detection and validate cached results. */
+enum class SwingHyperlinkDetectionContext {
+    /**
+     * Each logical line is independent. Requests may contain only changed
+     * lines; results must not depend on neighboring lines or request positions.
+     */
+    LOGICAL_LINE,
+
+    /**
+     * Detection requires every visible logical line in viewport order. Results
+     * depend on that complete text and order unless they declare an explicit
+     * validation range through [SwingHyperlinkDetectionSink.addHyperlink].
+     */
+    VIEWPORT,
+}
+
 /**
  * Immutable visible terminal text snapshot passed to [SwingHyperlinkDetector].
  *
  * Lines are logical terminal lines: soft-wrapped render rows are joined, and a
  * line separator is appended to each line to match IntelliJ-style console
  * filter contracts. Offsets returned by [lineStartOffset] and [lineEndOffset]
- * are cumulative UTF-16 offsets across all lines in this request.
+ * are cumulative UTF-16 offsets across the supplied lines in this request;
+ * they are not offsets in the terminal's complete output.
  */
 class SwingHyperlinkDetectionRequest internal constructor(
     private val lines: Array<String>,
@@ -100,15 +126,33 @@ interface SwingHyperlinkDetectionSink {
     /**
      * Adds a detected hyperlink.
      *
+     * By default the result is valid only while its detector's [SwingHyperlinkDetector.context]
+     * is unchanged: the logical line or the complete visible viewport. A
+     * detector may supply an explicit validation range when the result depends
+     * on only part of one line. That range must contain the highlight
+     * and every character affecting detection or the action, including token
+     * delimiters. Include the trailing line separator when the result depends
+     * on the end of the line, so appended text invalidates it.
+     *
+     * Invalid ranges, including validation ranges that do not contain the
+     * highlight, are ignored.
+     *
      * @param lineIndex logical line index from the detection request.
      * @param startOffset inclusive UTF-16 offset within the line text.
      * @param endOffset exclusive UTF-16 offset within the line text.
      * @param action host-owned action invoked after explicit user activation.
+     * @param validationStartOffset inclusive UTF-16 offset of the text that
+     * determines this result; defaults to the start of the logical line.
+     * @param validationEndOffset exclusive UTF-16 offset of that text, including
+     * any required boundary characters. [Int.MAX_VALUE] retains the detector's
+     * default context dependency; explicit ranges use a concrete line offset.
      */
     fun addHyperlink(
         lineIndex: Int,
         startOffset: Int,
         endOffset: Int,
         action: SwingHyperlinkAction,
+        validationStartOffset: Int = 0,
+        validationEndOffset: Int = Int.MAX_VALUE,
     )
 }

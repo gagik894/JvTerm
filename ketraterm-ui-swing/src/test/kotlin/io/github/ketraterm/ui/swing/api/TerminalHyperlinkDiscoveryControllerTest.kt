@@ -346,7 +346,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
     }
 
     @Test
-    fun `scheduled analysis publishes discovered url overlay after debounce`() {
+    fun `scheduled analysis publishes discovered url overlay`() {
         val cache = TerminalRenderCache(24, 1)
         writeText(cache, row = 0, text = "https://example.com")
         val opened = AtomicBoolean(false)
@@ -457,20 +457,23 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        val detectorCalls = AtomicInteger()
+        val urlScans = AtomicInteger()
         val repaintObserved = CountDownLatch(1)
         val host =
             TestDiscoveryHost(
                 renderCache = cache,
                 hyperlinkDetector =
-                    SwingHyperlinkDetector { _, sink ->
-                        detectorCalls.incrementAndGet()
-                        sink.addHyperlink(
-                            lineIndex = 0,
-                            startOffset = 0,
-                            endOffset = "https://example.com".length,
-                            action = SwingHyperlinkAction.NONE,
-                        )
+                    SwingHyperlinkDetector { request, sink ->
+                        for (lineIndex in 0 until request.lineCount) {
+                            if (request.lineText(lineIndex) != "https://example.com\n") continue
+                            urlScans.incrementAndGet()
+                            sink.addHyperlink(
+                                lineIndex = lineIndex,
+                                startOffset = 0,
+                                endOffset = "https://example.com".length,
+                                action = SwingHyperlinkAction.NONE,
+                            )
+                        }
                     },
                 repaintObserved = repaintObserved,
             )
@@ -489,7 +492,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        var carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        var carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
         assertEquals(-1, carry.ids[cache.rowOffset(1)])
         assertEquals(1, carry.detectorCalls)
 
@@ -501,7 +504,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L, 0L),
             ),
         )
-        carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
 
         assertEquals(0, carry.ids[cache.rowOffset(1)])
         assertEquals(-1, carry.ids[cache.rowOffset(2)])
@@ -571,20 +574,23 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        val detectorCalls = AtomicInteger()
+        val urlScans = AtomicInteger()
         val repaintObserved = CountDownLatch(1)
         val host =
             TestDiscoveryHost(
                 renderCache = cache,
                 hyperlinkDetector =
-                    SwingHyperlinkDetector { _, sink ->
-                        detectorCalls.incrementAndGet()
-                        sink.addHyperlink(
-                            lineIndex = 0,
-                            startOffset = 0,
-                            endOffset = "https://example.com".length,
-                            action = SwingHyperlinkAction.NONE,
-                        )
+                    SwingHyperlinkDetector { request, sink ->
+                        for (lineIndex in 0 until request.lineCount) {
+                            if (request.lineText(lineIndex) != "https://example.com\n") continue
+                            urlScans.incrementAndGet()
+                            sink.addHyperlink(
+                                lineIndex = lineIndex,
+                                startOffset = 0,
+                                endOffset = "https://example.com".length,
+                                action = SwingHyperlinkAction.NONE,
+                            )
+                        }
                     },
                 repaintObserved = repaintObserved,
             )
@@ -603,7 +609,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        var carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        var carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
         assertEquals(0, carry.ids[cache.rowOffset(0)])
 
         cache.accept(
@@ -614,14 +620,14 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 lineIds = longArrayOf(0L, 0L),
             ),
         )
-        carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
+        carry = scheduleForFrameAndReadIds(controller, cache, urlScans)
 
         assertEquals(0, carry.ids[cache.rowOffset(0)])
         assertEquals(1, carry.detectorCalls)
     }
 
     @Test
-    fun `scroll does not preserve discovered links when row generation changes`() {
+    fun `scroll preserves discovered links when generation changes but text stays identical`() {
         val cache = TerminalRenderCache(24, 2)
         cache.accept(
             StaticTextFrame(
@@ -666,7 +672,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
         )
         val carry = scheduleForFrameAndReadIds(controller, cache, detectorCalls)
 
-        assertEquals(0, carry.ids[cache.rowOffset(1)])
+        assertEquals(-1, carry.ids[cache.rowOffset(1)])
         assertEquals(1, carry.detectorCalls)
     }
 
@@ -730,7 +736,7 @@ class TerminalHyperlinkDiscoveryControllerTest {
         writeText(cache, row = 1, text = "://a ")
         cache.lineWrapped[0] = true
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals(1, snapshot.request.lineCount)
         assertEquals("https://a\n", snapshot.request.lineText(0))
@@ -738,11 +744,11 @@ class TerminalHyperlinkDiscoveryControllerTest {
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 9, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 9, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[cache.rowOffset(0)])
         assertEquals(-1, ids[cache.rowOffset(0) + 4])
         assertEquals(-1, ids[cache.rowOffset(1)])
@@ -756,14 +762,14 @@ class TerminalHyperlinkDiscoveryControllerTest {
         writeText(cache, row = 0, text = "abcd")
         cache.hyperlinkIds[cache.rowOffset(0) + 1] = 7
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 4, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 4, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(7, ids[1])
         assertEquals(-1, ids[2])
@@ -784,17 +790,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         cache.flags[2] = TerminalRenderCellFlags.WIDE_TRAILING
         writeCodePoint(cache, row = 0, column = 3, codePoint = 'B'.code)
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("A\u4E2DB\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(0, ids[0])
         assertEquals(-1, ids[1])
         assertEquals(-1, ids[2])
@@ -814,17 +820,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         cache.flags[1] = TerminalRenderCellFlags.WIDE_TRAILING
         writeCodePoint(cache, row = 0, column = 2, codePoint = '!'.code)
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("\uD83D\uDE00!\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 0, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 0, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(-1, ids[1])
         assertEquals(0, ids[2])
@@ -835,17 +841,17 @@ class TerminalHyperlinkDiscoveryControllerTest {
         val cache = TerminalRenderCache(3, 1)
         cache.accept(CombiningClusterFrame())
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("e\u0301!\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNotNull(overlay)
-        val ids = overlay!!.hyperlinkIds
+        val ids = overlay!!
         assertEquals(-1, ids[0])
         assertEquals(0, ids[1])
         assertEquals(0, ids[2])
@@ -856,16 +862,47 @@ class TerminalHyperlinkDiscoveryControllerTest {
         val cache = TerminalRenderCache(2, 1)
         writeText(cache, row = 0, text = "a ")
 
-        val snapshot = TerminalHyperlinkViewportSnapshotBuilder().snapshot(cache)
+        val snapshot = TestSnapshot(cache)
 
         assertEquals("a\n", snapshot.request.lineText(0))
 
         val overlay =
             snapshot.buildOverlay(
-                listOf(TerminalDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
+                listOf(TestDetectedHyperlink(0, 1, 2, SwingHyperlinkAction.NONE)),
             )
 
         assertNull(overlay)
+    }
+
+    private data class TestDetectedHyperlink(
+        val line: Int,
+        val start: Int,
+        val end: Int,
+        val action: SwingHyperlinkAction,
+    )
+
+    private class TestSnapshot(
+        private val cache: TerminalRenderCache,
+    ) {
+        private val viewport = TerminalHyperlinkViewport().apply { update(cache) }
+        private val lines = viewport.pendingLines()
+        val request = detectionRequest(lines)
+
+        fun buildOverlay(links: List<TestDetectedHyperlink>): IntArray? {
+            val detected = List(lines.size) { ArrayList<TerminalDetectedHyperlink>() }
+            for (link in links) {
+                val end = minOf(link.end, lines[link.line].text.length - 1)
+                if (end >
+                    link.start
+                ) {
+                    detected[link.line].add(TerminalDetectedHyperlink(link.start, end, link.action, 0, lines[link.line].text.length))
+                }
+            }
+            viewport.accept(lines, detected)
+            viewport.writeOverlay(cache) { _, _, _, _ -> }
+            val ids = viewport.idsFor(cache)
+            return if (ids.any { it < 0 }) ids else null
+        }
     }
 
     private fun writeText(

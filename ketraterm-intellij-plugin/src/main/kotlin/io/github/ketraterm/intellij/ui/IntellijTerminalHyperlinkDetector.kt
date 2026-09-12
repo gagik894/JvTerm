@@ -18,12 +18,12 @@ package io.github.ketraterm.intellij.ui
 import com.intellij.execution.filters.*
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.progress.ProcessCanceledException
+import com.intellij.openapi.progress.ProgressManager
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.TextRange
 import com.intellij.psi.search.GlobalSearchScope
-import io.github.ketraterm.ui.swing.api.SwingHyperlinkAction
-import io.github.ketraterm.ui.swing.api.SwingHyperlinkDetectionRequest
-import io.github.ketraterm.ui.swing.api.SwingHyperlinkDetectionSink
-import io.github.ketraterm.ui.swing.api.SwingHyperlinkDetector
+import io.github.ketraterm.ui.swing.api.*
+import java.util.concurrent.CancellationException
 
 /**
  * IntelliJ-backed detector for visible terminal text hyperlinks.
@@ -36,37 +36,56 @@ import io.github.ketraterm.ui.swing.api.SwingHyperlinkDetector
 internal class IntellijTerminalHyperlinkDetector(
     private val project: Project,
 ) : SwingHyperlinkDetector {
+    // Console filters can carry exception/navigation context between consecutive lines.
+    override val context: SwingHyperlinkDetectionContext = SwingHyperlinkDetectionContext.VIEWPORT
+
     override fun detect(
         request: SwingHyperlinkDetectionRequest,
         sink: SwingHyperlinkDetectionSink,
     ) {
         if (project.isDisposed) return
-        ApplicationManager.getApplication().runReadAction {
-            if (project.isDisposed) return@runReadAction
-            val filter = CompositeFilter(project, defaultFilters())
-            val emittedRanges = HashSet<DetectedRangeKey>()
-            var lineIndex = 0
-            while (lineIndex < request.lineCount) {
-                applyFilter(request, sink, filter, emittedRanges, lineIndex)
-                lineIndex++
+        try {
+            ApplicationManager.getApplication().runReadAction {
+                if (project.isDisposed) return@runReadAction
+                val urlFilter = UrlFilter(project)
+                val providerFilter = CompositeFilter(project, providerFilters())
+                val emittedRanges = HashSet<DetectedRangeKey>()
+                var lineIndex = 0
+                while (lineIndex < request.lineCount) {
+                    ProgressManager.checkCanceled()
+                    applyFilter(request, sink, urlFilter, providerFilter, emittedRanges, lineIndex)
+                    lineIndex++
+                }
             }
+        } catch (
+            @Suppress("IncorrectCancellationExceptionHandling") exception: ProcessCanceledException,
+        ) {
+            // Platform cancellation must not become a cached "no links" result in the reusable worker.
+            throw CancellationException("IntelliJ hyperlink detection cancelled").apply { initCause(exception) }
         }
     }
 
     private fun applyFilter(
         request: SwingHyperlinkDetectionRequest,
         sink: SwingHyperlinkDetectionSink,
-        filter: CompositeFilter,
+        urlFilter: UrlFilter,
+        providerFilter: CompositeFilter,
         emittedRanges: MutableSet<DetectedRangeKey>,
         lineIndex: Int,
     ) {
         val lineText = request.lineText(lineIndex)
         val lineStartOffset = request.lineStartOffset(lineIndex)
         val lineEndOffset = request.lineEndOffset(lineIndex)
+        // UrlFilter precedes provider filters and returns EXIT for every match.
+        // Keep its provenance so only its text-derived actions can outlive edits elsewhere.
+        var urlResult: Filter.Result? = null
         val result =
             try {
-                filter.applyFilter(lineText, lineEndOffset)
+                urlResult = urlFilter.applyFilter(lineText, lineEndOffset)
+                urlResult ?: providerFilter.applyFilter(lineText, lineEndOffset)
             } catch (exception: ProcessCanceledException) {
+                throw exception
+            } catch (exception: CancellationException) {
                 throw exception
             } catch (_: Exception) {
                 null
@@ -82,18 +101,25 @@ internal class IntellijTerminalHyperlinkDetector(
             val rangeKey = DetectedRangeKey(lineIndex, startOffset, endOffset)
             if (!emittedRanges.add(rangeKey)) continue
 
+            val validationRange =
+                if (urlResult != null) {
+                    urlValidationRange(lineText, startOffset - lineStartOffset, endOffset - lineStartOffset)
+                } else {
+                    null
+                }
             sink.addHyperlink(
                 lineIndex = lineIndex,
                 startOffset = startOffset - lineStartOffset,
                 endOffset = endOffset - lineStartOffset,
                 action = IntellijTerminalHyperlinkAction(project, hyperlinkInfo),
+                validationStartOffset = validationRange?.startOffset ?: 0,
+                validationEndOffset = validationRange?.endOffset ?: Int.MAX_VALUE,
             )
         }
     }
 
-    private fun defaultFilters(): List<Filter> {
+    private fun providerFilters(): List<Filter> {
         val filters = ArrayList<Filter>()
-        filters += UrlFilter(project)
 
         val scope = GlobalSearchScope.allScope(project)
         val providers =
@@ -114,6 +140,8 @@ internal class IntellijTerminalHyperlinkDetector(
                     }
                 } catch (exception: ProcessCanceledException) {
                     throw exception
+                } catch (exception: CancellationException) {
+                    throw exception
                 } catch (_: Throwable) {
                     Filter.EMPTY_ARRAY
                 }
@@ -132,13 +160,30 @@ internal class IntellijTerminalHyperlinkDetector(
     )
 }
 
+/** Includes the full token and its delimiters because punctuation can extend a URL match later. */
+internal fun urlValidationRange(
+    lineText: String,
+    startOffset: Int,
+    endOffset: Int,
+): TextRange {
+    var start = startOffset
+    while (start > 0 && !isUrlTokenDelimiter(lineText[start - 1])) start--
+    if (start > 0) start--
+    var end = endOffset
+    while (end < lineText.length && !isUrlTokenDelimiter(lineText[end])) end++
+    if (end < lineText.length) end++
+    return TextRange(start, end)
+}
+
+// URLUtil's URL and file patterns stop at ASCII regex whitespace, not all Unicode whitespace.
+private fun isUrlTokenDelimiter(character: Char): Boolean = character == ' ' || character in '\t'..'\r'
+
 private class IntellijTerminalHyperlinkAction(
     private val project: Project,
     private val hyperlinkInfo: HyperlinkInfo,
 ) : SwingHyperlinkAction {
     override fun open(): Boolean {
-        if (project.isDisposed) return false
-        return try {
+        return !project.isDisposed && try {
             hyperlinkInfo.navigate(project)
             true
         } catch (_: Exception) {
