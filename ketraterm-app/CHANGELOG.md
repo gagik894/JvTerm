@@ -1,5 +1,9 @@
 # KetraTerm Standalone Changelog
 
+## [Unreleased]
+
+- Improved link underlines and kept hover highlights consistent across wrapped lines and output updates.
+
 ## [0.2.2] - 2026-09-11
 
 - Fixed alignment of Hebrew, Arabic, and mixed-direction text with cell backgrounds, the cursor, selection and search highlights, and mouse targets.
