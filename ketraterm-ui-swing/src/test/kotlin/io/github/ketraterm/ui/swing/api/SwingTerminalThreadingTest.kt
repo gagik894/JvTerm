@@ -452,20 +452,25 @@ class SwingTerminalThreadingTest {
 
     @Test
     fun `unrelated and unchanged settings preserve application palette and cursor`() {
-        val session = testSession()
+        val session =
+            TerminalSession.create(
+                terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5),
+                connector = NoOpConnector,
+            )
         var settings = SwingSettings()
         val component = SwingTerminal(settingsProvider = { settings })
         try {
             edtCall {
                 component.bind(session)
-                session.terminal.setCursorShape(TerminalRenderCursorShape.BAR)
-                session.terminal.setPaletteColor(1, 0xFF123456.toInt())
+                // Apply application overrides through the same synchronization boundary as live output.
+                val output = "\u001B[6 q\u001B]4;1;rgb:12/34/56\u0007".toByteArray(Charsets.US_ASCII)
+                session.onBytes(output, 0, output.size)
 
                 component.reloadSettings()
                 settings = settings.copy(visualBellEnabled = !settings.visualBellEnabled)
                 component.reloadSettings()
 
-                (session.terminal as TerminalRenderFrameReader).readRenderFrame { frame ->
+                session.readRenderFrame { frame ->
                     assertEquals(TerminalRenderCursorShape.BAR, frame.cursor.shape)
                     assertEquals(0xFF123456.toInt(), frame.palette.indexedColor(1))
                 }
@@ -478,19 +483,27 @@ class SwingTerminalThreadingTest {
 
     @Test
     fun `changed theme and cursor preferences replace application overrides`() {
-        val session = testSession()
+        val session =
+            TerminalSession.create(
+                terminal = TerminalBuffers.create(width = 3, height = 1, maxHistory = 5),
+                connector = NoOpConnector,
+            )
         var settings = SwingSettings()
         val component = SwingTerminal(settingsProvider = { settings })
         try {
             edtCall {
                 component.bind(session)
-                session.terminal.setCursorShape(TerminalRenderCursorShape.BAR)
-                session.terminal.setPaletteColor(1, 0xFF123456.toInt())
+                val output = "\u001B[6 q\u001B]4;1;rgb:12/34/56\u0007".toByteArray(Charsets.US_ASCII)
+                session.onBytes(output, 0, output.size)
+                session.readRenderFrame { frame ->
+                    assertEquals(TerminalRenderCursorShape.BAR, frame.cursor.shape)
+                    assertEquals(0xFF123456.toInt(), frame.palette.indexedColor(1))
+                }
                 settings = settings.copy(palette = TerminalTheme.NORD.createPalette(), cursorShape = TerminalRenderCursorShape.UNDERLINE)
 
                 component.reloadSettings()
 
-                (session.terminal as TerminalRenderFrameReader).readRenderFrame { frame ->
+                session.readRenderFrame { frame ->
                     assertEquals(settings.cursorShape, frame.cursor.shape)
                     assertEquals(settings.palette, frame.palette)
                 }
