@@ -29,7 +29,7 @@ dependencies {
     implementation(project(":ketraterm-parser"))
     implementation(project(":ketraterm-transport-api"))
     testImplementation(kotlin("test"))
-    testImplementation("org.junit.jupiter:junit-jupiter:6.1.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:6.1.3")
 }
 
 val xtermOracleDirectory = rootProject.layout.projectDirectory.dir("tools/xterm-oracle")
