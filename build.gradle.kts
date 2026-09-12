@@ -21,7 +21,7 @@ plugins {
     id("com.vanniktech.maven.publish") version "0.37.0" apply false
 }
 
-extra["kotlinxCoroutinesVersion"] = "1.10.2"
+extra["kotlinxCoroutinesVersion"] = "1.11.0"
 
 repositories {
     mavenCentral()
