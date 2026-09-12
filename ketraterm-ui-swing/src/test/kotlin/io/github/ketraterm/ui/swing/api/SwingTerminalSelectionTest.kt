@@ -52,6 +52,63 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.swing.SwingUtilities
 
 class SwingTerminalSelectionTest {
+    @Test
+    fun `published frames reconcile hover at a stationary pointer`() {
+        fun frame(
+            generation: Long,
+            id: Int,
+        ): TestRenderFrame =
+            object : TestRenderFrame(
+                arrayOf(Array(8) { TestCell('x'.code, flags = TerminalRenderCellFlags.CODEPOINT, hyperlinkId = id) }),
+            ) {
+                override val frameGeneration = generation
+
+                override fun lineGeneration(row: Int) = generation
+            }
+        val initial = frame(1L, 7)
+        var currentFrame = initial
+        val dispatcher = StandardTestDispatcher()
+        val reader =
+            object : TerminalRenderFrameReader {
+                override fun readRenderFrame(consumer: TerminalRenderFrameConsumer) = consumer.accept(currentFrame)
+            }
+        val session =
+            testSession(
+                initial,
+                renderReader = reader,
+                workerDispatcher = dispatcher,
+                hyperlinkResolver = TerminalHyperlinkResolver { "https://example.com" },
+            )
+
+        fun publish(
+            generation: Long,
+            id: Int,
+        ) {
+            currentFrame = frame(generation, id)
+            session.requestRender(0)
+            dispatcher.scheduler.advanceUntilIdle()
+        }
+        SwingUtilities.invokeAndWait {
+            val component =
+                createComponent(settingsProvider = { SwingSettings(padding = SwingPadding(), shellIntegrationDecorationGutterWidth = 0) })
+            component.setSize(120, 40)
+            component.bind(session)
+            dispatcher.scheduler.advanceUntilIdle()
+            val move = MouseEvent(component, MouseEvent.MOUSE_MOVED, 0L, InputEvent.CTRL_DOWN_MASK, 1, 1, 0, false)
+            component.mouseMotionListeners.forEach { it.mouseMoved(move) }
+            assertEquals(java.awt.Cursor.HAND_CURSOR, component.cursor.type)
+            publish(2L, 8)
+            assertEquals(java.awt.Cursor.HAND_CURSOR, component.cursor.type)
+            publish(3L, 0)
+            assertEquals(java.awt.Cursor.DEFAULT_CURSOR, component.cursor.type)
+            publish(4L, 9)
+            assertEquals(java.awt.Cursor.HAND_CURSOR, component.cursor.type)
+            component.mouseListeners.forEach { it.mouseExited(move) }
+            publish(5L, 10)
+            assertEquals(java.awt.Cursor.DEFAULT_CURSOR, component.cursor.type)
+        }
+    }
+
     private val components = ArrayList<SwingTerminal>()
     private val sessions = ArrayList<TerminalSession>()
 

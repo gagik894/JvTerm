@@ -108,6 +108,7 @@ For a detailed backlog of gaps and intentional non-goals, see the [Terminal Feat
 
 ## 7. Embedding & Swing UI
 
+- **Hyperlink Presentation**: Explicit OSC 8 links use a dotted resting underline; detected URLs and file references gain an underline only on hover. Hover uses a solid underline and Ctrl activation retains the existing accent foreground. Terminal-authored SGR underline styles and colors take precedence over the UI underline. Wrapped links share one hover span across soft-wrapped rows.
 - **PTY Process Integration**: Spawns default platform shells using Pty4J with Windows ConPTY support and prompt resizing.
 - **Custom Line Height**: Dynamic line spacing/height scaling (from 0.5x to 3.0x) supported in settings and rendered in the Swing UI.
 - **Settings Publication**: Standalone applies one validated configuration snapshot, atomically replacing its TOML file off the EDT before publishing the update. Save failures leave the active configuration unchanged and keep the dialog draft available for retry. IntelliJ normalizes both settings Apply and platform state reloads at one publication boundary and notifies existing consumers. Equal snapshots do no work. Hidden suggestion preferences, configured clipboard allowlists, and unchanged shell command spelling survive unrelated edits; built-in theme identifiers are shared by both products.

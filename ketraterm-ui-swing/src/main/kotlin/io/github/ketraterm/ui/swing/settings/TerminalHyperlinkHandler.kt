@@ -22,8 +22,8 @@ import java.util.*
 /**
  * Host-facing policy for explicit terminal hyperlink activation.
  *
- * Swing UI resolves OSC 8 metadata only after a Ctrl-left-click on a linked
- * cell. Hosts can replace this handler to show prompts, route links through an
+ * Swing UI invokes this handler only after explicit activation.
+ * Hosts can replace it to show prompts, route links through an
  * IDE, audit activations, or deny all links in locked-down environments.
  */
 fun interface TerminalHyperlinkHandler {
@@ -75,18 +75,17 @@ private object SystemTerminalHyperlinkHandler : TerminalHyperlinkHandler {
             } catch (_: IllegalArgumentException) {
                 return false
             }
-        if (!isAllowedScheme(parsed.scheme)) return false
-
-        return try {
-            desktop.browse(parsed)
-            true
-        } catch (_: SecurityException) {
-            false
-        } catch (_: UnsupportedOperationException) {
-            false
-        } catch (_: java.io.IOException) {
-            false
-        }
+        return isAllowedScheme(parsed.scheme) &&
+            try {
+                desktop.browse(parsed)
+                true
+            } catch (_: SecurityException) {
+                false
+            } catch (_: UnsupportedOperationException) {
+                false
+            } catch (_: java.io.IOException) {
+                false
+            }
     }
 
     private fun isAllowedScheme(scheme: String?): Boolean =

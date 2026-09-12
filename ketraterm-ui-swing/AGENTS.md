@@ -210,3 +210,8 @@ Tests should cover:
 - render cache resize and generation-based repaint behavior.
 
 Avoid tests that require a real PTY or IntelliJ runtime.
+
+Benchmarks of internal helpers belong in `src/jmh`, associated with this module's
+main Kotlin compilation. The `benchmarkElements` configuration exports only the
+benchmark classes to `ketraterm-benchmarks`, which owns JMH harness generation and
+execution. Validate them with `./gradlew :ketraterm-benchmarks:jmhJar`.

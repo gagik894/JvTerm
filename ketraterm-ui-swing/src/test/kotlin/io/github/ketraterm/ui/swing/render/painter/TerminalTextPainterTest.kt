@@ -119,7 +119,7 @@ class TerminalTextPainterTest {
             val secondUnderlineY = fixture.metrics.underlineY + 1
             for (column in 0..2) {
                 val x = column * fixture.metrics.cellWidth
-                assertEquals(TEST_RED, fixture.image.getRGB(x, fixture.metrics.underlineY))
+                assertEquals(if (column == 1 || x % 3 == 0) TEST_RED else 0, fixture.image.getRGB(x, fixture.metrics.underlineY))
                 assertEquals(if (column == 1) TEST_RED else 0, fixture.image.getRGB(x, secondUnderlineY))
             }
         } finally {
@@ -566,7 +566,7 @@ class TerminalTextPainterTest {
     @Nested
     inner class HyperlinkRendering {
         @Test
-        fun `hyperlinks get solid underline by default`() {
+        fun `OSC8 hyperlinks get dotted underline by default`() {
             val fixture = fixture()
             val cache =
                 renderCache(
@@ -586,7 +586,8 @@ class TerminalTextPainterTest {
             fixture.paintRow(cache)
 
             assertEquals(TEST_RED, fixture.image.getRGB(0, fixture.metrics.underlineY))
-            assertEquals(TEST_RED, fixture.image.getRGB(1, fixture.metrics.underlineY))
+            assertEquals(0, fixture.image.getRGB(1, fixture.metrics.underlineY))
+            assertEquals(TEST_RED, fixture.image.getRGB(3, fixture.metrics.underlineY))
         }
 
         @Test
@@ -645,7 +646,9 @@ class TerminalTextPainterTest {
             )
 
             assertEquals(activationBlue, fixture.image.getRGB(0, fixture.metrics.underlineY))
-            assertEquals(TEST_RED, fixture.image.getRGB(fixture.metrics.cellWidth, fixture.metrics.underlineY))
+            for (x in fixture.metrics.cellWidth until fixture.metrics.cellWidth * 2) {
+                assertEquals(if (x % 3 == 0) TEST_RED else 0, fixture.image.getRGB(x, fixture.metrics.underlineY))
+            }
         }
 
         @Test
@@ -685,7 +688,9 @@ class TerminalTextPainterTest {
             )
 
             assertEquals(activationBlue, fixture.image.getRGB(0, fixture.metrics.underlineY))
-            assertEquals(TEST_RED, fixture.image.getRGB(fixture.metrics.cellWidth * 2, fixture.metrics.underlineY))
+            for (x in fixture.metrics.cellWidth * 2 until fixture.metrics.cellWidth * 3) {
+                assertEquals(if (x % 3 == 0) TEST_RED else 0, fixture.image.getRGB(x, fixture.metrics.underlineY))
+            }
         }
 
         @Test

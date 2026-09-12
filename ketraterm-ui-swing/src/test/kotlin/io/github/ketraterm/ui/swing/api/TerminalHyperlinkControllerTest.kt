@@ -42,6 +42,80 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.swing.JButton
 
 class TerminalHyperlinkControllerTest {
+    @Test
+    fun `stationary hover follows replaced spans and retains modifiers while detection is pending`() {
+        val cache = TerminalRenderCache(8, 2)
+        val host = FakeHyperlinkHost(cache, null, SwingHostServices(), mapOf(-1 to { true }, -2 to { true }))
+        val controller = TerminalHyperlinkController(host)
+        controller.handleMouseMoved(MouseEvent(JButton(), MouseEvent.MOUSE_MOVED, 0L, InputEvent.CTRL_DOWN_MASK, 15, 5, 0, false))
+        assertEquals(0, controller.hoveredHyperlinkId)
+
+        cache.hyperlinkIds.fill(-1, 1, 11)
+        cache.lineWrapped[0] = true
+        controller.refreshHyperlinkHover()
+        assertEquals(-1, controller.hoveredHyperlinkId)
+        assertEquals(0, controller.hoveredHyperlinkStartRow)
+        assertEquals(1, controller.hoveredHyperlinkStartColumn)
+        assertEquals(1, controller.hoveredHyperlinkEndRow)
+        assertEquals(3, controller.hoveredHyperlinkEndColumn)
+        assertTrue(controller.hyperlinkActivationHover)
+        host.repaintSpans.clear()
+        controller.refreshHyperlinkHover()
+        assertTrue(host.repaintSpans.isEmpty(), "Unchanged hover must not schedule extra painting")
+
+        cache.hyperlinkIds.fill(0)
+        cache.hyperlinkIds.fill(-2, 0, 4)
+        cache.lineWrapped[0] = false
+        controller.refreshHyperlinkHover()
+        assertEquals(-2, controller.hoveredHyperlinkId)
+        assertEquals(0, controller.hoveredHyperlinkStartColumn)
+        assertEquals(0, controller.hoveredHyperlinkEndRow)
+        assertEquals(4, controller.hoveredHyperlinkEndColumn)
+
+        cache.hyperlinkIds.fill(0)
+        cache.hyperlinkIds[cache.rowOffset(1)] = -2
+        controller.refreshHyperlinkHover()
+        assertEquals(0, controller.hoveredHyperlinkId, "A link moved away from the pointer must not stay hovered")
+        assertEquals(Cursor.DEFAULT_CURSOR, host.cursor.type)
+        controller.updateHyperlinkActivationHover(false)
+        cache.hyperlinkIds[1] = -1
+        controller.refreshHyperlinkHover()
+        assertEquals(-1, controller.hoveredHyperlinkId)
+        assertEquals(false, controller.hyperlinkActivationHover)
+
+        controller.handleMouseExited()
+        controller.refreshHyperlinkHover()
+        assertEquals(0, controller.hoveredHyperlinkId, "Publication after mouse exit must not revive hover")
+        controller.handleMouseMoved(MouseEvent(JButton(), MouseEvent.MOUSE_MOVED, 0L, 0, 15, 5, 0, false))
+        controller.clearHyperlinkHover()
+        controller.refreshHyperlinkHover()
+        assertEquals(0, controller.hoveredHyperlinkId, "Lifecycle reset must forget the old pointer")
+    }
+
+    @Test
+    fun `OSC8 hover survives progress rewrites and clears when its cells are erased`() {
+        Osc8PipelineFixture(20, 2).use { fixture ->
+            fixture.accept("\u001b]8;;https://example.com\u001b\\docs\u001b]8;;\u001b\\\r\n0%")
+            fixture.refresh()
+            fixture.hover(1, 0, activationHover = true)
+            val id = fixture.controller.hoveredHyperlinkId
+            assertTrue(id > 0)
+            fixture.host.repaintSpans.clear()
+            repeat(3) { progress ->
+                fixture.accept("\r\u001b[2K$progress%")
+                fixture.refresh()
+                fixture.controller.refreshHyperlinkHover()
+                fixture.assertHoverSpan(id, 0, 0, 0, 4)
+                assertTrue(fixture.controller.hyperlinkActivationHover)
+            }
+            assertTrue(fixture.host.repaintSpans.isEmpty())
+            fixture.accept("\u001b[1;1H\u001b[2K")
+            fixture.refresh()
+            fixture.controller.refreshHyperlinkHover()
+            fixture.assertNoHover()
+        }
+    }
+
     private data class RepaintSpan(
         val startRow: Int,
         val startColumn: Int,

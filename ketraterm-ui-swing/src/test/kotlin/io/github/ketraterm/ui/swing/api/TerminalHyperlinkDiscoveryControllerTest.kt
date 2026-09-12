@@ -112,13 +112,20 @@ class TerminalHyperlinkDiscoveryControllerTest {
                 }
             }
         val hover = TerminalHyperlinkController(hoverHost)
+        host.onHyperlinksChanged = hover::refreshHyperlinkHover
         val source = JButton()
         val style = TerminalTextRunStyle()
         val activationForeground = 0xFF4DA3FF.toInt()
         try {
-            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            SwingUtilities.invokeAndWait {
+                hover.handleMouseMoved(MouseEvent(source, MouseEvent.MOUSE_MOVED, 0L, MouseEvent.CTRL_DOWN_MASK, 4, 1, 0, false))
+                assertEquals(0, hover.hoveredHyperlinkId)
+                controller.scheduleForFrame()
+            }
             awaitRepaintAndDrainEdt(repaintObserved)
             SwingUtilities.invokeAndWait {
+                assertTrue(hover.hoveredHyperlinkId < 0, "Async detection must activate hover without another mouse event")
+                assertTrue(hover.hyperlinkActivationHover)
                 repeat(3) { iteration ->
                     cache.accept(frame(iteration + 2L))
                     controller.scheduleForFrame()
@@ -791,6 +798,10 @@ class TerminalHyperlinkDiscoveryControllerTest {
         override val hyperlinkDetector: SwingHyperlinkDetector,
         private val repaintObserved: CountDownLatch = CountDownLatch(0),
     ) : TerminalHyperlinkDiscoveryHost {
+        var onHyperlinksChanged: () -> Unit = {}
+
+        override fun hyperlinksChanged() = onHyperlinksChanged()
+
         override fun repaintHyperlinkSpan(
             startRow: Int,
             startColumn: Int,

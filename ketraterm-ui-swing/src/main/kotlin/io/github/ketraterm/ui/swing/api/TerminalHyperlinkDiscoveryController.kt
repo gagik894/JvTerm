@@ -25,6 +25,9 @@ internal interface TerminalHyperlinkDiscoveryHost {
     val renderCache: TerminalRenderCache
     val hyperlinkDetector: SwingHyperlinkDetector
 
+    /** Reconciles interaction state after asynchronously detected link IDs have been installed. */
+    fun hyperlinksChanged()
+
     fun repaintHyperlinkSpan(
         startRow: Int,
         startColumn: Int,
@@ -143,6 +146,7 @@ internal class TerminalHyperlinkDiscoveryController(
         val nextIds = candidate?.hyperlinkIds ?: cache.hyperlinkIds
         repaintChangedHyperlinkCells(cache, previousIds, nextIds)
         overlay.replace(key, candidate, cache)
+        host.hyperlinksChanged()
     }
 
     private fun hydrateOverlayForCurrentFrame(cache: TerminalRenderCache) {
