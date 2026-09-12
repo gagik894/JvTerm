@@ -37,6 +37,144 @@ import kotlin.coroutines.CoroutineContext
 
 class TerminalHyperlinkDiscoveryControllerTest {
     @ParameterizedTest
+    @CsvSource("true, 0", "true, 1", "true, 2", "false, 0", "false, 1", "false, 2")
+    fun `editing a wrapped url removes its entire old action before detection finishes`(
+        stableLineIds: Boolean,
+        changedRow: Int,
+    ) {
+        val originalRows = arrayOf("https://example.com/abcd", "abcdefghijklmnopqrstuvwx", "old", "https://other.example")
+        val changedRows = originalRows.copyOf().apply { this[changedRow] = this[changedRow].dropLast(1) + "z" }
+        val originalUrl = originalRows.take(3).joinToString("")
+        val changedUrl = changedRows.take(3).joinToString("")
+        val cache = TerminalRenderCache(24, 4)
+
+        fun frame(generation: Long) =
+            StaticTextFrame(
+                frameGeneration = generation,
+                structureGeneration = 1L,
+                rowTexts = if (generation == 1L) originalRows else changedRows,
+                lineIds = if (stableLineIds) longArrayOf(1L, 2L, 3L, 4L) else LongArray(4),
+                lineGenerations = LongArray(4) { if (generation > 1L && it == changedRow) 2L else 1L },
+                wrappedRows = booleanArrayOf(true, true, false, false),
+            )
+        cache.accept(frame(1L))
+        val opened = ArrayList<String>()
+        val firstDetection = CountDownLatch(1)
+        val nextDetection = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { request, sink ->
+                    for (line in 0 until request.lineCount) {
+                        val url = request.lineText(line).trimEnd('\n')
+                        sink.addHyperlink(line, 0, url.length, SwingHyperlinkAction { opened.add(url) })
+                    }
+                },
+            )
+        host.onHyperlinksChanged = { firstDetection.countDown() }
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        try {
+            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            awaitRepaintAndDrainEdt(firstDetection)
+            SwingUtilities.invokeAndWait {
+                assertTrue(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(0, 0, cache), cache))
+                assertEquals(listOf(originalUrl), opened)
+                opened.clear()
+                host.onHyperlinksChanged = { nextDetection.countDown() }
+                for (generation in 2L..3L) {
+                    cache.accept(frame(generation))
+                    controller.scheduleForFrame()
+                    for (row in 0..2) {
+                        for (column in changedRows[row].indices) {
+                            assertEquals(0, controller.hyperlinkIdAt(row, column, cache), "stale URL at $row:$column")
+                        }
+                        assertFalse(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(row, 0, cache), cache))
+                    }
+                    assertTrue(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(3, 0, cache), cache))
+                }
+                assertEquals(listOf(originalRows[3], originalRows[3]), opened, "Unrelated links remain usable")
+                opened.clear()
+            }
+            awaitRepaintAndDrainEdt(nextDetection)
+            SwingUtilities.invokeAndWait {
+                val id = controller.hyperlinkIdAt(0, 0, cache)
+                assertTrue(id < 0)
+                for (row in 0..2) {
+                    assertEquals(id, controller.hyperlinkIdAt(row, 0, cache))
+                    assertTrue(controller.openDiscoveredHyperlink(id, cache))
+                }
+                assertEquals(List(3) { changedUrl }, opened)
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource("true, false", "false, false", "true, true", "false, true")
+    fun `changed logical line context invalidates links even outside the edited row`(
+        stableLineIds: Boolean,
+        splitLine: Boolean,
+    ) {
+        val prefix = "context".padEnd(24)
+        val url = "https://example.com"
+        val cache = TerminalRenderCache(24, 2)
+        val lineIds = if (stableLineIds) longArrayOf(1L, 2L) else LongArray(2)
+        cache.accept(
+            StaticTextFrame(
+                frameGeneration = 1L,
+                structureGeneration = 1L,
+                rowTexts = arrayOf(prefix, url),
+                lineIds = lineIds,
+                wrappedRows = booleanArrayOf(true, false),
+            ),
+        )
+        var opened = false
+        val published = CountDownLatch(1)
+        val host =
+            TestDiscoveryHost(
+                cache,
+                SwingHyperlinkDetector { _, sink ->
+                    sink.addHyperlink(
+                        0,
+                        prefix.length,
+                        prefix.length + url.length,
+                        SwingHyperlinkAction {
+                            opened = true
+                            true
+                        },
+                    )
+                },
+            )
+        host.onHyperlinksChanged = { published.countDown() }
+        val controller = TerminalHyperlinkDiscoveryController(host, testScope())
+        try {
+            SwingUtilities.invokeAndWait { controller.scheduleForFrame() }
+            awaitRepaintAndDrainEdt(published)
+            SwingUtilities.invokeAndWait {
+                assertTrue(controller.hyperlinkIdAt(1, 0, cache) < 0)
+                cache.accept(
+                    StaticTextFrame(
+                        frameGeneration = 2L,
+                        structureGeneration = 1L,
+                        rowTexts = arrayOf(if (splitLine) prefix else "changed".padEnd(24), url),
+                        lineIds = lineIds,
+                        lineGenerations = longArrayOf(2L, 1L),
+                        wrappedRows = booleanArrayOf(!splitLine, false),
+                    ),
+                )
+                controller.scheduleForFrame()
+                assertEquals(0, controller.hyperlinkIdAt(1, 0, cache))
+                assertFalse(controller.openDiscoveredHyperlink(controller.hyperlinkIdAt(1, 0, cache), cache))
+                assertFalse(opened)
+                controller.dispose()
+            }
+        } finally {
+            SwingUtilities.invokeAndWait { controller.dispose() }
+        }
+    }
+
+    @ParameterizedTest
     @CsvSource("true, false", "false, false", "true, true", "false, true")
     fun `frame carry keeps wrapped hover and activation intact without merging distinct links`(
         stableLineIds: Boolean,

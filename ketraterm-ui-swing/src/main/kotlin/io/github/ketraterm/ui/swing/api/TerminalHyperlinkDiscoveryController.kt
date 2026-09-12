@@ -273,8 +273,9 @@ private class TerminalHyperlinkOverlay {
     private var key: TerminalHyperlinkFrameKey? = null
     private var hyperlinkIds: IntArray = IntArray(0)
     private var actions: Array<SwingHyperlinkAction> = emptyArray()
-    private var rowEntries: Array<TerminalHyperlinkRowEntry?> = emptyArray()
+    private var rowEntries: Array<TerminalHyperlinkRowEntry> = emptyArray()
     private var carriedIds = IntArray(0)
+    private var matchedRows = IntArray(0)
 
     fun clear() {
         key = null
@@ -328,10 +329,12 @@ private class TerminalHyperlinkOverlay {
         // Action identity cannot identify a link: detectors may reuse actions for distinct matches.
         if (carriedIds.size < actions.size) carriedIds = IntArray(actions.size)
         carriedIds.fill(NO_HYPERLINK_ID, 0, actions.size)
+        matchLogicalLines(cache)
         var targetRow = 0
         while (targetRow < cache.rows) {
-            val rowEntry = matchingRowEntry(cache, targetRow)
-            if (rowEntry != null) {
+            val sourceRow = matchedRows[targetRow]
+            if (sourceRow >= 0) {
+                val rowEntry = rowEntries[sourceRow]
                 val targetOffset = cache.rowOffset(targetRow)
                 for (run in rowEntry.runs) {
                     val actionIndex = -run.hyperlinkId - 1
@@ -369,25 +372,46 @@ private class TerminalHyperlinkOverlay {
     private fun buildRowEntries(
         candidate: TerminalHyperlinkOverlayCandidate,
         cache: TerminalRenderCache,
-    ): Array<TerminalHyperlinkRowEntry?> {
-        val entries = arrayOfNulls<TerminalHyperlinkRowEntry>(cache.rows)
-        var row = 0
-        while (row < cache.rows) {
-            val runs = runsForRow(candidate, cache, row)
-            if (runs.isNotEmpty()) {
-                entries[row] =
-                    TerminalHyperlinkRowEntry(
-                        lineId = cache.lineIds[row],
-                        lineGeneration = cache.lineGenerations[row],
-                        fingerprint = rowFingerprint(cache, row),
-                        wrapped = cache.lineWrapped[row],
-                        activeBuffer = cache.activeBuffer,
-                        runs = runs,
-                    )
-            }
-            row++
+    ): Array<TerminalHyperlinkRowEntry> =
+        // Detectors see whole logical lines, including rows outside their returned link spans.
+        Array(cache.rows) { row ->
+            TerminalHyperlinkRowEntry(
+                lineId = cache.lineIds[row],
+                lineGeneration = cache.lineGenerations[row],
+                fingerprint = rowFingerprint(cache, row),
+                wrapped = cache.lineWrapped[row],
+                activeBuffer = cache.activeBuffer,
+                runs = runsForRow(candidate, cache, row),
+            )
         }
-        return entries
+
+    private fun matchLogicalLines(cache: TerminalRenderCache) {
+        if (matchedRows.size < cache.rows) matchedRows = IntArray(cache.rows)
+        for (row in 0 until cache.rows) {
+            matchedRows[row] = matchingRowIndex(cache, row)
+        }
+
+        var startRow = 0
+        while (startRow < cache.rows) {
+            var endRow = startRow + 1
+            while (endRow < cache.rows && cache.lineWrapped[endRow - 1]) endRow++
+
+            val sourceStart = matchedRows[startRow]
+            val sourceEnd = sourceStart + endRow - startRow
+            var unchanged =
+                sourceStart >= 0 &&
+                    sourceEnd <= rowEntries.size &&
+                    (sourceStart == 0 || !rowEntries[sourceStart - 1].wrapped) &&
+                    (sourceEnd == rowEntries.size || !rowEntries[sourceEnd - 1].wrapped)
+            var row = startRow
+            while (unchanged && row < endRow) {
+                unchanged = matchedRows[row] == sourceStart + row - startRow
+                row++
+            }
+            // A surviving prefix must never retain an action built from an edited suffix.
+            if (!unchanged) matchedRows.fill(-1, startRow, endRow)
+            startRow = endRow
+        }
     }
 
     private fun runsForRow(
@@ -420,10 +444,10 @@ private class TerminalHyperlinkOverlay {
         return runs?.toTypedArray() ?: EMPTY_ROW_RUNS
     }
 
-    private fun matchingRowEntry(
+    private fun matchingRowIndex(
         cache: TerminalRenderCache,
         targetRow: Int,
-    ): TerminalHyperlinkRowEntry? {
+    ): Int {
         val lineId = cache.lineIds[targetRow]
         if (lineId != NO_LINE_ID) {
             val lineGeneration = cache.lineGenerations[targetRow]
@@ -431,42 +455,38 @@ private class TerminalHyperlinkOverlay {
             var index = rowEntries.size - 1
             while (index >= 0) {
                 val entry = rowEntries[index]
-                if (entry != null) {
-                    if (
-                        entry.activeBuffer == cache.activeBuffer &&
-                        entry.lineId == lineId &&
-                        entry.lineGeneration == lineGeneration &&
-                        entry.wrapped == wrapped
-                    ) {
-                        return entry
-                    }
+                if (
+                    entry.activeBuffer == cache.activeBuffer &&
+                    entry.lineId == lineId &&
+                    entry.lineGeneration == lineGeneration &&
+                    entry.wrapped == wrapped
+                ) {
+                    return index
                 }
                 index--
             }
-            return null
+            return -1
         }
 
         val fingerprint = rowFingerprint(cache, targetRow)
-        if (fingerprint == EMPTY_ROW_FINGERPRINT) return null
+        if (fingerprint == EMPTY_ROW_FINGERPRINT) return -1
         val wrapped = cache.lineWrapped[targetRow]
-        var matchedEntry: TerminalHyperlinkRowEntry? = null
+        var matchedIndex = -1
         var index = rowEntries.size - 1
         while (index >= 0) {
             val entry = rowEntries[index]
-            if (entry != null) {
-                if (
-                    entry.activeBuffer == cache.activeBuffer &&
-                    entry.lineId == NO_LINE_ID &&
-                    entry.fingerprint == fingerprint &&
-                    entry.wrapped == wrapped
-                ) {
-                    if (matchedEntry != null) return null
-                    matchedEntry = entry
-                }
+            if (
+                entry.activeBuffer == cache.activeBuffer &&
+                entry.lineId == NO_LINE_ID &&
+                entry.fingerprint == fingerprint &&
+                entry.wrapped == wrapped
+            ) {
+                if (matchedIndex >= 0) return -1
+                matchedIndex = index
             }
             index--
         }
-        return matchedEntry
+        return matchedIndex
     }
 
     private companion object {
